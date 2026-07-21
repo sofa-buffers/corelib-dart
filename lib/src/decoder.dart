@@ -500,13 +500,252 @@ class Decoder {
     }
   }
 
-  /// One-shot decode of a whole [bytes] buffer into [visitor] (CORELIB_PLAN
-  /// §6.1 convenience). A thin wrapper over a single [feed].
+  /// One-shot decode of a whole, already-in-memory [bytes] buffer into
+  /// [visitor] (CORELIB_PLAN §6.1 convenience). This is the common case
+  /// (`deserialize`, any message that fits in memory), so it runs the fast
+  /// **contiguous** path — advancing an index over the buffer rather than the
+  /// per-byte streaming state machine — for a large decode speed-up. It
+  /// produces byte-identical visitor calls and the same [DecodeStatus] as
+  /// feeding the same bytes through [feed]; use a streaming [Decoder] + [feed]
+  /// when the input arrives in chunks.
   static DecodeStatus decode(
     List<int> bytes,
     MessageVisitor visitor, {
     DecoderLimits limits = const DecoderLimits(),
   }) {
-    return Decoder(visitor, limits: limits).feed(bytes);
+    final buf = bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
+    return _ContiguousDecoder(buf, limits).run(visitor);
+  }
+}
+
+/// Fast one-shot decoder for a fully-contiguous buffer. Advances an index over
+/// the bytes (the protobuf-style "advance a pointer over a contiguous buffer"),
+/// with no per-byte state machine and no `Decoder`/frame allocation. Recursive
+/// descent over sequences. Semantics — decode outcomes, INVALID-over-INCOMPLETE
+/// precedence, skip-without-validation, receiver limits — match [Decoder.feed]
+/// exactly (both are covered by the same conformance vectors).
+class _ContiguousDecoder {
+  _ContiguousDecoder(this._buf, this._limits) : _len = _buf.length;
+
+  final Uint8List _buf;
+  final DecoderLimits _limits;
+  final int _len;
+  int _pos = 0;
+  // `complete` doubles as the "still ok" sentinel while walking.
+  DecodeStatus _st = DecodeStatus.complete;
+
+  DecodeStatus run(MessageVisitor root) {
+    _walk(root, 0);
+    return _st;
+  }
+
+  // Reads an unsigned LEB128 varint. On end-of-buffer sets INCOMPLETE; on an
+  // overlong (>64-bit) varint sets INVALID. Value valid only when `_st` stays
+  // `complete`.
+  int _uvarint() {
+    var v = 0;
+    var shift = 0;
+    while (true) {
+      if (_pos >= _len) {
+        _st = DecodeStatus.incomplete;
+        return 0;
+      }
+      final b = _buf[_pos++];
+      if (shift >= 63) {
+        if (shift > 63 || (b & 0x80) != 0 || (b & 0x7f) > 0x01) {
+          _st = DecodeStatus.invalid;
+          return 0;
+        }
+      }
+      v |= (b & 0x7f) << shift;
+      if ((b & 0x80) == 0) return v;
+      shift += 7;
+    }
+  }
+
+  void _walk(MessageVisitor? vis, int depth) {
+    while (_pos < _len) {
+      final header = _uvarint();
+      if (_st != DecodeStatus.complete) return;
+      final type = header & 0x7;
+      final id = header >>> 3;
+      switch (type) {
+        case WireType.unsigned:
+          final readU = vis != null && vis.shouldRead(id, type);
+          final val = _uvarint();
+          if (_st != DecodeStatus.complete) return;
+          if (readU) vis.onUnsigned(id, val);
+          break;
+        case WireType.signed:
+          final readS = vis != null && vis.shouldRead(id, type);
+          final raw = _uvarint();
+          if (_st != DecodeStatus.complete) return;
+          if (readS) vis.onSigned(id, (raw >>> 1) ^ -(raw & 1));
+          break;
+        case WireType.fixlen:
+          if (!_fixlen(vis, id, vis != null && vis.shouldRead(id, type))) {
+            return;
+          }
+          break;
+        case WireType.arrayUnsigned:
+        case WireType.arraySigned:
+          if (!_intArray(
+              vis, id, type, vis != null && vis.shouldRead(id, type))) {
+            return;
+          }
+          break;
+        case WireType.arrayFixlen:
+          if (!_fixArray(vis, id, vis != null && vis.shouldRead(id, type))) {
+            return;
+          }
+          break;
+        case WireType.sequenceStart:
+          if (depth >= maxDepth) {
+            _st = DecodeStatus.invalid;
+            return;
+          }
+          final child = vis?.onSequenceStart(id);
+          _walk(child, depth + 1);
+          if (_st != DecodeStatus.complete) return;
+          break;
+        case WireType.sequenceEnd:
+          if (depth == 0) {
+            _st = DecodeStatus.invalid; // unbalanced end, no open sequence
+            return;
+          }
+          vis?.onSequenceEnd();
+          return; // hand control back to the parent scope
+      }
+    }
+    if (depth != 0) _st = DecodeStatus.incomplete; // sequence never closed
+  }
+
+  bool _fixlen(MessageVisitor? vis, int id, bool read) {
+    final word = _uvarint();
+    if (_st != DecodeStatus.complete) return false;
+    final length = word >>> 3;
+    final subtype = word & 0x7;
+    if (length > fixlenMax) return _bad(DecodeStatus.invalid);
+    if (subtype >= 0x4) return _bad(DecodeStatus.invalid);
+    if (subtype == FixlenType.fp32 && length != 4) {
+      return _bad(DecodeStatus.invalid);
+    }
+    if (subtype == FixlenType.fp64 && length != 8) {
+      return _bad(DecodeStatus.invalid);
+    }
+    if (read) {
+      if (subtype == FixlenType.string &&
+          _limits.maxStringLen != null &&
+          length > _limits.maxStringLen!) {
+        return _bad(DecodeStatus.limitExceeded);
+      }
+      if (subtype == FixlenType.blob &&
+          _limits.maxBlobLen != null &&
+          length > _limits.maxBlobLen!) {
+        return _bad(DecodeStatus.limitExceeded);
+      }
+    }
+    if (_pos + length > _len) return _bad(DecodeStatus.incomplete);
+    final start = _pos;
+    _pos += length;
+    if (read) {
+      switch (subtype) {
+        case FixlenType.fp32:
+          vis!.onFp32(
+              id,
+              ByteData.sublistView(_buf, start, start + 4)
+                  .getFloat32(0, Endian.little));
+          break;
+        case FixlenType.fp64:
+          vis!.onFp64(
+              id,
+              ByteData.sublistView(_buf, start, start + 8)
+                  .getFloat64(0, Endian.little));
+          break;
+        case FixlenType.string:
+          final view = Uint8List.sublistView(_buf, start, start + length);
+          if (!utf8Valid(view)) return _bad(DecodeStatus.invalid);
+          vis!.onString(id, utf8.decode(view));
+          break;
+        case FixlenType.blob:
+          vis!.onBlob(id, Uint8List.sublistView(_buf, start, start + length));
+          break;
+      }
+    }
+    return true;
+  }
+
+  bool _intArray(MessageVisitor? vis, int id, int type, bool read) {
+    final count = _uvarint();
+    if (_st != DecodeStatus.complete) return false;
+    if (count > arrayMax) return _bad(DecodeStatus.invalid);
+    if (read &&
+        _limits.maxArrayCount != null &&
+        count > _limits.maxArrayCount!) {
+      return _bad(DecodeStatus.limitExceeded);
+    }
+    final signed = type == WireType.arraySigned;
+    final out = read ? Int64List(count) : null;
+    for (var i = 0; i < count; i++) {
+      final raw = _uvarint();
+      if (_st != DecodeStatus.complete) return false;
+      if (read) out![i] = signed ? (raw >>> 1) ^ -(raw & 1) : raw;
+    }
+    if (read) {
+      if (signed) {
+        vis!.onSignedArray(id, out!);
+      } else {
+        vis!.onUnsignedArray(id, out!);
+      }
+    }
+    return true;
+  }
+
+  bool _fixArray(MessageVisitor? vis, int id, bool read) {
+    final count = _uvarint();
+    if (_st != DecodeStatus.complete) return false;
+    if (count > arrayMax) return _bad(DecodeStatus.invalid);
+    if (read &&
+        _limits.maxArrayCount != null &&
+        count > _limits.maxArrayCount!) {
+      return _bad(DecodeStatus.limitExceeded);
+    }
+    final word = _uvarint();
+    if (_st != DecodeStatus.complete) return false;
+    final length = word >>> 3;
+    final subtype = word & 0x7;
+    if (subtype == FixlenType.fp32) {
+      if (length != 4) return _bad(DecodeStatus.invalid);
+    } else if (subtype == FixlenType.fp64) {
+      if (length != 8) return _bad(DecodeStatus.invalid);
+    } else {
+      return _bad(DecodeStatus.invalid);
+    }
+    final total = count * length;
+    if (_pos + total > _len) return _bad(DecodeStatus.incomplete);
+    final start = _pos;
+    _pos += total;
+    if (read) {
+      final bd = ByteData.sublistView(_buf, start, start + total);
+      if (subtype == FixlenType.fp32) {
+        final o = Float32List(count);
+        for (var i = 0; i < count; i++) {
+          o[i] = bd.getFloat32(i * 4, Endian.little);
+        }
+        vis!.onFp32Array(id, o);
+      } else {
+        final o = Float64List(count);
+        for (var i = 0; i < count; i++) {
+          o[i] = bd.getFloat64(i * 8, Endian.little);
+        }
+        vis!.onFp64Array(id, o);
+      }
+    }
+    return true;
+  }
+
+  bool _bad(DecodeStatus status) {
+    _st = status;
+    return false;
   }
 }
