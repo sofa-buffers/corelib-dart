@@ -31,6 +31,7 @@ class Encoder {
       throw const SofabException(
           SofabError.invalidArgument, 'offset out of range');
     }
+    _bufData = ByteData.sublistView(_buf);
   }
 
   Uint8List _buf;
@@ -38,8 +39,15 @@ class Encoder {
   int _flushStart;
   final FlushCallback _flush;
 
-  /// Reusable scratch for IEEE-754 payloads (little-endian).
+  /// Cached `ByteData` view of [_buf] so floats can be written straight into the
+  /// output buffer (no scratch, no per-call view allocation). Refreshed whenever
+  /// the buffer is swapped.
+  ByteData _bufData = ByteData(0);
+
+  /// Reusable scratch (+ its byte view) for the rare slow path where a float
+  /// straddles the end of a tiny streaming buffer.
   final ByteData _fscratch = ByteData(8);
+  late final Uint8List _fscratchBytes = _fscratch.buffer.asUint8List();
 
   /// Encoder-side nesting depth guard (CORELIB_PLAN §4.9): must not open more
   /// than [maxDepth] sequences.
@@ -59,6 +67,7 @@ class Encoder {
   /// callback) so encoding continues without interruption (CORELIB_PLAN §5.1).
   void installBuffer(Uint8List buffer, {int offset = 0}) {
     _buf = buffer;
+    _bufData = ByteData.sublistView(buffer);
     _pos = offset;
     _flushStart = offset;
   }
@@ -90,7 +99,26 @@ class Encoder {
 
   /// Writes an unsigned LEB128 varint. [v] is treated as an unsigned 64-bit
   /// value via unsigned shifts, so the full u64 range round-trips.
+  ///
+  /// Fast path: when the current buffer has room for a maximal (10-byte) varint,
+  /// write directly at the moving position with no per-byte flush-capacity
+  /// branch. Tiny streaming buffers fall back to the per-byte [_writeByte] path.
   void _writeVarint(int v) {
+    final buf = _buf;
+    var p = _pos;
+    if (p + 10 <= buf.length) {
+      while (true) {
+        final b = v & 0x7F;
+        v = v >>> 7;
+        if (v == 0) {
+          buf[p++] = b;
+          break;
+        }
+        buf[p++] = b | 0x80;
+      }
+      _pos = p;
+      return;
+    }
     while (true) {
       final b = v & 0x7F;
       v = v >>> 7;
@@ -132,26 +160,76 @@ class Encoder {
     _writeVarint(value ? 1 : 0);
   }
 
+  /// Writes 4 float bytes little-endian straight into the buffer when there is
+  /// room, else via the scratch slow path (tiny streaming buffer).
+  void _putFloat32(double v) {
+    if (_pos + 4 <= _buf.length) {
+      _bufData.setFloat32(_pos, v, Endian.little);
+      _pos += 4;
+    } else {
+      _fscratch.setFloat32(0, v, Endian.little);
+      _writeRaw(_fscratchBytes, 0, 4);
+    }
+  }
+
+  void _putFloat64(double v) {
+    if (_pos + 8 <= _buf.length) {
+      _bufData.setFloat64(_pos, v, Endian.little);
+      _pos += 8;
+    } else {
+      _fscratch.setFloat64(0, v, Endian.little);
+      _writeRaw(_fscratchBytes, 0, 8);
+    }
+  }
+
   /// Writes an IEEE-754 32-bit float (fixlen subtype fp32, CORELIB_PLAN §4.6).
   void writeFp32(int id, double value) {
     _writeHeader(id, WireType.fixlen);
     _writeVarint((4 << 3) | FixlenType.fp32);
-    _fscratch.setFloat32(0, value, Endian.little);
-    _writeRaw(_fscratch.buffer.asUint8List(0, 4), 0, 4);
+    _putFloat32(value);
   }
 
   /// Writes an IEEE-754 64-bit double (fixlen subtype fp64, CORELIB_PLAN §4.6).
   void writeFp64(int id, double value) {
     _writeHeader(id, WireType.fixlen);
     _writeVarint((8 << 3) | FixlenType.fp64);
-    _fscratch.setFloat64(0, value, Endian.little);
-    _writeRaw(_fscratch.buffer.asUint8List(0, 8), 0, 8);
+    _putFloat64(value);
   }
 
   /// Writes a UTF-8 string (fixlen subtype string, no null terminator). Rejects
   /// an unpaired surrogate with [SofabError.invalidArgument] — strict UTF-8,
   /// never lossy (CORELIB_PLAN §6.4).
   void writeString(int id, String value) {
+    final units = value.codeUnits;
+    final n = units.length;
+    // Fast path: a pure-ASCII string (each code unit < 0x80 → 1 UTF-8 byte, and
+    // trivially valid UTF-8) is written straight through with no intermediate
+    // transcode buffer. This is the common case for field names, ids, tags, etc.
+    var ascii = true;
+    for (var i = 0; i < n; i++) {
+      if (units[i] >= 0x80) {
+        ascii = false;
+        break;
+      }
+    }
+    if (ascii) {
+      _writeHeader(id, WireType.fixlen);
+      _writeVarint((n << 3) | FixlenType.string);
+      final buf = _buf;
+      var p = _pos;
+      if (p + n <= buf.length) {
+        for (var i = 0; i < n; i++) {
+          buf[p++] = units[i];
+        }
+        _pos = p;
+      } else {
+        for (var i = 0; i < n; i++) {
+          _writeByte(units[i]);
+        }
+      }
+      return;
+    }
+    // Non-ASCII: strict transcode (allocates), rejecting unpaired surrogates.
     final bytes = encodeUtf8Strict(value);
     if (bytes == null) {
       throw const SofabException(SofabError.invalidArgument,
@@ -199,8 +277,7 @@ class Encoder {
     _writeVarint(values.length);
     _writeVarint((4 << 3) | FixlenType.fp32);
     for (final v in values) {
-      _fscratch.setFloat32(0, v, Endian.little);
-      _writeRaw(_fscratch.buffer.asUint8List(0, 4), 0, 4);
+      _putFloat32(v);
     }
   }
 
@@ -210,8 +287,7 @@ class Encoder {
     _writeVarint(values.length);
     _writeVarint((8 << 3) | FixlenType.fp64);
     for (final v in values) {
-      _fscratch.setFloat64(0, v, Endian.little);
-      _writeRaw(_fscratch.buffer.asUint8List(0, 8), 0, 8);
+      _putFloat64(v);
     }
   }
 
