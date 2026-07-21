@@ -1,0 +1,20 @@
+# The package is registered as `SofaBuffers` conceptually (CORELIB_PLAN §6), but
+# pub.dev / Dart require lowercase-with-underscores package names, so the pub name
+# is `sofabuffers`. Users import it and alias the public surface to the fixed
+# `sofab` namespace:  import 'package:sofabuffers/sofabuffers.dart' as sofab;
+name: sofabuffers
+description: >-
+  SofaBuffers — a compact, self-describing, fully streamable binary
+  serialization format. High-speed Dart core library (corelib-dart).
+version: 1.0.0
+repository: https://github.com/sofa-buffers/corelib-dart
+homepage: https://github.com/sofa-buffers
+
+environment:
+  sdk: ^3.4.0
+
+# No runtime dependencies — the library uses only dart:core and dart:typed_data.
+dev_dependencies:
+  test: ^1.25.0
+  coverage: ^1.9.0
+  lints: ^4.0.0

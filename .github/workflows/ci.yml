@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    strategy:
+      # Dart is a single-vendor, stable toolchain, but scripting-style
+      # version drift can still bite, so we test current stable + one prior.
+      fail-fast: false
+      matrix:
+        sdk: ["3.4", stable]
+    name: build & test (Dart ${{ matrix.sdk }})
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: ${{ matrix.sdk }}
+
+      - name: Install dependencies
+        run: dart pub get
+
+      - name: Verify formatting
+        run: dart format --output=none --set-exit-if-changed .
+
+      - name: Analyze (build — no errors allowed)
+        run: dart analyze --fatal-infos
+
+      - name: Run tests (shared vectors + streaming + malformed + truncation)
+        run: dart test
+
+      - name: Sanity-run the example and benchmarks
+        run: |
+          dart run example/person.dart
+          dart run bench/bench.dart
+          dart run bench/perf.dart
+
+  coverage:
+    runs-on: ubuntu-latest
+    needs: build-test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - run: dart pub get
+      - name: Collect coverage
+        run: |
+          dart pub global activate coverage
+          dart test --coverage=coverage
+          dart pub global run coverage:format_coverage \
+            --lcov --in=coverage --out=coverage/lcov.info \
+            --report-on=lib --check-ignore
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage/lcov.info
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
