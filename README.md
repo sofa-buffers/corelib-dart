@@ -11,7 +11,7 @@ self-describing, fully **streamable** binary serialization format.
 ## SofaBuffers Dart library
 
 [![CI](https://github.com/sofa-buffers/corelib-dart/actions/workflows/ci.yml/badge.svg)](https://github.com/sofa-buffers/corelib-dart/actions/workflows/ci.yml)
-[![coverage](https://sofa-buffers.github.io/corelib-dart/coverage.svg)](https://sofa-buffers.github.io/corelib-dart/)
+[![coverage](https://sofa-buffers.github.io/corelib-dart/coverage.svg)](https://github.com/sofa-buffers/corelib-dart/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/badge/docs-API%20reference-blue)](https://sofa-buffers.github.io/corelib-dart/)
 
 **Repository:** <https://github.com/sofa-buffers/corelib-dart> · **Org:** <https://github.com/sofa-buffers>
