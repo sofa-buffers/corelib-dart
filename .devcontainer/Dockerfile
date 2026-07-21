@@ -3,7 +3,9 @@ FROM ubuntu:26.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PATH=/opt/dart/bin:/root/.pub-cache/bin:$PATH
 
-# Base tooling
+# Base tooling.
+#   valgrind — required by bench/run_callgrind.sh (Callgrind Ir/op instruction
+#              cost tool, BENCH_SPEC).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
@@ -11,6 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip \
     gnupg \
     jq \
+    valgrind \
     && rm -rf /var/lib/apt/lists/*
 
 # Dart SDK (pinned; also used by CI)
