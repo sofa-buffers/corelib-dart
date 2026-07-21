@@ -60,8 +60,10 @@ void main() {
 
   final b = StringBuffer();
   b.writeln('=== SofaBuffers Dart throughput (CPU time, MB/s) ===');
-  b.writeln('Workload                           MB/s');
-  b.writeln('--------                           ----');
+  // Header/dashes share the row column widths (26 + 12) so the value column
+  // lines up exactly with the data rows (BENCH_SPEC).
+  b.writeln('Workload'.padRight(26) + 'MB/s'.padLeft(12));
+  b.writeln('--------'.padRight(26) + '----'.padLeft(12));
   b.writeln(_row('encode: u64 array (1000)', encU64));
   b.writeln(_row('encode: typical message', encTypical));
   b.writeln(_row('decode: u64 array (1000)', decU64));
