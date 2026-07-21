@@ -72,7 +72,7 @@ void _section(StringBuffer b, String phase, int size, _Result r) {
   b.writeln('--- perf: $phase (stream API) ---');
   b.writeln('  iterations    : ${r.iterations}');
   b.writeln('  message size  : $size bytes');
-  b.writeln('  cycles/op     : (cycle counter unavailable on Dart VM)');
+  b.writeln('  cycles/op     : (cycle counter unavailable on Dart)');
   b.writeln('  CPU time/op   : ${r.nsPerOp.toStringAsFixed(1)} ns  '
       '(process CPU time, not wall-clock)');
   b.write('  throughput    : ${r.mbps.toStringAsFixed(1)} MB/s  '
