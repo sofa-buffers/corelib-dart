@@ -11,7 +11,7 @@ self-describing, fully **streamable** binary serialization format.
 ## SofaBuffers Dart library
 
 [![CI](https://github.com/sofa-buffers/corelib-dart/actions/workflows/ci.yml/badge.svg)](https://github.com/sofa-buffers/corelib-dart/actions/workflows/ci.yml)
-[![coverage](https://sofa-buffers.github.io/corelib-dart/coverage.svg)](https://sofa-buffers.github.io/corelib-dart/)
+[![coverage](https://sofa-buffers.github.io/corelib-dart/coverage.svg)](https://github.com/sofa-buffers/corelib-dart/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/badge/docs-API%20reference-blue)](https://sofa-buffers.github.io/corelib-dart/)
 
 **Repository:** <https://github.com/sofa-buffers/corelib-dart> · **Org:** <https://github.com/sofa-buffers>
@@ -208,10 +208,19 @@ the docs workflow.
 Three tools, following the cross-language [`BENCH_SPEC.md`](https://github.com/sofa-buffers/documentation/blob/main/BENCH_SPEC.md):
 
 ```console
+bash  bench/run_bench.sh         # AOT-native throughput + per-op (recommended)
+bash  bench/run_callgrind.sh     # Callgrind Ir/op (instructions retired per op)
+
+# Quick JIT variants (no compile step, but slower / with VM warmup):
 dart run bench/bench.dart        # throughput (MB/s) over a ~1s CPU-time loop
 dart run bench/perf.dart         # per-op cost for the 170-byte perf message
-bash  bench/run_callgrind.sh     # Callgrind Ir/op (instructions retired per op)
 ```
+
+> **Run the benchmarks AOT-compiled** (`bench/run_bench.sh` uses
+> `dart compile exe`) for representative numbers — it removes JIT warmup and is
+> the fair comparison to the compiled ports (C/C++/Rust/Go), which also run
+> native. On the same machine, AOT is roughly 2× the JIT throughput on the
+> small-message workloads. `run_callgrind.sh` already builds an AOT target.
 
 - **`bench`** — practical throughput on *this* machine, in MB/s, for encode and
   decode of the `u64 array (1000)` and `typical` workloads.
