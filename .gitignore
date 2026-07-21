@@ -1,0 +1,16 @@
+# Dart build artifacts and package state
+.dart_tool/
+build/
+pubspec.lock
+
+# Coverage outputs
+/coverage/
+
+# Devcontainer secrets and local state — the .env entry is mandatory in every
+# corelib-* repository (ARCHITECTURE §11.2).
+.devcontainer/.env
+.devcontainer/.claude-config/
+
+# Editor / OS cruft
+*.swp
+.DS_Store
