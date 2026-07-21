@@ -13,8 +13,6 @@
 [![coverage](https://sofa-buffers.github.io/corelib-dart/coverage.svg)](https://github.com/sofa-buffers/corelib-dart/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/badge/docs-API%20reference-blue)](https://sofa-buffers.github.io/corelib-dart/)
 
-**Repository:** <https://github.com/sofa-buffers/corelib-dart> · **Org:** <https://github.com/sofa-buffers>
-
 `corelib-dart` is the high-speed Dart implementation of SofaBuffers. It encodes and
 decodes the exact same bytes as every other port and is validated against the
 shared, language-agnostic conformance vectors. What makes it worth reaching for:
