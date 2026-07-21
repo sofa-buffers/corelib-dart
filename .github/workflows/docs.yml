@@ -23,8 +23,21 @@ jobs:
         with:
           sdk: stable
       - run: dart pub get
+
       - name: Generate API docs
         run: dart doc --output doc/api
+
+      - name: Generate coverage + badge
+        run: |
+          dart pub global activate coverage
+          dart test --coverage=coverage
+          dart pub global run coverage:format_coverage \
+            --lcov --in=coverage --out=coverage/lcov.info \
+            --report-on=lib --check-ignore
+          # Self-hosted coverage badge (Codecov-equivalent), served from Pages
+          # at https://sofa-buffers.github.io/corelib-dart/coverage.svg
+          dart run tool/gen_coverage_badge.dart coverage/lcov.info doc/api/coverage.svg
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: doc/api

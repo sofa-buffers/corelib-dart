@@ -59,13 +59,17 @@ ENC_TYP="$(ir_per_op enc_typical)"
 DEC_U64="$(ir_per_op dec_u64)"
 DEC_TYP="$(ir_per_op dec_typical)"
 
+# Header, dashes and data rows all share one column layout (%-35s%8s%10s) so the
+# instr/op and bytes columns line up exactly, matching BENCH_SPEC's table
+# (instr/op column at col 35, bytes at col 48).
+ROW='%-35s%8s%10s\n'
 printf '===============================================================================\n'
 printf ' SofaBuffers Dart instruction cost   (Callgrind, Ir/op)\n'
 printf ' instructions/op: lower is better. Deterministic & machine-independent.\n'
 printf '===============================================================================\n'
-printf 'Workload                           instr/op     bytes\n'
-printf -- '--------                           --------     -----\n'
-printf 'encode: u64 array (1000)      %12s  %8s\n' "$ENC_U64" "$SIZE_U64"
-printf 'encode: typical message      %12s  %8s\n' "$ENC_TYP" "$SIZE_TYPICAL"
-printf 'decode: u64 array (1000)      %12s  %8s\n' "$DEC_U64" "$SIZE_U64"
-printf 'decode: typical message      %12s  %8s\n' "$DEC_TYP" "$SIZE_TYPICAL"
+printf "$ROW" 'Workload' 'instr/op' 'bytes'
+printf "$ROW" '--------' '--------' '-----'
+printf "$ROW" 'encode: u64 array (1000)' "$ENC_U64" "$SIZE_U64"
+printf "$ROW" 'encode: typical message' "$ENC_TYP" "$SIZE_TYPICAL"
+printf "$ROW" 'decode: u64 array (1000)' "$DEC_U64" "$SIZE_U64"
+printf "$ROW" 'decode: typical message' "$DEC_TYP" "$SIZE_TYPICAL"

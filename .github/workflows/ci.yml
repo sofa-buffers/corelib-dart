@@ -57,10 +57,18 @@ jobs:
           dart pub global run coverage:format_coverage \
             --lcov --in=coverage --out=coverage/lcov.info \
             --report-on=lib --check-ignore
-      - name: Upload to Codecov
-        uses: codecov/codecov-action@v4
+      - name: Enforce >90% line coverage (CORELIB_PLAN §7.3)
+        run: |
+          PCT=$(awk -F: '/^LF:/{lf+=$2} /^LH:/{lh+=$2} END{printf "%.1f", (lh/lf)*100}' coverage/lcov.info)
+          echo "Line coverage: ${PCT}%"
+          echo "coverage=${PCT}" >> "$GITHUB_STEP_SUMMARY"
+          awk "BEGIN{exit !(${PCT} > 90)}" \
+            || { echo "::error::coverage ${PCT}% is not above the 90% bar"; exit 1; }
+      - name: Upload coverage report (lcov)
+        uses: actions/upload-artifact@v4
         with:
-          files: coverage/lcov.info
-          fail_ci_if_error: false
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+          name: coverage-lcov
+          path: coverage/lcov.info
+      # The rendered coverage badge is generated and published to GitHub Pages by
+      # docs.yml (self-hosted, Codecov-equivalent per §12.1); the README badge
+      # points at https://sofa-buffers.github.io/corelib-dart/coverage.svg
