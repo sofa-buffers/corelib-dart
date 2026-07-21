@@ -5,8 +5,7 @@
 <b>Structured Objects For Anyone</b><br>
 <i>... so optimized, feels amazing.</i>
 
-A part of the [SofaBuffers](https://github.com/sofa-buffers) project — a compact,
-self-describing, fully **streamable** binary serialization format.
+[Would you like to know more?](https://github.com/sofa-buffers)
 
 ## SofaBuffers Dart library
 
