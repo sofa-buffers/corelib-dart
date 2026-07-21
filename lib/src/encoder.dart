@@ -253,18 +253,60 @@ class Encoder {
   /// element width (u8..u64) is an API concern only; the wire carries varints.
   void writeUnsignedArray(int id, List<int> values) {
     _writeHeader(id, WireType.arrayUnsigned);
-    _writeVarint(values.length);
-    for (final v in values) {
-      _writeVarint(v);
+    final n = values.length;
+    _writeVarint(n);
+    final buf = _buf;
+    var p = _pos;
+    // Bulk fast path: one capacity check for the whole array, indexed loop
+    // (no iterator), direct writes.
+    if (p + n * 10 <= buf.length) {
+      for (var k = 0; k < n; k++) {
+        var v = values[k];
+        while (true) {
+          final b = v & 0x7F;
+          v = v >>> 7;
+          if (v == 0) {
+            buf[p++] = b;
+            break;
+          }
+          buf[p++] = b | 0x80;
+        }
+      }
+      _pos = p;
+    } else {
+      for (var k = 0; k < n; k++) {
+        _writeVarint(values[k]);
+      }
     }
   }
 
   /// Writes an array of signed integers via zig-zag (CORELIB_PLAN §4.7).
   void writeSignedArray(int id, List<int> values) {
     _writeHeader(id, WireType.arraySigned);
-    _writeVarint(values.length);
-    for (final v in values) {
-      _writeVarint((v << 1) ^ (v >> 63));
+    final n = values.length;
+    _writeVarint(n);
+    final buf = _buf;
+    var p = _pos;
+    if (p + n * 10 <= buf.length) {
+      for (var k = 0; k < n; k++) {
+        final s = values[k];
+        var v = (s << 1) ^ (s >> 63); // zig-zag
+        while (true) {
+          final b = v & 0x7F;
+          v = v >>> 7;
+          if (v == 0) {
+            buf[p++] = b;
+            break;
+          }
+          buf[p++] = b | 0x80;
+        }
+      }
+      _pos = p;
+    } else {
+      for (var k = 0; k < n; k++) {
+        final s = values[k];
+        _writeVarint((s << 1) ^ (s >> 63));
+      }
     }
   }
 
@@ -274,20 +316,42 @@ class Encoder {
   /// array on the wire.
   void writeFp32Array(int id, List<double> values) {
     _writeHeader(id, WireType.arrayFixlen);
-    _writeVarint(values.length);
+    final n = values.length;
+    _writeVarint(n);
     _writeVarint((4 << 3) | FixlenType.fp32);
-    for (final v in values) {
-      _putFloat32(v);
+    var p = _pos;
+    if (p + n * 4 <= _buf.length) {
+      final bd = _bufData;
+      for (var k = 0; k < n; k++) {
+        bd.setFloat32(p, values[k], Endian.little);
+        p += 4;
+      }
+      _pos = p;
+    } else {
+      for (var k = 0; k < n; k++) {
+        _putFloat32(values[k]);
+      }
     }
   }
 
   /// Writes an array of fp64 values (CORELIB_PLAN §4.8).
   void writeFp64Array(int id, List<double> values) {
     _writeHeader(id, WireType.arrayFixlen);
-    _writeVarint(values.length);
+    final n = values.length;
+    _writeVarint(n);
     _writeVarint((8 << 3) | FixlenType.fp64);
-    for (final v in values) {
-      _putFloat64(v);
+    var p = _pos;
+    if (p + n * 8 <= _buf.length) {
+      final bd = _bufData;
+      for (var k = 0; k < n; k++) {
+        bd.setFloat64(p, values[k], Endian.little);
+        p += 8;
+      }
+      _pos = p;
+    } else {
+      for (var k = 0; k < n; k++) {
+        _putFloat64(values[k]);
+      }
     }
   }
 

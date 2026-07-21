@@ -543,23 +543,42 @@ class _ContiguousDecoder {
   // overlong (>64-bit) varint sets INVALID. Value valid only when `_st` stays
   // `complete`.
   int _uvarint() {
+    // Hoist fields into locals (registers) for the hot loop, and keep the
+    // overflow guard out of the common per-byte path: bytes 1..9 (shift ≤ 56)
+    // can never overflow, so only the 10th byte (shift == 63) is checked.
+    final buf = _buf;
+    final len = _len;
+    var p = _pos;
     var v = 0;
     var shift = 0;
     while (true) {
-      if (_pos >= _len) {
+      if (p >= len) {
+        _pos = p;
         _st = DecodeStatus.incomplete;
         return 0;
       }
-      final b = _buf[_pos++];
-      if (shift >= 63) {
-        if (shift > 63 || (b & 0x80) != 0 || (b & 0x7f) > 0x01) {
+      final b = buf[p++];
+      v |= (b & 0x7f) << shift;
+      if ((b & 0x80) == 0) {
+        _pos = p;
+        return v;
+      }
+      shift += 7;
+      if (shift == 63) {
+        // The 10th byte may set only bit 63 and must terminate the varint.
+        if (p >= len) {
+          _pos = p;
+          _st = DecodeStatus.incomplete;
+          return 0;
+        }
+        final last = buf[p++];
+        _pos = p;
+        if ((last & 0x80) != 0 || (last & 0x7f) > 0x01) {
           _st = DecodeStatus.invalid;
           return 0;
         }
+        return v | ((last & 0x7f) << 63);
       }
-      v |= (b & 0x7f) << shift;
-      if ((b & 0x80) == 0) return v;
-      shift += 7;
     }
   }
 
@@ -686,6 +705,8 @@ class _ContiguousDecoder {
     }
     final signed = type == WireType.arraySigned;
     final out = read ? Int64List(count) : null;
+    // Note: hand-inlining the varint read here measured *slower* under AOT — the
+    // compiler inlines `_uvarint` better than a manual copy — so keep the call.
     for (var i = 0; i < count; i++) {
       final raw = _uvarint();
       if (_st != DecodeStatus.complete) return false;
