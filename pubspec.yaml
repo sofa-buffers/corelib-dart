@@ -11,7 +11,7 @@ repository: https://github.com/sofa-buffers/corelib-dart
 homepage: https://github.com/sofa-buffers
 
 environment:
-  sdk: ^3.4.0
+  sdk: ^3.8.0
 
 # No runtime dependencies — the library uses only dart:core and dart:typed_data.
 dev_dependencies:
