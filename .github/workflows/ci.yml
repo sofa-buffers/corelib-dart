@@ -65,7 +65,7 @@ jobs:
           awk "BEGIN{exit !(${PCT} > 90)}" \
             || { echo "::error::coverage ${PCT}% is not above the 90% bar"; exit 1; }
       - name: Upload coverage report (lcov)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-lcov
           path: coverage/lcov.info
