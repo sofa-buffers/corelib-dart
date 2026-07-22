@@ -38,7 +38,7 @@ jobs:
           # at https://sofa-buffers.github.io/corelib-dart/coverage.svg
           dart run tool/gen_coverage_badge.dart coverage/lcov.info doc/api/coverage.svg
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: doc/api
 
