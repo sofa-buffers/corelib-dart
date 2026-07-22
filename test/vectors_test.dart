@@ -47,8 +47,11 @@ void main() {
           final enc = sofab.Encoder(out.add, bufferSize: bufSize);
           replay(enc, fields);
           enc.flush();
-          expect(bytesToHex(out.toBytes()), expectedHex,
-              reason: 'bufSize=$bufSize');
+          expect(
+            bytesToHex(out.toBytes()),
+            expectedHex,
+            reason: 'bufSize=$bufSize',
+          );
         }
       });
 

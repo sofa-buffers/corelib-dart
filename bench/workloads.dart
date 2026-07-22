@@ -50,7 +50,7 @@ void encodePerf(sofab.Encoder e) {
     5000000,
     6000000,
     7000000,
-    8000000
+    8000000,
   ]); // u32
   e.writeSignedArray(10, const [
     -100000,
@@ -60,7 +60,7 @@ void encodePerf(sofab.Encoder e) {
     -500000,
     -600000,
     -700000,
-    -800000
+    -800000,
   ]); // i32
   e.writeFp64Array(11, const [3.14159265, 6.28318530, 9.42477795, 12.56637060]);
   e.beginSequence(12);

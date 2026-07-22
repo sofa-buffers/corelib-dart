@@ -42,14 +42,25 @@ void main() {
   test('encoder field id out of range throws InvalidArgument', () {
     expect(
       () => sofab.Encoder.encodeToBytes((e) => e.writeUnsigned(-1, 0)),
-      throwsA(isA<sofab.SofabException>()
-          .having((e) => e.code, 'code', sofab.SofabError.invalidArgument)),
+      throwsA(
+        isA<sofab.SofabException>().having(
+          (e) => e.code,
+          'code',
+          sofab.SofabError.invalidArgument,
+        ),
+      ),
     );
     expect(
       () => sofab.Encoder.encodeToBytes(
-          (e) => e.writeUnsigned(sofab.idMax + 1, 0)),
-      throwsA(isA<sofab.SofabException>()
-          .having((e) => e.code, 'code', sofab.SofabError.invalidArgument)),
+        (e) => e.writeUnsigned(sofab.idMax + 1, 0),
+      ),
+      throwsA(
+        isA<sofab.SofabException>().having(
+          (e) => e.code,
+          'code',
+          sofab.SofabError.invalidArgument,
+        ),
+      ),
     );
   });
 
@@ -58,16 +69,24 @@ void main() {
     final enc = sofab.Encoder((_) {}, buffer: Uint8List(0));
     expect(
       () => enc.writeUnsigned(0, 1),
-      throwsA(isA<sofab.SofabException>()
-          .having((e) => e.code, 'code', sofab.SofabError.bufferFull)),
+      throwsA(
+        isA<sofab.SofabException>().having(
+          (e) => e.code,
+          'code',
+          sofab.SofabError.bufferFull,
+        ),
+      ),
     );
   });
 
   test('offset leaves room at the front; message bytes are unchanged', () {
-    final withOffset =
-        sofab.Encoder.encodeToBytes((e) => e.writeUnsigned(0, 127), offset: 16);
-    final withoutOffset =
-        sofab.Encoder.encodeToBytes((e) => e.writeUnsigned(0, 127));
+    final withOffset = sofab.Encoder.encodeToBytes(
+      (e) => e.writeUnsigned(0, 127),
+      offset: 16,
+    );
+    final withoutOffset = sofab.Encoder.encodeToBytes(
+      (e) => e.writeUnsigned(0, 127),
+    );
     expect(bytesToHex(withOffset), bytesToHex(withoutOffset));
     expect(bytesToHex(withOffset), '007f');
   });
@@ -99,37 +118,53 @@ void main() {
   group('receiver-side limits (policy, not INVALID)', () {
     test('array count over maxArrayCount → limitExceeded', () {
       final bytes = sofab.Encoder.encodeToBytes(
-          (e) => e.writeUnsignedArray(0, [1, 2, 3, 4, 5]));
+        (e) => e.writeUnsignedArray(0, [1, 2, 3, 4, 5]),
+      );
       expect(
-        sofab.Decoder.decode(bytes, RecordingVisitor(),
-            limits: const sofab.DecoderLimits(maxArrayCount: 4)),
+        sofab.Decoder.decode(
+          bytes,
+          RecordingVisitor(),
+          limits: const sofab.DecoderLimits(maxArrayCount: 4),
+        ),
         sofab.DecodeStatus.limitExceeded,
       );
       // Same bytes decode fine with no configured limit.
-      expect(sofab.Decoder.decode(bytes, RecordingVisitor()),
-          sofab.DecodeStatus.complete);
+      expect(
+        sofab.Decoder.decode(bytes, RecordingVisitor()),
+        sofab.DecodeStatus.complete,
+      );
     });
 
     test('string length over maxStringLen → limitExceeded', () {
-      final bytes =
-          sofab.Encoder.encodeToBytes((e) => e.writeString(0, 'abcdef'));
+      final bytes = sofab.Encoder.encodeToBytes(
+        (e) => e.writeString(0, 'abcdef'),
+      );
       expect(
-        sofab.Decoder.decode(bytes, RecordingVisitor(),
-            limits: const sofab.DecoderLimits(maxStringLen: 3)),
+        sofab.Decoder.decode(
+          bytes,
+          RecordingVisitor(),
+          limits: const sofab.DecoderLimits(maxStringLen: 3),
+        ),
         sofab.DecodeStatus.limitExceeded,
       );
     });
 
-    test('a skipped over-limit field is not policed (limit applies on read)',
-        () {
-      final bytes = sofab.Encoder.encodeToBytes(
-          (e) => e.writeUnsignedArray(7, [1, 2, 3, 4, 5]));
-      expect(
-        sofab.Decoder.decode(bytes, RecordingVisitor(skipIds: {7}),
-            limits: const sofab.DecoderLimits(maxArrayCount: 4)),
-        sofab.DecodeStatus.complete,
-      );
-    });
+    test(
+      'a skipped over-limit field is not policed (limit applies on read)',
+      () {
+        final bytes = sofab.Encoder.encodeToBytes(
+          (e) => e.writeUnsignedArray(7, [1, 2, 3, 4, 5]),
+        );
+        expect(
+          sofab.Decoder.decode(
+            bytes,
+            RecordingVisitor(skipIds: {7}),
+            limits: const sofab.DecoderLimits(maxArrayCount: 4),
+          ),
+          sofab.DecodeStatus.complete,
+        );
+      },
+    );
   });
 
   test('empty sequence and empty arrays are well-formed', () {

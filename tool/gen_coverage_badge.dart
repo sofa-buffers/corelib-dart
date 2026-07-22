@@ -28,8 +28,8 @@ void main(List<String> args) {
   final color = pct >= 90
       ? '#4c1' // brightgreen
       : pct >= 75
-          ? '#dfb317' // yellow
-          : '#e05d44'; // red
+      ? '#dfb317' // yellow
+      : '#e05d44'; // red
 
   // Approximate text widths (font-size 11, ~6.5px/char + padding).
   int width(String s) => (s.length * 6.5).round() + 10;
@@ -39,7 +39,8 @@ void main(List<String> args) {
   final lx = (lw * 10) ~/ 2;
   final vx = lw * 10 + (vw * 10) ~/ 2;
 
-  final svg = '''
+  final svg =
+      '''
 <svg xmlns="http://www.w3.org/2000/svg" width="$total" height="20" role="img" aria-label="$label: $value">
   <title>$label: $value</title>
   <linearGradient id="s" x2="0" y2="100%">

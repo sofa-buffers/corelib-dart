@@ -18,8 +18,10 @@ void main() {
       0x00, // header id0 unsigned
       0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01,
     ]);
-    expect(sofab.Decoder.decode(bytes, RecordingVisitor()),
-        sofab.DecodeStatus.invalid);
+    expect(
+      sofab.Decoder.decode(bytes, RecordingVisitor()),
+      sofab.DecodeStatus.invalid,
+    );
   });
 
   test('varint with payload bits beyond bit 63 → INVALID', () {
@@ -37,8 +39,10 @@ void main() {
       0x80,
       0x02,
     ]);
-    expect(sofab.Decoder.decode(bytes, RecordingVisitor()),
-        sofab.DecodeStatus.invalid);
+    expect(
+      sofab.Decoder.decode(bytes, RecordingVisitor()),
+      sofab.DecodeStatus.invalid,
+    );
   });
 
   test('unbalanced sequence end (no open sequence) → INVALID', () {
@@ -57,7 +61,13 @@ void main() {
 
   test('fp32 fixlen with wrong length → INVALID', () {
     // fixlen_word = (5<<3)|0 = 0x28: fp32 must be exactly 4 bytes.
-    expect(decode('0228' '0000000000'), sofab.DecodeStatus.invalid);
+    expect(
+      decode(
+        '0228'
+        '0000000000',
+      ),
+      sofab.DecodeStatus.invalid,
+    );
   });
 
   test('fp64 fixlen with wrong length (proves early check) → INVALID', () {
@@ -68,7 +78,14 @@ void main() {
 
   test('string/blob not allowed in a fixlen array → INVALID', () {
     // array-fixlen header id0 (0x05), count 1, fixlen_word (1<<3)|2 string.
-    expect(decode('0501' '0a' '61'), sofab.DecodeStatus.invalid);
+    expect(
+      decode(
+        '0501'
+        '0a'
+        '61',
+      ),
+      sofab.DecodeStatus.invalid,
+    );
   });
 
   test('length above FIXLEN_MAX → INVALID', () {
@@ -86,8 +103,10 @@ void main() {
       }
       b.addByte(lo | 0x80);
     }
-    expect(sofab.Decoder.decode(b.toBytes(), RecordingVisitor()),
-        sofab.DecodeStatus.invalid);
+    expect(
+      sofab.Decoder.decode(b.toBytes(), RecordingVisitor()),
+      sofab.DecodeStatus.invalid,
+    );
   });
 
   test('array count above ARRAY_MAX → INVALID', () {
@@ -103,8 +122,10 @@ void main() {
       }
       b.addByte(lo | 0x80);
     }
-    expect(sofab.Decoder.decode(b.toBytes(), RecordingVisitor()),
-        sofab.DecodeStatus.invalid);
+    expect(
+      sofab.Decoder.decode(b.toBytes(), RecordingVisitor()),
+      sofab.DecodeStatus.invalid,
+    );
   });
 
   test('nesting past MAX_DEPTH (256 sequences) → INVALID', () {
@@ -113,8 +134,10 @@ void main() {
     for (var i = 0; i < 256; i++) {
       b.addByte(0x06);
     }
-    expect(sofab.Decoder.decode(b.toBytes(), RecordingVisitor()),
-        sofab.DecodeStatus.invalid);
+    expect(
+      sofab.Decoder.decode(b.toBytes(), RecordingVisitor()),
+      sofab.DecodeStatus.invalid,
+    );
   });
 
   test('exactly MAX_DEPTH (255) sequences is accepted', () {
@@ -125,8 +148,10 @@ void main() {
     for (var i = 0; i < 255; i++) {
       b.addByte(0x07);
     }
-    expect(sofab.Decoder.decode(b.toBytes(), RecordingVisitor()),
-        sofab.DecodeStatus.complete);
+    expect(
+      sofab.Decoder.decode(b.toBytes(), RecordingVisitor()),
+      sofab.DecodeStatus.complete,
+    );
   });
 
   test('INVALID takes precedence over INCOMPLETE when both apply', () {

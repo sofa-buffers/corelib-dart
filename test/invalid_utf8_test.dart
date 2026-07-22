@@ -33,8 +33,11 @@ void main() {
         // A visitor that reads (materializes) the string field.
         final rec = RecordingVisitor();
         final status = sofab.Decoder.decode(bytes, rec);
-        expect(status, sofab.DecodeStatus.invalid,
-            reason: 'strict decode of $name must be INVALID');
+        expect(
+          status,
+          sofab.DecodeStatus.invalid,
+          reason: 'strict decode of $name must be INVALID',
+        );
       });
     }
   });
@@ -49,8 +52,11 @@ void main() {
         final bytes = hexToBytes(s['serialized_hex'] as String);
         final rec = RecordingVisitor(skipIds: {id});
         final status = sofab.Decoder.decode(bytes, rec);
-        expect(status, sofab.DecodeStatus.complete,
-            reason: 'skipping id $id must not validate its bytes');
+        expect(
+          status,
+          sofab.DecodeStatus.complete,
+          reason: 'skipping id $id must not validate its bytes',
+        );
         expect(rec.events, isEmpty);
       });
     }
@@ -61,18 +67,27 @@ void main() {
       test(label, () {
         expect(
           () => sofab.Encoder.encodeToBytes((e) => e.writeString(0, bad)),
-          throwsA(isA<sofab.SofabException>()
-              .having((e) => e.code, 'code', sofab.SofabError.invalidArgument)),
+          throwsA(
+            isA<sofab.SofabException>().having(
+              (e) => e.code,
+              'code',
+              sofab.SofabError.invalidArgument,
+            ),
+          ),
         );
       });
     }
 
     expectRejected('lone high surrogate', String.fromCharCode(0xD800));
     expectRejected('lone low surrogate', String.fromCharCode(0xDC00));
-    expectRejected('high surrogate not followed by low',
-        String.fromCharCodes([0xD800, 0x41]));
     expectRejected(
-        'trailing high surrogate at end', String.fromCharCodes([0x41, 0xDBFF]));
+      'high surrogate not followed by low',
+      String.fromCharCodes([0xD800, 0x41]),
+    );
+    expectRejected(
+      'trailing high surrogate at end',
+      String.fromCharCodes([0x41, 0xDBFF]),
+    );
   });
 
   test('utf8Valid primitive rejects overlong / surrogate / >U+10FFFF', () {

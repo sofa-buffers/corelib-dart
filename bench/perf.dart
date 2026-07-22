@@ -57,7 +57,8 @@ void main() {
 
   final b = StringBuffer();
   b.writeln(
-      '=== SofaBuffers Dart per-op cost (cycles/op + throughput MB/s) ===');
+    '=== SofaBuffers Dart per-op cost (cycles/op + throughput MB/s) ===',
+  );
   b.writeln();
   _section(b, 'serialize', size, ser);
   b.writeln();
@@ -73,9 +74,13 @@ void _section(StringBuffer b, String phase, int size, _Result r) {
   b.writeln('  iterations    : ${r.iterations}');
   b.writeln('  message size  : $size bytes');
   b.writeln('  cycles/op     : (cycle counter unavailable on Dart)');
-  b.writeln('  CPU time/op   : ${r.nsPerOp.toStringAsFixed(1)} ns  '
-      '(process CPU time, not wall-clock)');
-  b.write('  throughput    : ${r.mbps.toStringAsFixed(1)} MB/s  '
-      '(speedtest, MB = 1e6 bytes)');
+  b.writeln(
+    '  CPU time/op   : ${r.nsPerOp.toStringAsFixed(1)} ns  '
+    '(process CPU time, not wall-clock)',
+  );
+  b.write(
+    '  throughput    : ${r.mbps.toStringAsFixed(1)} MB/s  '
+    '(speedtest, MB = 1e6 bytes)',
+  );
   b.writeln();
 }
