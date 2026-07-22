@@ -212,7 +212,8 @@ List<String> expectedEvents(List<dynamic> fields) {
         break;
       case 'blob':
         out.add(
-            'BLB:${jInt(f['id'])}:${(f['value_hex'] as String).toLowerCase()}');
+          'BLB:${jInt(f['id'])}:${(f['value_hex'] as String).toLowerCase()}',
+        );
         break;
       case 'array':
         out.add(_expectedArray(f));

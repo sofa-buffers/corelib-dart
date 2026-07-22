@@ -11,10 +11,12 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       # Dart is a single-vendor, stable toolchain, but scripting-style
-      # version drift can still bite, so we test current stable + one prior.
+      # version drift can still bite, so we test every currently-common minor
+      # from our floor up to current stable. The 3.8 floor is set by lints v6
+      # (dev dep), which requires SDK >=3.8.0; nothing older can resolve.
       fail-fast: false
       matrix:
-        sdk: ["3.8", stable]
+        sdk: ["3.8", "3.9", "3.10", "3.11", stable]
     name: build & test (Dart ${{ matrix.sdk }})
     steps:
       - uses: actions/checkout@v7

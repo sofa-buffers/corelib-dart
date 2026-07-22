@@ -44,11 +44,7 @@ abstract class MessageVisitor {
 /// deployment **policy**, not schema validity: exceeding one yields
 /// [DecodeStatus.limitExceeded], never [DecodeStatus.invalid]. `null` = unbounded.
 class DecoderLimits {
-  const DecoderLimits({
-    this.maxArrayCount,
-    this.maxStringLen,
-    this.maxBlobLen,
-  });
+  const DecoderLimits({this.maxArrayCount, this.maxStringLen, this.maxBlobLen});
   final int? maxArrayCount;
   final int? maxStringLen;
   final int? maxBlobLen;
@@ -82,7 +78,7 @@ class _Frame {
 /// payload that straddles a chunk boundary.
 class Decoder {
   Decoder(MessageVisitor root, {this.limits = const DecoderLimits()})
-      : _frames = <_Frame>[_Frame(root)];
+    : _frames = <_Frame>[_Frame(root)];
 
   final DecoderLimits limits;
   final List<_Frame> _frames;
@@ -354,11 +350,15 @@ class Decoder {
     switch (_fixSubtype) {
       case FixlenType.fp32:
         _topVisitor!.onFp32(
-            _fieldId, ByteData.sublistView(buf).getFloat32(0, Endian.little));
+          _fieldId,
+          ByteData.sublistView(buf).getFloat32(0, Endian.little),
+        );
         return true;
       case FixlenType.fp64:
         _topVisitor!.onFp64(
-            _fieldId, ByteData.sublistView(buf).getFloat64(0, Endian.little));
+          _fieldId,
+          ByteData.sublistView(buf).getFloat64(0, Endian.little),
+        );
         return true;
       case FixlenType.string:
         // Validate first (strict, no U+FFFD substitution); only then decode the
@@ -404,8 +404,9 @@ class Decoder {
     final raw = _v;
     _vreset();
     if (_read) {
-      _arrInts![_arrIndex] =
-          _arrType == WireType.arraySigned ? (raw >>> 1) ^ -(raw & 1) : raw;
+      _arrInts![_arrIndex] = _arrType == WireType.arraySigned
+          ? (raw >>> 1) ^ -(raw & 1)
+          : raw;
     }
     _arrIndex++;
     if (_arrIndex < _arrCount) return true;
@@ -609,7 +610,11 @@ class _ContiguousDecoder {
         case WireType.arrayUnsigned:
         case WireType.arraySigned:
           if (!_intArray(
-              vis, id, type, vis != null && vis.shouldRead(id, type))) {
+            vis,
+            id,
+            type,
+            vis != null && vis.shouldRead(id, type),
+          )) {
             return;
           }
           break;
@@ -671,15 +676,23 @@ class _ContiguousDecoder {
       switch (subtype) {
         case FixlenType.fp32:
           vis!.onFp32(
-              id,
-              ByteData.sublistView(_buf, start, start + 4)
-                  .getFloat32(0, Endian.little));
+            id,
+            ByteData.sublistView(
+              _buf,
+              start,
+              start + 4,
+            ).getFloat32(0, Endian.little),
+          );
           break;
         case FixlenType.fp64:
           vis!.onFp64(
-              id,
-              ByteData.sublistView(_buf, start, start + 8)
-                  .getFloat64(0, Endian.little));
+            id,
+            ByteData.sublistView(
+              _buf,
+              start,
+              start + 8,
+            ).getFloat64(0, Endian.little),
+          );
           break;
         case FixlenType.string:
           final view = Uint8List.sublistView(_buf, start, start + length);

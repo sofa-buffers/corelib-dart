@@ -20,7 +20,9 @@ void main() {
 
   test('header present, value varint missing → INCOMPLETE', () {
     expect(
-        decode('00'), sofab.DecodeStatus.incomplete); // id0 unsigned, no value
+      decode('00'),
+      sofab.DecodeStatus.incomplete,
+    ); // id0 unsigned, no value
   });
 
   test('fixlen payload shorter than declared length → INCOMPLETE', () {
@@ -30,12 +32,26 @@ void main() {
 
   test('unclosed sequence → INCOMPLETE', () {
     // seq start id0, one field, no matching end.
-    expect(decode('06' '0001'), sofab.DecodeStatus.incomplete);
+    expect(
+      decode(
+        '06'
+        '0001',
+      ),
+      sofab.DecodeStatus.incomplete,
+    );
   });
 
   test('array with fewer elements than count → INCOMPLETE', () {
     // array-unsigned id0, count 3, only 2 elements.
-    expect(decode('03' '03' '01' '02'), sofab.DecodeStatus.incomplete);
+    expect(
+      decode(
+        '03'
+        '03'
+        '01'
+        '02',
+      ),
+      sofab.DecodeStatus.incomplete,
+    );
   });
 
   test('feeding the missing bytes completes an INCOMPLETE stream', () {

@@ -24,12 +24,14 @@ class Encoder {
     Uint8List? buffer,
     int bufferSize = 4096,
     int offset = 0,
-  })  : _buf = buffer ?? Uint8List(bufferSize),
-        _pos = offset,
-        _flushStart = offset {
+  }) : _buf = buffer ?? Uint8List(bufferSize),
+       _pos = offset,
+       _flushStart = offset {
     if (offset < 0 || offset > _buf.length) {
       throw const SofabException(
-          SofabError.invalidArgument, 'offset out of range');
+        SofabError.invalidArgument,
+        'offset out of range',
+      );
     }
     _bufData = ByteData.sublistView(_buf);
   }
@@ -76,7 +78,9 @@ class Encoder {
     if (_pos >= _buf.length) _drain();
     if (_pos >= _buf.length) {
       throw const SofabException(
-          SofabError.bufferFull, 'output buffer full and no room after flush');
+        SofabError.bufferFull,
+        'output buffer full and no room after flush',
+      );
     }
     _buf[_pos++] = b;
   }
@@ -86,8 +90,10 @@ class Encoder {
     while (i < end) {
       if (_pos >= _buf.length) _drain();
       if (_pos >= _buf.length) {
-        throw const SofabException(SofabError.bufferFull,
-            'output buffer full and no room after flush');
+        throw const SofabException(
+          SofabError.bufferFull,
+          'output buffer full and no room after flush',
+        );
       }
       final room = _buf.length - _pos;
       final take = (end - i) < room ? (end - i) : room;
@@ -133,7 +139,9 @@ class Encoder {
   void _writeHeader(int id, int type) {
     if (id < 0 || id > idMax) {
       throw const SofabException(
-          SofabError.invalidArgument, 'field id out of range 0..2^31-1');
+        SofabError.invalidArgument,
+        'field id out of range 0..2^31-1',
+      );
     }
     _writeVarint((id << 3) | type);
   }
@@ -232,8 +240,10 @@ class Encoder {
     // Non-ASCII: strict transcode (allocates), rejecting unpaired surrogates.
     final bytes = encodeUtf8Strict(value);
     if (bytes == null) {
-      throw const SofabException(SofabError.invalidArgument,
-          'string is not valid UTF-8 (unpaired surrogate)');
+      throw const SofabException(
+        SofabError.invalidArgument,
+        'string is not valid UTF-8 (unpaired surrogate)',
+      );
     }
     _writeHeader(id, WireType.fixlen);
     _writeVarint((bytes.length << 3) | FixlenType.string);
@@ -361,7 +371,9 @@ class Encoder {
   void beginSequence(int id) {
     if (_depth >= maxDepth) {
       throw const SofabException(
-          SofabError.invalidMessage, 'nesting exceeds MAX_DEPTH (255)');
+        SofabError.invalidMessage,
+        'nesting exceeds MAX_DEPTH (255)',
+      );
     }
     _writeHeader(id, WireType.sequenceStart);
     _depth++;
@@ -371,7 +383,9 @@ class Encoder {
   void endSequence() {
     if (_depth <= 0) {
       throw const SofabException(
-          SofabError.usageError, 'endSequence with no open sequence');
+        SofabError.usageError,
+        'endSequence with no open sequence',
+      );
     }
     _writeByte(0x07);
     _depth--;

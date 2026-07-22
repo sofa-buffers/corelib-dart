@@ -8,28 +8,32 @@ import 'vector_support.dart';
 /// Extra coverage for base-class defaults, multi-byte UTF-8 paths, and small
 /// API surfaces not exercised by the conformance vectors.
 void main() {
-  test('bare MessageVisitor defaults read everything and descend sequences',
-      () {
-    // A plain visitor with all-default (no-op) methods must still traverse a
-    // composite message to COMPLETE.
-    final bytes = sofab.Encoder.encodeToBytes((e) {
-      e.writeUnsigned(0, 1);
-      e.writeSigned(1, -1);
-      e.writeFp32(2, 1.5);
-      e.writeFp64(3, 2.5);
-      e.writeString(4, 'x');
-      e.writeBlob(5, Uint8List.fromList([1, 2, 3]));
-      e.writeUnsignedArray(6, const [1, 2]);
-      e.writeSignedArray(7, const [-1, -2]);
-      e.writeFp32Array(8, const [1.0, 2.0]);
-      e.writeFp64Array(9, const [1.0, 2.0]);
-      e.beginSequence(10);
-      e.writeUnsigned(0, 42);
-      e.endSequence();
-    });
-    expect(sofab.Decoder.decode(bytes, _DefaultVisitor()),
-        sofab.DecodeStatus.complete);
-  });
+  test(
+    'bare MessageVisitor defaults read everything and descend sequences',
+    () {
+      // A plain visitor with all-default (no-op) methods must still traverse a
+      // composite message to COMPLETE.
+      final bytes = sofab.Encoder.encodeToBytes((e) {
+        e.writeUnsigned(0, 1);
+        e.writeSigned(1, -1);
+        e.writeFp32(2, 1.5);
+        e.writeFp64(3, 2.5);
+        e.writeString(4, 'x');
+        e.writeBlob(5, Uint8List.fromList([1, 2, 3]));
+        e.writeUnsignedArray(6, const [1, 2]);
+        e.writeSignedArray(7, const [-1, -2]);
+        e.writeFp32Array(8, const [1.0, 2.0]);
+        e.writeFp64Array(9, const [1.0, 2.0]);
+        e.beginSequence(10);
+        e.writeUnsigned(0, 42);
+        e.endSequence();
+      });
+      expect(
+        sofab.Decoder.decode(bytes, _DefaultVisitor()),
+        sofab.DecodeStatus.complete,
+      );
+    },
+  );
 
   test('multi-byte UTF-8 (2/3/4-byte) round-trips exactly', () {
     // é (2-byte), € (3-byte), 😀 (4-byte surrogate pair).
@@ -75,16 +79,26 @@ void main() {
           e.beginSequence(0);
         }
       }),
-      throwsA(isA<sofab.SofabException>()
-          .having((e) => e.code, 'code', sofab.SofabError.invalidMessage)),
+      throwsA(
+        isA<sofab.SofabException>().having(
+          (e) => e.code,
+          'code',
+          sofab.SofabError.invalidMessage,
+        ),
+      ),
     );
   });
 
   test('endSequence with no open sequence throws UsageError', () {
     expect(
       () => sofab.Encoder.encodeToBytes((e) => e.endSequence()),
-      throwsA(isA<sofab.SofabException>()
-          .having((e) => e.code, 'code', sofab.SofabError.usageError)),
+      throwsA(
+        isA<sofab.SofabException>().having(
+          (e) => e.code,
+          'code',
+          sofab.SofabError.usageError,
+        ),
+      ),
     );
   });
 

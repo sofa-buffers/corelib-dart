@@ -50,13 +50,21 @@ void main() {
   final visitor = CountingVisitor();
 
   final encU64 = _measure(
-      u64Bytes.length, () => encodeOnce((e) => encodeU64Array(e, u64)));
-  final encTypical =
-      _measure(typicalBytes.length, () => encodeOnce(encodeTypical));
-  final decU64 =
-      _measure(u64Bytes.length, () => sofab.Decoder.decode(u64Bytes, visitor));
+    u64Bytes.length,
+    () => encodeOnce((e) => encodeU64Array(e, u64)),
+  );
+  final encTypical = _measure(
+    typicalBytes.length,
+    () => encodeOnce(encodeTypical),
+  );
+  final decU64 = _measure(
+    u64Bytes.length,
+    () => sofab.Decoder.decode(u64Bytes, visitor),
+  );
   final decTypical = _measure(
-      typicalBytes.length, () => sofab.Decoder.decode(typicalBytes, visitor));
+    typicalBytes.length,
+    () => sofab.Decoder.decode(typicalBytes, visitor),
+  );
 
   final b = StringBuffer();
   b.writeln('=== SofaBuffers Dart throughput (CPU time, MB/s) ===');
