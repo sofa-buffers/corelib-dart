@@ -14,7 +14,7 @@ jobs:
       # version drift can still bite, so we test current stable + one prior.
       fail-fast: false
       matrix:
-        sdk: ["3.4", stable]
+        sdk: ["3.5", stable]
     name: build & test (Dart ${{ matrix.sdk }})
     steps:
       - uses: actions/checkout@v4
