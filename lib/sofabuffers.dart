@@ -26,7 +26,7 @@
 /// See the `Encoder` (streaming out) and `Decoder` (push-feed / pull-read in)
 /// classes for the full streaming API, and the `example/` directory for the
 /// generated-object pattern built on top of these primitives.
-library sofab;
+library;
 
 export 'src/wire.dart'
     show
