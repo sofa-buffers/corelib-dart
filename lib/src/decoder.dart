@@ -219,6 +219,7 @@ class Decoder {
     _vreset();
     final type = header & 0x7;
     final id = header >>> 3;
+    if (id > idMax) return _fail(DecodeStatus.invalid); // id > ID_MAX (§6.2)
     _fieldId = id;
 
     switch (type) {
@@ -589,6 +590,10 @@ class _ContiguousDecoder {
       if (_st != DecodeStatus.complete) return;
       final type = header & 0x7;
       final id = header >>> 3;
+      if (id > idMax) {
+        _st = DecodeStatus.invalid; // id > ID_MAX (§6.2)
+        return;
+      }
       switch (type) {
         case WireType.unsigned:
           final readU = vis != null && vis.shouldRead(id, type);
