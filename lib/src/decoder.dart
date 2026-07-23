@@ -23,6 +23,18 @@ abstract class MessageVisitor {
   void onUnsigned(int id, int value) {}
   void onSigned(int id, int value) {}
   void onFp32(int id, double value) {}
+
+  /// Delivered for an fp32 field whose payload is a **NaN**, carrying the raw
+  /// 32-bit IEEE-754 bit pattern so a signaling NaN survives bit-for-bit — a
+  /// Dart `double` would quiet it (CORELIB_PLAN §4.6: never normalize). The
+  /// default widens to a `double` and forwards to [onFp32], so a consumer that
+  /// does not care about NaN bit patterns needs no change; override this to
+  /// capture the exact bits (and re-emit them with `Encoder.writeFp32Bits`).
+  void onFp32Bits(int id, int bits) {
+    final b = ByteData(4)..setUint32(0, bits, Endian.little);
+    onFp32(id, b.getFloat32(0, Endian.little));
+  }
+
   void onFp64(int id, double value) {}
   void onString(int id, String value) {}
   void onBlob(int id, Uint8List value) {}
@@ -66,6 +78,24 @@ class _Frame {
   _Frame(this.visitor);
   // null visitor => this scope is being skipped.
   final MessageVisitor? visitor;
+}
+
+/// Fills [dst] with [count] fp32 elements from little-endian wire bytes in [src]
+/// starting at [srcStart], preserving each element's raw 32-bit pattern
+/// (CORELIB_PLAN §4.6 — a signaling NaN must not be quieted). On a little-endian
+/// host (every platform Dart targets) this is a single bulk byte copy: bit-exact
+/// *and* faster than a per-element float read. A big-endian host falls back to
+/// endian-swapping element reads — which cannot preserve an sNaN, but no such
+/// host exists in practice.
+void _readFp32Array(Float32List dst, Uint8List src, int srcStart, int count) {
+  if (Endian.host == Endian.little) {
+    Uint8List.sublistView(dst).setRange(0, count * 4, src, srcStart);
+  } else {
+    final bd = ByteData.sublistView(src, srcStart, srcStart + count * 4);
+    for (var i = 0; i < count; i++) {
+      dst[i] = bd.getFloat32(i * 4, Endian.little);
+    }
+  }
 }
 
 /// Streaming SofaBuffers decoder (CORELIB_PLAN §5.2).
@@ -350,11 +380,19 @@ class Decoder {
     final buf = _payloadBuf ?? Uint8List(0);
     switch (_fixSubtype) {
       case FixlenType.fp32:
-        _topVisitor!.onFp32(
-          _fieldId,
-          ByteData.sublistView(buf).getFloat32(0, Endian.little),
-        );
-        return true;
+        {
+          final view = ByteData.sublistView(buf);
+          final v = view.getFloat32(0, Endian.little);
+          // Non-NaN widens to a double and back losslessly (hot path). A NaN can
+          // carry a payload/signaling bit the double would quiet, so re-read the
+          // raw wire bits and deliver those (§4.6: never normalize).
+          if (v.isNaN) {
+            _topVisitor!.onFp32Bits(_fieldId, view.getUint32(0, Endian.little));
+          } else {
+            _topVisitor!.onFp32(_fieldId, v);
+          }
+          return true;
+        }
       case FixlenType.fp64:
         _topVisitor!.onFp64(
           _fieldId,
@@ -486,14 +524,12 @@ class Decoder {
   }
 
   void _emitFixArray() {
-    final bd = ByteData.sublistView(_payloadBuf!);
     if (_arrFixSubtype == FixlenType.fp32) {
       final out = _arrF32!;
-      for (var i = 0; i < _arrCount; i++) {
-        out[i] = bd.getFloat32(i * 4, Endian.little);
-      }
+      _readFp32Array(out, _payloadBuf!, 0, _arrCount);
       _topVisitor!.onFp32Array(_fieldId, out);
     } else {
+      final bd = ByteData.sublistView(_payloadBuf!);
       final out = _arrF64!;
       for (var i = 0; i < _arrCount; i++) {
         out[i] = bd.getFloat64(i * 8, Endian.little);
@@ -680,15 +716,18 @@ class _ContiguousDecoder {
     if (read) {
       switch (subtype) {
         case FixlenType.fp32:
-          vis!.onFp32(
-            id,
-            ByteData.sublistView(
-              _buf,
-              start,
-              start + 4,
-            ).getFloat32(0, Endian.little),
-          );
-          break;
+          {
+            final view = ByteData.sublistView(_buf, start, start + 4);
+            final v = view.getFloat32(0, Endian.little);
+            // See _emitFixlen: NaN goes out as raw bits so a signaling NaN's
+            // is-quiet bit is not set by widening to a double (§4.6).
+            if (v.isNaN) {
+              vis!.onFp32Bits(id, view.getUint32(0, Endian.little));
+            } else {
+              vis!.onFp32(id, v);
+            }
+            break;
+          }
         case FixlenType.fp64:
           vis!.onFp64(
             id,
@@ -765,14 +804,12 @@ class _ContiguousDecoder {
     final start = _pos;
     _pos += total;
     if (read) {
-      final bd = ByteData.sublistView(_buf, start, start + total);
       if (subtype == FixlenType.fp32) {
         final o = Float32List(count);
-        for (var i = 0; i < count; i++) {
-          o[i] = bd.getFloat32(i * 4, Endian.little);
-        }
+        _readFp32Array(o, _buf, start, count);
         vis!.onFp32Array(id, o);
       } else {
+        final bd = ByteData.sublistView(_buf, start, start + total);
         final o = Float64List(count);
         for (var i = 0; i < count; i++) {
           o[i] = bd.getFloat64(i * 8, Endian.little);

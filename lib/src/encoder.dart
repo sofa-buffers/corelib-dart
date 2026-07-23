@@ -180,6 +180,18 @@ class Encoder {
     }
   }
 
+  /// Writes 4 raw little-endian bytes of a 32-bit bit pattern with no float
+  /// interpretation — the bit-exact fp32 primitive (§4.6: never normalize).
+  void _putUint32(int bits) {
+    if (_pos + 4 <= _buf.length) {
+      _bufData.setUint32(_pos, bits, Endian.little);
+      _pos += 4;
+    } else {
+      _fscratch.setUint32(0, bits, Endian.little);
+      _writeRaw(_fscratchBytes, 0, 4);
+    }
+  }
+
   void _putFloat64(double v) {
     if (_pos + 8 <= _buf.length) {
       _bufData.setFloat64(_pos, v, Endian.little);
@@ -195,6 +207,19 @@ class Encoder {
     _writeHeader(id, WireType.fixlen);
     _writeVarint((4 << 3) | FixlenType.fp32);
     _putFloat32(value);
+  }
+
+  /// Writes an fp32 field from its raw 32-bit IEEE-754 bit pattern (the low 32
+  /// bits of [bits]), bypassing the float widening that [writeFp32] performs.
+  ///
+  /// Use this when a value must survive **bit-for-bit** — notably a signaling
+  /// NaN, whose "is-quiet" bit a Dart `double` (64-bit) would set on the way in.
+  /// The corelib never inspects or normalizes a float (CORELIB_PLAN §4.6), so
+  /// the four bytes are emitted exactly as given.
+  void writeFp32Bits(int id, int bits) {
+    _writeHeader(id, WireType.fixlen);
+    _writeVarint((4 << 3) | FixlenType.fp32);
+    _putUint32(bits & 0xFFFFFFFF);
   }
 
   /// Writes an IEEE-754 64-bit double (fixlen subtype fp64, CORELIB_PLAN §4.6).
@@ -329,6 +354,14 @@ class Encoder {
     final n = values.length;
     _writeVarint(n);
     _writeVarint((4 << 3) | FixlenType.fp32);
+    // Bit-exact fast path: a Float32List already holds the raw 32-bit elements,
+    // so on a little-endian host its bytes are exactly the wire bytes — copy
+    // them straight out with no widening to a double, so a signaling NaN
+    // survives (§4.6). This is also faster than a per-element float write.
+    if (values is Float32List && Endian.host == Endian.little) {
+      _writeRaw(Uint8List.sublistView(values), 0, n * 4);
+      return;
+    }
     var p = _pos;
     if (p + n * 4 <= _buf.length) {
       final bd = _bufData;
