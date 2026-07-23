@@ -50,34 +50,76 @@ void main() {
     return cSt;
   }
 
-  group('int array over-count (issue #18 reproduction, id 15 = header 0x7b)', () {
-    SchemaVisitor make() => mk(arrayMax: {15: 4});
+  group(
+    'int array over-count (issue #18 reproduction, id 15 = header 0x7b)',
+    () {
+      SchemaVisitor make() => mk(arrayMax: {15: 4});
 
-    test('count 5 (>4), complete → INVALID', () {
-      expect(bothPaths('7b05' '0102030405', make), sofab.DecodeStatus.invalid);
-    });
+      test('count 5 (>4), complete → INVALID', () {
+        expect(
+          bothPaths(
+            '7b05'
+            '0102030405',
+            make,
+          ),
+          sofab.DecodeStatus.invalid,
+        );
+      });
 
-    test('count 6 (>4), then EOF → INVALID (was INCOMPLETE)', () {
-      expect(bothPaths('7b06' '0102', make), sofab.DecodeStatus.invalid);
-    });
+      test('count 6 (>4), then EOF → INVALID (was INCOMPLETE)', () {
+        expect(
+          bothPaths(
+            '7b06'
+            '0102',
+            make,
+          ),
+          sofab.DecodeStatus.invalid,
+        );
+      });
 
-    test('count 4 (==bound), then EOF → INCOMPLETE (clean truncation)', () {
-      final v = mk(arrayMax: {15: 4});
-      expect(bothPaths('7b04' '0102', () => mk(arrayMax: {15: 4})),
-          sofab.DecodeStatus.incomplete);
-      // And no spurious INVALID flag was raised.
-      sofab.Decoder.decode(hexToBytes('7b04' '0102'), v);
-      expect(v.inv, isFalse);
-    });
+      test('count 4 (==bound), then EOF → INCOMPLETE (clean truncation)', () {
+        final v = mk(arrayMax: {15: 4});
+        expect(
+          bothPaths(
+            '7b04'
+            '0102',
+            () => mk(arrayMax: {15: 4}),
+          ),
+          sofab.DecodeStatus.incomplete,
+        );
+        // And no spurious INVALID flag was raised.
+        sofab.Decoder.decode(
+          hexToBytes(
+            '7b04'
+            '0102',
+          ),
+          v,
+        );
+        expect(v.inv, isFalse);
+      });
 
-    test('count 4, all present → COMPLETE', () {
-      expect(bothPaths('7b04' '01020304', make), sofab.DecodeStatus.complete);
-    });
-  });
+      test('count 4, all present → COMPLETE', () {
+        expect(
+          bothPaths(
+            '7b04'
+            '01020304',
+            make,
+          ),
+          sofab.DecodeStatus.complete,
+        );
+      });
+    },
+  );
 
   test('onArrayBegin fires before the assembled-array callback', () {
     final v = mk(arrayMax: {15: 99});
-    sofab.Decoder.decode(hexToBytes('7b04' '01020304'), v);
+    sofab.Decoder.decode(
+      hexToBytes(
+        '7b04'
+        '01020304',
+      ),
+      v,
+    );
     expect(v.order, ['begin:15:4', 'arr:15']);
   });
 
@@ -87,22 +129,49 @@ void main() {
 
     test('length 5 (>3), complete → INVALID', () {
       // 0x2a header, word (5<<3)|2 = 0x2a, then 5 bytes "abcde".
-      expect(bothPaths('2a2a' '6162636465', make), sofab.DecodeStatus.invalid);
+      expect(
+        bothPaths(
+          '2a2a'
+          '6162636465',
+          make,
+        ),
+        sofab.DecodeStatus.invalid,
+      );
     });
 
     test('length 5 (>3), payload cut → INVALID (was INCOMPLETE)', () {
-      expect(bothPaths('2a2a' '6162', make), sofab.DecodeStatus.invalid);
+      expect(
+        bothPaths(
+          '2a2a'
+          '6162',
+          make,
+        ),
+        sofab.DecodeStatus.invalid,
+      );
     });
 
     test('length 3 (==maxlen), payload cut → INCOMPLETE', () {
       // word (3<<3)|2 = 0x1a, only 2 of 3 bytes.
-      expect(bothPaths('2a1a' '6162', make), sofab.DecodeStatus.incomplete);
+      expect(
+        bothPaths(
+          '2a1a'
+          '6162',
+          make,
+        ),
+        sofab.DecodeStatus.incomplete,
+      );
     });
   });
 
   test('onFixlenHeader carries the exact subtype and length', () {
     final v = mk(strMax: {5: 99});
-    sofab.Decoder.decode(hexToBytes('2a1a' '616263'), v); // string, len 3
+    sofab.Decoder.decode(
+      hexToBytes(
+        '2a1a'
+        '616263',
+      ),
+      v,
+    ); // string, len 3
     expect(v.order, ['fix:5:${sofab.FixlenType.string}:3', 'str:5']);
   });
 
@@ -111,14 +180,28 @@ void main() {
 
     test('count 3 (>2), payload cut → INVALID (was INCOMPLETE)', () {
       // 0x3d header, count 3, word (4<<3)|0 = 0x20, then a short payload.
-      expect(bothPaths('3d03' '20' '00000000', make),
-          sofab.DecodeStatus.invalid);
+      expect(
+        bothPaths(
+          '3d03'
+          '20'
+          '00000000',
+          make,
+        ),
+        sofab.DecodeStatus.invalid,
+      );
     });
 
     test('count 2 (==bound), payload cut → INCOMPLETE', () {
       // 8 bytes expected (2 * fp32), only 4 present.
-      expect(bothPaths('3d02' '20' '00000000', () => mk(arrayMax: {7: 2})),
-          sofab.DecodeStatus.incomplete);
+      expect(
+        bothPaths(
+          '3d02'
+          '20'
+          '00000000',
+          () => mk(arrayMax: {7: 2}),
+        ),
+        sofab.DecodeStatus.incomplete,
+      );
     });
   });
 
@@ -126,7 +209,13 @@ void main() {
     // id 15 skipped: shouldRead=false, so no onArrayBegin, no INVALID — a skipped
     // subtree is not schema-validated (CORELIB_PLAN §6.4).
     final v = mk(arrayMax: {15: 4}, skipIds: {15});
-    final st = sofab.Decoder.decode(hexToBytes('7b05' '0102030405'), v);
+    final st = sofab.Decoder.decode(
+      hexToBytes(
+        '7b05'
+        '0102030405',
+      ),
+      v,
+    );
     expect(v.order, isEmpty);
     expect(v.inv, isFalse);
     expect(st, sofab.DecodeStatus.complete);
