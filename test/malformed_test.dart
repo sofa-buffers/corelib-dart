@@ -156,7 +156,13 @@ void main() {
 
   test('field id above ID_MAX (2^31) → INVALID', () {
     // header varint (2^31 << 3) | 0 → id 2^31, unsigned, value 5.
-    expect(decode('8080808040' '05'), sofab.DecodeStatus.invalid);
+    expect(
+      decode(
+        '8080808040'
+        '05',
+      ),
+      sofab.DecodeStatus.invalid,
+    );
   });
 
   test('field id exactly ID_MAX (2^31-1) is accepted (control)', () {
