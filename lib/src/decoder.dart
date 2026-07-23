@@ -43,6 +43,29 @@ abstract class MessageVisitor {
   void onFp32Array(int id, Float32List values) {}
   void onFp64Array(int id, Float64List values) {}
 
+  /// Called with the wire element count the instant an array's `count` varint is
+  /// read — for **every** array kind (unsigned / signed / fixlen) — *before* any
+  /// element is consumed and *before* the truncation check. Fires only for a
+  /// field being read (never a skipped one, matching the whole-array callbacks).
+  ///
+  /// A schema-bound consumer overrides this to reject `count > N` at the header:
+  /// setting its own sticky INVALID flag here makes INVALID dominate a truncated
+  /// tail (MESSAGE_SPEC §5.2 anti-folding), which the post-assembly
+  /// [onUnsignedArray]/[onSignedArray]/[onFp32Array]/[onFp64Array] guard cannot —
+  /// a truncated array never reaches those. Default: no-op.
+  void onArrayBegin(int id, int count) {}
+
+  /// Called with a fixlen value's declared byte `length` and `subtype`
+  /// ([FixlenType]) the instant its length word is read — *before* the payload
+  /// and *before* the truncation check. Fires only for a field being read.
+  ///
+  /// A schema-bound consumer overrides this to reject `length > maxlen` at the
+  /// header (INVALID then dominates a truncated payload, §5.2). For a string the
+  /// wire `length` is exactly the UTF-8 byte length, so the check is exact and
+  /// lets the generator drop the redundant post-decode length guard. Default:
+  /// no-op.
+  void onFixlenHeader(int id, int subtype, int length) {}
+
   /// A sequence opened. Return a visitor for its children (which follows the
   /// same push/pull contract recursively), or `null` to skip the sub-sequence.
   /// Default: descend, reusing this visitor.
@@ -353,6 +376,9 @@ class Decoder {
         return _fail(DecodeStatus.limitExceeded);
       }
     }
+    // Header hand-off before truncation can be surfaced: a schema-invalid length
+    // set here (via the override's sticky flag) dominates a short payload (§5.2).
+    if (_read) _topVisitor!.onFixlenHeader(_fieldId, subtype, length);
     _fixSubtype = subtype;
     _payloadTotal = length;
     _payloadPos = 0;
@@ -424,6 +450,9 @@ class Decoder {
         count > limits.maxArrayCount!) {
       return _fail(DecodeStatus.limitExceeded);
     }
+    // Header hand-off before any element (and thus before truncation) — an
+    // over-count set INVALID here dominates a short element tail (§5.2).
+    if (_read) _topVisitor!.onArrayBegin(_fieldId, count);
     _arrCount = count;
     _arrIndex = 0;
     _arrInts = _read ? Int64List(count) : null;
@@ -475,6 +504,8 @@ class Decoder {
         count > limits.maxArrayCount!) {
       return _fail(DecodeStatus.limitExceeded);
     }
+    // Header hand-off before the shared fixlen word / payload (before truncation).
+    if (_read) _topVisitor!.onArrayBegin(_fieldId, count);
     _arrCount = count;
     _arrIndex = 0;
     _state = _sArrFixWord;
@@ -710,6 +741,9 @@ class _ContiguousDecoder {
         return _bad(DecodeStatus.limitExceeded);
       }
     }
+    // Header hand-off before the truncation check, so a schema-invalid length
+    // (flagged in the override) dominates a short payload (§5.2).
+    if (read) vis!.onFixlenHeader(id, subtype, length);
     if (_pos + length > _len) return _bad(DecodeStatus.incomplete);
     final start = _pos;
     _pos += length;
@@ -760,6 +794,9 @@ class _ContiguousDecoder {
         count > _limits.maxArrayCount!) {
       return _bad(DecodeStatus.limitExceeded);
     }
+    // Header hand-off before the element loop (before truncation) — over-count
+    // flagged here dominates a short tail (§5.2).
+    if (read) vis!.onArrayBegin(id, count);
     final signed = type == WireType.arraySigned;
     final out = read ? Int64List(count) : null;
     // Note: hand-inlining the varint read here measured *slower* under AOT — the
@@ -788,6 +825,9 @@ class _ContiguousDecoder {
         count > _limits.maxArrayCount!) {
       return _bad(DecodeStatus.limitExceeded);
     }
+    // Header hand-off right after the count (before the word / payload, thus
+    // before truncation) — over-count flagged here dominates a short tail (§5.2).
+    if (read) vis!.onArrayBegin(id, count);
     final word = _uvarint();
     if (_st != DecodeStatus.complete) return false;
     final length = word >>> 3;
