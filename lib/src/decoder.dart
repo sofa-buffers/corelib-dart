@@ -80,6 +80,24 @@ class _Frame {
   final MessageVisitor? visitor;
 }
 
+/// Fills [dst] with [count] fp32 elements from little-endian wire bytes in [src]
+/// starting at [srcStart], preserving each element's raw 32-bit pattern
+/// (CORELIB_PLAN §4.6 — a signaling NaN must not be quieted). On a little-endian
+/// host (every platform Dart targets) this is a single bulk byte copy: bit-exact
+/// *and* faster than a per-element float read. A big-endian host falls back to
+/// endian-swapping element reads — which cannot preserve an sNaN, but no such
+/// host exists in practice.
+void _readFp32Array(Float32List dst, Uint8List src, int srcStart, int count) {
+  if (Endian.host == Endian.little) {
+    Uint8List.sublistView(dst).setRange(0, count * 4, src, srcStart);
+  } else {
+    final bd = ByteData.sublistView(src, srcStart, srcStart + count * 4);
+    for (var i = 0; i < count; i++) {
+      dst[i] = bd.getFloat32(i * 4, Endian.little);
+    }
+  }
+}
+
 /// Streaming SofaBuffers decoder (CORELIB_PLAN §5.2).
 ///
 /// Feed arbitrarily small chunks via [feed]; the state machine suspends and
@@ -505,14 +523,12 @@ class Decoder {
   }
 
   void _emitFixArray() {
-    final bd = ByteData.sublistView(_payloadBuf!);
     if (_arrFixSubtype == FixlenType.fp32) {
       final out = _arrF32!;
-      for (var i = 0; i < _arrCount; i++) {
-        out[i] = bd.getFloat32(i * 4, Endian.little);
-      }
+      _readFp32Array(out, _payloadBuf!, 0, _arrCount);
       _topVisitor!.onFp32Array(_fieldId, out);
     } else {
+      final bd = ByteData.sublistView(_payloadBuf!);
       final out = _arrF64!;
       for (var i = 0; i < _arrCount; i++) {
         out[i] = bd.getFloat64(i * 8, Endian.little);
@@ -783,14 +799,12 @@ class _ContiguousDecoder {
     final start = _pos;
     _pos += total;
     if (read) {
-      final bd = ByteData.sublistView(_buf, start, start + total);
       if (subtype == FixlenType.fp32) {
         final o = Float32List(count);
-        for (var i = 0; i < count; i++) {
-          o[i] = bd.getFloat32(i * 4, Endian.little);
-        }
+        _readFp32Array(o, _buf, start, count);
         vis!.onFp32Array(id, o);
       } else {
+        final bd = ByteData.sublistView(_buf, start, start + total);
         final o = Float64List(count);
         for (var i = 0; i < count; i++) {
           o[i] = bd.getFloat64(i * 8, Endian.little);

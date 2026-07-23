@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:sofabuffers/sofabuffers.dart' as sofab;
 import 'package:test/test.dart';
 
@@ -22,6 +24,13 @@ class _DoubleVisitor extends sofab.MessageVisitor {
   final List<double> values = <double>[];
   @override
   void onFp32(int id, double v) => values.add(v);
+}
+
+/// Captures the fp32 array (a `Float32List`, whose storage holds raw bits).
+class _ArrayVisitor extends sofab.MessageVisitor {
+  Float32List? arr;
+  @override
+  void onFp32Array(int id, Float32List v) => arr = v;
 }
 
 int _reencodeBits(int bits) {
@@ -94,5 +103,59 @@ void main() {
     final v = _DoubleVisitor();
     expect(sofab.Decoder.decode(wire, v), sofab.DecodeStatus.complete);
     expect(v.values.single.isNaN, isTrue);
+  });
+
+  // --- fp32 arrays: a Float32List carries raw 32-bit elements, so an array of
+  // NaNs must round-trip bit-for-bit too (§4.6). -----------------------------
+
+  Float32List f32ListOfBits(List<int> bits) {
+    final arr = Float32List(bits.length);
+    final asBits = arr.buffer.asUint32List(arr.offsetInBytes, bits.length);
+    for (var i = 0; i < bits.length; i++) {
+      asBits[i] = bits[i];
+    }
+    return arr;
+  }
+
+  List<int> bitsOf(Float32List arr) =>
+      arr.buffer.asUint32List(arr.offsetInBytes, arr.length).toList();
+
+  test('writeFp32Array emits Float32List element bytes verbatim (sNaN preserved)', () {
+    final arr = f32ListOfBits([0x7F800001, 0x3F800000, 0xFF800001]);
+    final wire = sofab.Encoder.encodeToBytes((e) => e.writeFp32Array(1, arr));
+    // header id1 array-fixlen (0x0d), count 3, word (4<<3)|fp32 (0x20), then
+    // 3×4 LE bytes: 0100807f | 0000803f | 010080ff.
+    expect(bytesToHex(wire), '0d0320' '0100807f' '0000803f' '010080ff');
+  });
+
+  test('fp32 array of NaNs round-trips bit-for-bit (contiguous decode)', () {
+    final arr = f32ListOfBits([0x7F800001, 0x7FC00001, 0xFF800001, 0x7FBFFFFF]);
+    final wire = sofab.Encoder.encodeToBytes((e) => e.writeFp32Array(1, arr));
+    final v = _ArrayVisitor();
+    expect(sofab.Decoder.decode(wire, v), sofab.DecodeStatus.complete);
+    expect(bitsOf(v.arr!), bitsOf(arr));
+    // And the delivered list re-encodes to the same bytes.
+    final re = sofab.Encoder.encodeToBytes((e) => e.writeFp32Array(1, v.arr!));
+    expect(bytesToHex(re), bytesToHex(wire));
+  });
+
+  test('fp32 array of NaNs is exact through the streaming path too (chunked)', () {
+    final arr = f32ListOfBits([0x7F800001, 0xFF800001]);
+    final wire = sofab.Encoder.encodeToBytes((e) => e.writeFp32Array(1, arr));
+    final v = _ArrayVisitor();
+    final dec = sofab.Decoder(v);
+    for (final b in wire) {
+      dec.feed([b]);
+    }
+    expect(bitsOf(v.arr!), bitsOf(arr));
+  });
+
+  test('a plain List<double> fp32 array still encodes (no Float32List fast path)', () {
+    // Non-Float32List input has no raw 32-bit storage; it goes through the
+    // per-element path and must still produce correct bytes for finite values.
+    final wire = sofab.Encoder.encodeToBytes((e) => e.writeFp32Array(1, <double>[1.5, 2.0]));
+    final v = _ArrayVisitor();
+    expect(sofab.Decoder.decode(wire, v), sofab.DecodeStatus.complete);
+    expect(v.arr!.toList(), [1.5, 2.0]);
   });
 }
