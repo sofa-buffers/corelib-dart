@@ -154,6 +154,37 @@ void main() {
     );
   });
 
+  test('field id above ID_MAX (2^31) → INVALID', () {
+    // header varint (2^31 << 3) | 0 → id 2^31, unsigned, value 5.
+    expect(
+      decode(
+        '8080808040'
+        '05',
+      ),
+      sofab.DecodeStatus.invalid,
+    );
+  });
+
+  test('field id exactly ID_MAX (2^31-1) is accepted (control)', () {
+    // header ((2^31-1) << 3) | 0 → id idMax, unsigned, value 5 — skipped, ok.
+    final b = BytesBuilder();
+    var header = ((BigInt.from(2147483647) << 3) | BigInt.zero).toInt();
+    while (true) {
+      final lo = header & 0x7f;
+      header = header >>> 7;
+      if (header == 0) {
+        b.addByte(lo);
+        break;
+      }
+      b.addByte(lo | 0x80);
+    }
+    b.addByte(0x05); // value 5
+    expect(
+      sofab.Decoder.decode(b.toBytes(), RecordingVisitor()),
+      sofab.DecodeStatus.complete,
+    );
+  });
+
   test('INVALID takes precedence over INCOMPLETE when both apply', () {
     // 560a59 is malformed (fp64 wrong length) AND truncated → must be INVALID.
     expect(decode('560a59'), sofab.DecodeStatus.invalid);
