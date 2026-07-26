@@ -35,6 +35,7 @@ export 'src/wire.dart'
         fixlenMax,
         arrayMax,
         maxDepth,
+        lazySeqDepth,
         WireType,
         FixlenType,
         DecodeStatus,

@@ -29,9 +29,16 @@ class Person {
     enc.writeString(_idName, name);
     enc.writeUnsigned(_idAge, age);
     // array<string> lowers to a wrapper sequence: element id = array index
-    // (MESSAGE_SPEC §5.1).
-    enc.beginSequence(_idTags);
+    // (MESSAGE_SPEC §5.1). This is the array **field**, and its declared default
+    // is the empty collection, so it closes with `endSequence`: an empty `tags`
+    // holds the header back and emits nothing at all rather than an empty frame
+    // — absence reconstructs exactly the same value (MESSAGE_SPEC §2).
+    enc.beginSequenceLazy(_idTags);
     for (var i = 0; i < tags.length; i++) {
+      // Leaf elements: a `string` element equal to its default is omitted, which
+      // is the one place an array leaves an id gap (MESSAGE_SPEC §5.1). Were
+      // these elements *sequences*, each would close with `endSequenceKeep` —
+      // element presence is what carries the array's length.
       enc.writeString(i, tags[i]);
     }
     enc.endSequence();

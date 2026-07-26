@@ -14,6 +14,16 @@ const int arrayMax = 2147483647;
 /// Maximum nested-sequence depth (CORELIB_PLAN §4.9, §6.2).
 const int maxDepth = 255;
 
+/// How many nested sequence headers the encoder can hold back at once (the
+/// lazy-framing window of `Encoder.beginSequenceLazy`, MESSAGE_SPEC §2).
+///
+/// A run nested deeper than this is framed **eagerly**: still valid, just not
+/// canonical — an all-default sequence below the window keeps its empty frame,
+/// which every decoder accepts and normalizes away (MESSAGE_SPEC §2). Sized for
+/// real schemas rather than the format's [maxDepth] ceiling so the encoder stays
+/// small.
+const int lazySeqDepth = 32;
+
 /// The eight wire types — the low 3 bits of a field header (CORELIB_PLAN §4.3).
 class WireType {
   WireType._();

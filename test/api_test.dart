@@ -169,8 +169,11 @@ void main() {
 
   test('empty sequence and empty arrays are well-formed', () {
     final bytes = sofab.Encoder.encodeToBytes((e) {
-      e.beginSequence(0);
-      e.endSequence();
+      // `endSequenceKeep` is what puts a contentless frame on the wire (the
+      // wrapper-array element / explicit-empty-array cases of MESSAGE_SPEC §2,
+      // §5.1); `endSequence` would drop it. A decoder must accept it either way.
+      e.beginSequenceLazy(0);
+      e.endSequenceKeep();
       e.writeUnsignedArray(1, const []);
       e.writeFp32Array(2, const []);
     });

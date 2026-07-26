@@ -153,10 +153,10 @@ void replay(sofab.Encoder e, List<dynamic> fields) {
         }
         break;
       case 'sequence_begin':
-        e.beginSequence(jInt(f['id']));
+        e.beginSequenceLazy(jInt(f['id']));
         break;
       case 'sequence_end':
-        e.endSequence();
+        e.endSequenceKeep();
         break;
     }
   }

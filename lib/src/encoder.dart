@@ -18,6 +18,13 @@ typedef FlushCallback = void Function(Uint8List chunk);
 ///
 /// The hot path performs no heap allocation: scalars, headers and array elements
 /// are written straight into the caller-owned buffer.
+///
+/// Nested sequences are framed **lazily** ([beginSequenceLazy]): the header is
+/// held back until the sequence receives content, so a sequence-typed field that
+/// equals its declared default emits nothing at all (MESSAGE_SPEC §2). Close
+/// with [endSequence] to let a contentless one vanish, or [endSequenceKeep] to
+/// force the frame out — the wrapper-array **element** case, where presence
+/// carries the array's length (MESSAGE_SPEC §5.1).
 class Encoder {
   Encoder(
     this._flush, {
@@ -54,6 +61,21 @@ class Encoder {
   /// Encoder-side nesting depth guard (CORELIB_PLAN §4.9): must not open more
   /// than [maxDepth] sequences.
   int _depth = 0;
+
+  /// Ids of the innermost open sequences whose header has **not been written
+  /// yet** (MESSAGE_SPEC §2 lazy framing, [beginSequenceLazy]). Always a
+  /// contiguous suffix of the open sequences — writing any field commits the
+  /// whole run at once — which is what lets [endSequence] simply pop the last
+  /// entry.
+  ///
+  /// Allocated on the first [beginSequenceLazy], so a message with no sequence
+  /// never pays for it. These are **encoder state, not buffer content**: a flush
+  /// can never split a pending run, which is why a tiny output buffer produces
+  /// exactly the one-shot bytes.
+  Int32List? _pendingSeq;
+
+  /// Number of valid entries in [_pendingSeq].
+  int _nPendingSeq = 0;
 
   // ---- buffer management -------------------------------------------------
 
@@ -136,6 +158,22 @@ class Encoder {
     }
   }
 
+  /// Writes a field header — the `(id << 3) | wire_type` tag as a varint.
+  ///
+  /// This is the **single choke point every field write passes through** (every
+  /// `write*` method below calls it before its first payload byte), so it is
+  /// also where a held-back sequence run is committed: the field about to be
+  /// written is content, which proves every enclosing sequence differs from its
+  /// default and must be framed after all (MESSAGE_SPEC §2).
+  ///
+  /// Sequence start/end are not content and never trigger the commit —
+  /// [beginSequenceLazy] does not route through here at all, and
+  /// [endSequenceKeep] commits explicitly.
+  ///
+  /// Kept deliberately small — the commit itself lives in a separate
+  /// never-inlined method — so the AOT compiler keeps folding this into each
+  /// `write*` caller. Inlining it is worth ~30 instructions per field.
+  @pragma('vm:prefer-inline')
   void _writeHeader(int id, int type) {
     if (id < 0 || id > idMax) {
       throw const SofabException(
@@ -143,7 +181,25 @@ class Encoder {
         'field id out of range 0..2^31-1',
       );
     }
+    if (_nPendingSeq != 0) _commitPendingSequences();
     _writeVarint((id << 3) | type);
+  }
+
+  /// Emits the held-back sequence headers, **outermost first**, so the run
+  /// reaches the wire in exactly the order an eager encoder would have written
+  /// it. Runs at most once per non-default sequence run, never per field.
+  ///
+  /// The cold half of the choke point (Rust marks it `#[cold] #[inline(never)]`
+  /// for the same reason): keeping it out of line is what lets [_writeHeader]
+  /// stay inlined into every writer.
+  @pragma('vm:never-inline')
+  void _commitPendingSequences() {
+    final ids = _pendingSeq!;
+    final n = _nPendingSeq;
+    _nPendingSeq = 0;
+    for (var i = 0; i < n; i++) {
+      _writeVarint((ids[i] << 3) | WireType.sequenceStart);
+    }
   }
 
   // ---- scalars -----------------------------------------------------------
@@ -400,25 +456,97 @@ class Encoder {
 
   // ---- sequences ---------------------------------------------------------
 
-  /// Opens a nested sequence — a fresh id scope (CORELIB_PLAN §4.9).
-  void beginSequence(int id) {
+  /// Opens a nested sequence — a fresh id scope (CORELIB_PLAN §4.9) — whose
+  /// header is **held back** until the sequence turns out to have content.
+  ///
+  /// MESSAGE_SPEC §2 omits a sequence-typed field whose value equals its
+  /// declared default, and "not one child was written" is exactly that
+  /// condition — evaluated per child field, recursively, for free, because the
+  /// message layer already omits every child equal to its default. A sequence
+  /// closed with nothing in it therefore emits **nothing** instead of a two-byte
+  /// empty frame, and an all-default message becomes the empty byte string.
+  ///
+  /// The predicate is never a byte image of the object, so struct padding and
+  /// in-memory layout cannot influence it, and a non-zero nested default is
+  /// handled by the caller's ordinary per-field test.
+  ///
+  /// This is the **only** way to open a sequence. How it closes decides whether
+  /// a contentless one survives: [endSequence] drops it, [endSequenceKeep]
+  /// forces the frame out.
+  void beginSequenceLazy(int id) {
     if (_depth >= maxDepth) {
       throw const SofabException(
         SofabError.invalidMessage,
         'nesting exceeds MAX_DEPTH (255)',
       );
     }
-    _writeHeader(id, WireType.sequenceStart);
+    if (id < 0 || id > idMax) {
+      throw const SofabException(
+        SofabError.invalidArgument,
+        'field id out of range 0..2^31-1',
+      );
+    }
+    final ids = _pendingSeq ??= Int32List(lazySeqDepth);
+    if (_nPendingSeq < lazySeqDepth) {
+      ids[_nPendingSeq++] = id;
+    } else {
+      // Deeper than the hold-back window: commit the whole run and frame this
+      // one eagerly. That keeps "pending is a contiguous suffix of the open
+      // sequences" true, so [endSequence] can still just pop the last entry
+      // instead of popping an ancestor. Valid, merely non-canonical if this
+      // sequence turns out to be all-default.
+      _commitPendingSequences();
+      _writeVarint((id << 3) | WireType.sequenceStart);
+    }
     _depth++;
   }
 
-  /// Closes the current sequence — the single byte `0x07` (CORELIB_PLAN §4.9).
+  /// Closes the current sequence, letting it **vanish** if it received no
+  /// content; otherwise the single byte `0x07` (CORELIB_PLAN §4.9).
+  ///
+  /// Use it wherever absence encodes the same value as an empty frame: a
+  /// `struct`/`union` field, and an array field whose declared `default` is the
+  /// empty collection (MESSAGE_SPEC §2). Where the frame must be visible, close
+  /// with [endSequenceKeep] instead.
   ///
   /// An end with no matching begin is not rejected: the encoder writes what it
   /// is told, and the resulting bytes are then malformed, which is the decoder's
   /// verdict to make. Every other port behaves this way; the depth counter stops
   /// at zero so the `MAX_DEPTH` check on begin cannot be fooled by an underflow.
   void endSequence() {
+    if (_nPendingSeq != 0) {
+      // The innermost open sequence is the last held-back one and it got no
+      // content: drop it — header and end marker both.
+      _nPendingSeq--;
+      if (_depth > 0) _depth--;
+      return;
+    }
+    _writeByte(0x07);
+    if (_depth > 0) _depth--;
+  }
+
+  /// Closes the current sequence, **keeping** its frame even when it received no
+  /// content.
+  ///
+  /// Behaves like a write: it first emits any held-back headers — this frame's
+  /// and every enclosing one's — and then the end marker, so a contentless
+  /// sequence still reaches the wire as `begin` + `end`.
+  ///
+  /// Required wherever the frame carries information beyond its contents:
+  /// - a **wrapper-array element** (`struct`/`union`/nested row): element
+  ///   presence is what carries a dynamic array's length — *highest present id
+  ///   + 1* (MESSAGE_SPEC §5.1) — so dropping an all-default element would
+  ///   change the decoded **length**, not just the bytes;
+  /// - an array field already known to **differ from a non-empty declared
+  ///   `default`**: absence would reconstruct that default, so the empty frame
+  ///   is the only encoding of "explicitly empty" (MESSAGE_SPEC §2, §3).
+  ///
+  /// The two failure directions are not symmetric, which is why this is the safe
+  /// choice when in doubt: using it where [endSequence] would do costs one
+  /// non-canonical empty frame that every decoder normalizes away, while the
+  /// reverse silently changes an array's length.
+  void endSequenceKeep() {
+    if (_nPendingSeq != 0) _commitPendingSequences();
     _writeByte(0x07);
     if (_depth > 0) _depth--;
   }
@@ -433,6 +561,7 @@ class Encoder {
     _pos = offset;
     _flushStart = offset;
     _depth = 0;
+    _nPendingSeq = 0;
   }
 
   /// Bytes written into the current buffer but not yet flushed.

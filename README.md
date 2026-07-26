@@ -99,6 +99,48 @@ final status = sofab.Decoder.decode(bytes, MyVisitor());
 assert(status == sofab.DecodeStatus.complete);
 ```
 
+### Sequences: lazy framing
+
+A sequence-typed **field** whose value equals its declared default is *omitted*,
+not written as an empty `begin`/`end` frame (MESSAGE_SPEC §2). Whether that is
+the case depends on what the children turn out to be, while the header has to go
+out before them — so `beginSequenceLazy` **holds the header back** and the first
+field write commits it. Nothing is ever buffered: the held-back ids are encoder
+state, so a tiny output buffer still produces the one-shot bytes.
+
+```dart
+sofab.Encoder.encodeToBytes((e) {
+  e.beginSequenceLazy(1);
+  e.endSequence();          // no content → emits NOTHING (not `0E 07`)
+});
+
+sofab.Encoder.encodeToBytes((e) {
+  e.beginSequenceLazy(1);
+  e.writeUnsigned(0, 42);   // content commits the held-back header
+  e.endSequence();          // → 0E 00 2A 07, exactly the eager bytes
+});
+
+sofab.Encoder.encodeToBytes((e) {
+  e.beginSequenceLazy(1);
+  e.endSequenceKeep();      // frame forced out → 0E 07
+});
+```
+
+Which closer to use is a static property of the schema position, not of the
+value:
+
+| position | closer |
+|---|---|
+| `struct` / `union` field | `endSequence` |
+| array field (the wrapper) | `endSequence` |
+| wrapper-array **element** (`struct`/`union`/nested row) | `endSequenceKeep` |
+| array field known to differ from a **non-empty** declared `default` | `endSequenceKeep` |
+
+`endSequenceKeep` is the safe default when in doubt: using it where
+`endSequence` would do costs one non-canonical empty frame that every decoder
+normalizes away, while the reverse silently changes a decoded array's **length**
+(element presence is what carries it — MESSAGE_SPEC §5.1).
+
 ### Streaming a message larger than the buffer
 
 Drive the flush callback with an output buffer smaller than the whole message;
