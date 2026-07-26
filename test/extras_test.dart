@@ -93,10 +93,7 @@ void main() {
     // The encoder writes what it is told; an end with no matching begin makes
     // the *bytes* malformed, which is the decoder's verdict, not the encoder's.
     // Every other port behaves this way.
-    expect(
-      sofab.Encoder.encodeToBytes((e) => e.endSequence()),
-      equals([0x07]),
-    );
+    expect(sofab.Encoder.encodeToBytes((e) => e.endSequence()), equals([0x07]));
   });
 
   test('feed after a terminal INVALID keeps returning INVALID', () {
