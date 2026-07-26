@@ -63,7 +63,6 @@ enum DecodeStatus {
 /// carrying one of these; the decoder reports [DecodeStatus] instead.
 enum SofabError {
   ok,
-  usageError,
   bufferFull,
   invalidArgument,
   invalidMessage,
