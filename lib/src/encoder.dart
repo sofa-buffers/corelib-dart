@@ -413,15 +413,14 @@ class Encoder {
   }
 
   /// Closes the current sequence — the single byte `0x07` (CORELIB_PLAN §4.9).
+  ///
+  /// An end with no matching begin is not rejected: the encoder writes what it
+  /// is told, and the resulting bytes are then malformed, which is the decoder's
+  /// verdict to make. Every other port behaves this way; the depth counter stops
+  /// at zero so the `MAX_DEPTH` check on begin cannot be fooled by an underflow.
   void endSequence() {
-    if (_depth <= 0) {
-      throw const SofabException(
-        SofabError.usageError,
-        'endSequence with no open sequence',
-      );
-    }
     _writeByte(0x07);
-    _depth--;
+    if (_depth > 0) _depth--;
   }
 
   /// Drains any buffered bytes downstream (CORELIB_PLAN §5.1). Call once at the

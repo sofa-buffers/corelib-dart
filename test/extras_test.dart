@@ -89,17 +89,11 @@ void main() {
     );
   });
 
-  test('endSequence with no open sequence throws UsageError', () {
-    expect(
-      () => sofab.Encoder.encodeToBytes((e) => e.endSequence()),
-      throwsA(
-        isA<sofab.SofabException>().having(
-          (e) => e.code,
-          'code',
-          sofab.SofabError.usageError,
-        ),
-      ),
-    );
+  test('endSequence with no open sequence is written, not rejected', () {
+    // The encoder writes what it is told; an end with no matching begin makes
+    // the *bytes* malformed, which is the decoder's verdict, not the encoder's.
+    // Every other port behaves this way.
+    expect(sofab.Encoder.encodeToBytes((e) => e.endSequence()), equals([0x07]));
   });
 
   test('feed after a terminal INVALID keeps returning INVALID', () {
