@@ -108,6 +108,12 @@ out before them — so `beginSequenceLazy` **holds the header back** and the fir
 field write commits it. Nothing is ever buffered: the held-back ids are encoder
 state, so a tiny output buffer still produces the one-shot bytes.
 
+The hold-back is **unbounded** — it reaches the format's full `MAX_DEPTH` of 255,
+growing on demand and allocating nothing until the first sequence is opened — so
+this port's output is canonical at *every* nesting level. (A fixed window with
+eager framing beyond it is an allowance for heap-free profiles only;
+CORELIB_PLAN §6, "How deep the hold-back reaches".)
+
 ```dart
 sofab.Encoder.encodeToBytes((e) {
   e.beginSequenceLazy(1);

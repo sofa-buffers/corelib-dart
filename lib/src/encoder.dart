@@ -17,7 +17,10 @@ typedef FlushCallback = void Function(Uint8List chunk);
 /// mid-stream buffer swap via [installBuffer].
 ///
 /// The hot path performs no heap allocation: scalars, headers and array elements
-/// are written straight into the caller-owned buffer.
+/// are written straight into the caller-owned buffer. The one exception is the
+/// held-back-sequence run below, which is allocated on the first
+/// [beginSequenceLazy] (never in the constructor, so an encoder that opens no
+/// sequence never pays for it) and grown at most a handful of times.
 ///
 /// Nested sequences are framed **lazily** ([beginSequenceLazy]): the header is
 /// held back until the sequence receives content, so a sequence-typed field that
@@ -68,10 +71,17 @@ class Encoder {
   /// whole run at once — which is what lets [endSequence] simply pop the last
   /// entry.
   ///
-  /// Allocated on the first [beginSequenceLazy], so a message with no sequence
-  /// never pays for it. These are **encoder state, not buffer content**: a flush
-  /// can never split a pending run, which is why a tiny output buffer produces
-  /// exactly the one-shot bytes.
+  /// The run is **unbounded**: it grows on demand up to [maxDepth], so the
+  /// hold-back reaches every legal nesting level and this port is canonical at
+  /// every depth (CORELIB_PLAN §6, "How deep the hold-back reaches" — only a
+  /// heap-free profile may bound the run and frame eagerly beyond the bound).
+  /// There is therefore no eager fallback, and one fewer way to break the
+  /// contiguous-suffix invariant.
+  ///
+  /// `null` until the first [beginSequenceLazy], so an encoder that never opens
+  /// a sequence never allocates it. These are **encoder state, not buffer
+  /// content**: a flush can never split a pending run, which is why a tiny
+  /// output buffer produces exactly the one-shot bytes.
   Int32List? _pendingSeq;
 
   /// Number of valid entries in [_pendingSeq].
@@ -473,6 +483,12 @@ class Encoder {
   /// This is the **only** way to open a sequence. How it closes decides whether
   /// a contentless one survives: [endSequence] drops it, [endSequenceKeep]
   /// forces the frame out.
+  ///
+  /// There is **no depth window**: the pending run grows on demand and holds
+  /// back to the full [maxDepth], so a contentless nest is dropped at every
+  /// legal depth and the output is canonical everywhere (CORELIB_PLAN §6).
+  /// Nesting itself is still bounded — opening more than [maxDepth] sequences
+  /// throws [SofabError.invalidMessage].
   void beginSequenceLazy(int id) {
     if (_depth >= maxDepth) {
       throw const SofabException(
@@ -486,19 +502,25 @@ class Encoder {
         'field id out of range 0..2^31-1',
       );
     }
-    final ids = _pendingSeq ??= Int32List(lazySeqDepth);
-    if (_nPendingSeq < lazySeqDepth) {
-      ids[_nPendingSeq++] = id;
-    } else {
-      // Deeper than the hold-back window: commit the whole run and frame this
-      // one eagerly. That keeps "pending is a contiguous suffix of the open
-      // sequences" true, so [endSequence] can still just pop the last entry
-      // instead of popping an ancestor. Valid, merely non-canonical if this
-      // sequence turns out to be all-default.
-      _commitPendingSequences();
-      _writeVarint((id << 3) | WireType.sequenceStart);
+    var ids = _pendingSeq;
+    if (ids == null || _nPendingSeq == ids.length) {
+      ids = _growPendingSequences();
     }
+    ids[_nPendingSeq++] = id;
     _depth++;
+  }
+
+  /// Allocates (first hold-back) or doubles the pending-run store. Out of line
+  /// and never on the steady-state path: the [maxDepth] ceiling of 255 caps the
+  /// total at six growths, and an encoder that never opens a sequence never
+  /// reaches it at all.
+  @pragma('vm:never-inline')
+  Int32List _growPendingSequences() {
+    final old = _pendingSeq;
+    if (old == null) return _pendingSeq = Int32List(8);
+    final grown = Int32List(old.length * 2);
+    grown.setRange(0, old.length, old);
+    return _pendingSeq = grown;
   }
 
   /// Closes the current sequence, letting it **vanish** if it received no

@@ -123,7 +123,9 @@ String fp64Hex(double v) {
 // --------------------------------------------------------------------------
 
 /// Replays a vector's op list through the **raw** encoder and compares against
-/// the vector's dense `serialized` bytes, which always carry the frame.
+/// the vector's dense `serialized` bytes, which always carry the frame. (The
+/// vectors' other column, `serialized_sparse`, is deliberately never read in
+/// this repo — see the note in `vectors_test.dart`.)
 ///
 /// The `sequence_end` op therefore closes with [sofab.Encoder.endSequenceKeep]:
 /// this harness is the primitive layer, with no message layer above it that

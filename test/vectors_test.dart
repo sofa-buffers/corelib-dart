@@ -11,6 +11,18 @@ import 'vector_support.dart';
 ///
 /// This port supports the full wire format (no feature-disable), so per the
 /// vectors README it **ignores `requires` and runs every vector**.
+///
+/// **Which column this repo asserts:** every check below uses `serialized` —
+/// the dense, primitive-layer ground truth: exactly the bytes the raw
+/// encoder/decoder API produces and consumes for the vector's op list. Each
+/// vector also carries a `serialized_sparse` column, and **no test here reads
+/// it, by design**: it is the MESSAGE_SPEC §2 sparse form, which only a message
+/// layer can produce — the layer that knows each field's declared default and
+/// therefore which fields (and which all-default sequences) to omit. A corelib
+/// has no message layer; it is handed ops and writes them. `serialized_sparse`
+/// is consumed by the **generator's** conformance drivers
+/// (`tests/conformance/<lang>/` in `sofa-buffers/generator`), which generate a
+/// message layer from the schema and compare its output against that column.
 void main() {
   final root =
       decodeVectorJson(File('assets/test_vectors.json').readAsStringSync())

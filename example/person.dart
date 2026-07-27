@@ -25,21 +25,32 @@ class Person {
   /// Writes this object's fields through [enc] (the streaming path). The
   /// one-shot [serialize] and the chunked [serializeTo] both funnel through
   /// here, so there is a single encoding.
+  ///
+  /// **One rule, applied everywhere: emit a field iff its value ≠ its declared
+  /// default** (MESSAGE_SPEC §2 — sparse encoding is mandatory and canonical;
+  /// there is no dense mode). The schema declares no `default`, so each field's
+  /// default is its type's zero value: `''`, `0`, and the empty list. Absence
+  /// reconstructs exactly that, which is why omitting is value-preserving.
   void encodeInto(sofab.Encoder enc) {
-    enc.writeString(_idName, name);
-    enc.writeUnsigned(_idAge, age);
+    // Leaf fields: the plain ≠-default test.
+    if (name != '') enc.writeString(_idName, name);
+    if (age != 0) enc.writeUnsigned(_idAge, age);
     // array<string> lowers to a wrapper sequence: element id = array index
-    // (MESSAGE_SPEC §5.1). This is the array **field**, and its declared default
-    // is the empty collection, so it closes with `endSequence`: an empty `tags`
-    // holds the header back and emits nothing at all rather than an empty frame
-    // — absence reconstructs exactly the same value (MESSAGE_SPEC §2).
+    // (MESSAGE_SPEC §5.1). A sequence-typed field is no exception to the rule —
+    // it is compared per child, recursively, and "not one child was written" is
+    // exactly "equals the default". `beginSequenceLazy` holds the header back
+    // so the encoder gets that test for free, and `endSequence` lets a `tags`
+    // that stayed empty vanish entirely rather than emit an empty frame.
     enc.beginSequenceLazy(_idTags);
     for (var i = 0; i < tags.length; i++) {
-      // Leaf elements: a `string` element equal to its default is omitted, which
-      // is the one place an array leaves an id gap (MESSAGE_SPEC §5.1). Were
-      // these elements *sequences*, each would close with `endSequenceKeep` —
-      // element presence is what carries the array's length.
-      enc.writeString(i, tags[i]);
+      // The same rule again, one level down: a `string` element is a leaf
+      // field, so a default-valued one is omitted — the one place an array
+      // leaves an id gap on the wire (MESSAGE_SPEC §2, §5.1). Were these
+      // elements *sequences*, this would be the one exception: each would close
+      // with `endSequenceKeep`, because element presence is what carries the
+      // array's length (highest present id + 1) and dropping an all-default
+      // element would change that length, not just the bytes.
+      if (tags[i] != '') enc.writeString(i, tags[i]);
     }
     enc.endSequence();
   }
@@ -111,8 +122,9 @@ class _TagsVisitor extends sofab.MessageVisitor {
 
   @override
   void onString(int id, String value) {
-    // Element id == array index (MESSAGE_SPEC §5.1). Grow to fit; absent
-    // (default "") elements would leave gaps — filled here for completeness.
+    // Element id == array index (MESSAGE_SPEC §5.1). The encoder omits an
+    // element equal to its default, so ids arrive with gaps; the decode side of
+    // the same rule is to restore each missing `dest[id]` from that default.
     while (tags.length <= id) {
       tags.add('');
     }
@@ -146,6 +158,23 @@ void main() {
   print('streamed : ${dec.value}  (status: ${status.name})');
   assert(status == sofab.DecodeStatus.complete);
   assert(dec.value.tags[1] == 'mathematician');
+
+  // --- the sparse rule, taken to its conclusion ---
+  // Every field at its default → every field omitted → the empty byte string
+  // (MESSAGE_SPEC §2). The `tags` sequence is omitted with the rest: its header
+  // was never committed, so not even an empty frame reaches the wire.
+  final empty = Person().serialize();
+  print('all-default: ${empty.length} bytes  → ${Person.deserialize(empty)}');
+  assert(empty.isEmpty);
+  final blank = Person.deserialize(empty);
+  assert(blank.name == '' && blank.age == 0 && blank.tags.isEmpty);
+
+  // A default-valued element is omitted too, so it leaves an id gap and a
+  // trailing default element collapses: ['x', ''] encodes exactly like ['x'],
+  // and round-trips losslessly against a default-initialised destination.
+  final gapped = (Person()..tags = ['', 'b', '']).serialize();
+  assert(_hex(gapped) == _hex((Person()..tags = ['', 'b']).serialize()));
+  assert(Person.deserialize(gapped).tags.join(',') == ',b');
   print('OK — one-shot and streaming produce identical bytes and objects.');
 }
 

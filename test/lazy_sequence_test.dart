@@ -119,10 +119,63 @@ void main() {
     );
   });
 
-  test('lazy framing is output-buffer-size independent', () {
-    // Held-back ids are ENCODER STATE, not buffer content, so a flush can never
-    // split a pending run: a 3-byte buffer produces exactly the one-shot bytes
-    // (CORELIB_PLAN §5.1, §6).
+  group('every header-writing entry point commits the pending run', () {
+    // The commit hook sits in the single `_writeHeader` choke point, but each
+    // writer is a separate call site into it — including the two inside
+    // `writeString` (the ASCII fast path and the strict-transcode path). A
+    // writer that reached the wire without committing would silently drop its
+    // enclosing frames while their `end` markers stayed behind, i.e. corrupt
+    // bytes rather than a visible failure, so drive ALL of them.
+    final writers = <String, void Function(sofab.Encoder)>{
+      'writeUnsigned': (e) => e.writeUnsigned(0, 42),
+      'writeSigned': (e) => e.writeSigned(0, -42),
+      'writeBool': (e) => e.writeBool(0, true),
+      'writeFp32': (e) => e.writeFp32(0, 1.5),
+      'writeFp32Bits': (e) => e.writeFp32Bits(0, 0x7F800001),
+      'writeFp64': (e) => e.writeFp64(0, 2.5),
+      'writeString (ASCII fast path)': (e) => e.writeString(0, 'ada'),
+      'writeString (strict transcode)': (e) => e.writeString(0, 'adaé€'),
+      'writeBlob': (e) => e.writeBlob(0, Uint8List.fromList([1, 2, 3])),
+      'writeUnsignedArray': (e) => e.writeUnsignedArray(0, const [1, 2]),
+      'writeSignedArray': (e) => e.writeSignedArray(0, const [-1, 2]),
+      'writeFp32Array': (e) => e.writeFp32Array(0, const [1.0, 2.0]),
+      'writeFp64Array': (e) => e.writeFp64Array(0, const [1.0, 2.0]),
+    };
+
+    writers.forEach((name, write) {
+      test(name, () {
+        final bare = enc(write); // the same field with no enclosing frame
+        // Two levels deep, so this also proves the WHOLE run is committed,
+        // outermost header first — not merely the innermost one.
+        final framed = enc((e) {
+          e.beginSequenceLazy(1);
+          e.beginSequenceLazy(2);
+          write(e);
+          e.endSequence();
+          e.endSequence();
+        });
+        expect(framed, equals(<int>[0x0E, 0x16] + bare + <int>[0x07, 0x07]));
+        // ...and both frames are really on the wire for a decoder.
+        final rec = RecordingVisitor();
+        expect(sofab.Decoder.decode(framed, rec), sofab.DecodeStatus.complete);
+        expect(rec.events.take(2), equals(['SEQ:1', 'SEQ:2']));
+      });
+    });
+  });
+
+  test('a run committed across flush boundaries equals the one-shot bytes', () {
+    // What this proves: driving the same sequence of calls through a 3-byte
+    // output buffer — so the flush callback fires several times *inside* the
+    // committed frames, including between a header and the field it encloses —
+    // yields byte-identical output to the one-shot encode (CORELIB_PLAN §5.1,
+    // §6).
+    //
+    // What it deliberately does NOT claim is that a flush lands while a header
+    // is still held back: that is UNREACHABLE BY CONSTRUCTION. A held-back
+    // header occupies no buffer space (the pending ids are encoder state, not
+    // buffer content), and the buffer only fills through a write — which runs
+    // the commit before its first byte reaches the buffer. So a pending run can
+    // never straddle a flush, and no buffer size can make it.
     void build(sofab.Encoder e) {
       e.beginSequenceLazy(1);
       e.beginSequenceLazy(2);
@@ -145,39 +198,89 @@ void main() {
     expect(out.toBytes().sublist(0, 4), equals([0x0E, 0x00, 0x2A, 0x1E]));
   });
 
-  test('a run deeper than the hold-back window is framed eagerly', () {
-    // Past lazySeqDepth the encoder commits the whole run and writes the header
-    // immediately. That keeps "pending is a contiguous suffix of the open
-    // sequences" true, so endSequence still closes THIS sequence rather than
-    // popping an ancestor — the frames are merely non-canonical (kept even
-    // though every one of them is empty).
-    final n = sofab.lazySeqDepth + 1;
-    final bytes = enc((e) {
-      for (var i = 0; i < n; i++) {
-        e.beginSequenceLazy(1);
-      }
-      for (var i = 0; i < n; i++) {
-        e.endSequence();
-      }
-    });
-    expect(
-      bytes,
-      equals(
-        List<int>.filled(n, 0x0E) + List<int>.filled(n, 0x07),
-        // n begins, then n ends — nothing dropped, nothing mispaired.
-      ),
-    );
-    // Exactly at the window everything still vanishes.
+  test('the hold-back is unbounded — 40 deep, all contentless, zero bytes', () {
+    // There is NO hold-back window. This port can allocate, so it must hold
+    // back to the full MAX_DEPTH and be canonical at every depth (CORELIB_PLAN
+    // §6, "How deep the hold-back reaches"); only a heap-free profile may bound
+    // the run and frame eagerly past the bound. 40 is deeper than the fixed
+    // 32-entry window this encoder used to have — exactly the depth at which
+    // the old eager fallback emitted 40 empty frames instead of nothing.
     expect(
       enc((e) {
-        for (var i = 0; i < sofab.lazySeqDepth; i++) {
+        for (var i = 0; i < 40; i++) {
           e.beginSequenceLazy(1);
         }
-        for (var i = 0; i < sofab.lazySeqDepth; i++) {
+        for (var i = 0; i < 40; i++) {
           e.endSequence();
         }
       }),
       isEmpty,
+    );
+  });
+
+  test('the hold-back reaches MAX_DEPTH', () {
+    // The ceiling itself: 255 nested contentless sequences still vanish, and a
+    // single leaf at the bottom brings all 255 headers back in wire order.
+    expect(
+      enc((e) {
+        for (var i = 0; i < sofab.maxDepth; i++) {
+          e.beginSequenceLazy(1);
+        }
+        for (var i = 0; i < sofab.maxDepth; i++) {
+          e.endSequence();
+        }
+      }),
+      isEmpty,
+    );
+
+    final withLeaf = enc((e) {
+      for (var i = 0; i < sofab.maxDepth; i++) {
+        e.beginSequenceLazy(1);
+      }
+      e.writeUnsigned(0, 42);
+      for (var i = 0; i < sofab.maxDepth; i++) {
+        e.endSequence();
+      }
+    });
+    expect(
+      withLeaf,
+      equals(
+        List<int>.filled(sofab.maxDepth, 0x0E) +
+            <int>[0x00, 0x2A] +
+            List<int>.filled(sofab.maxDepth, 0x07),
+      ),
+    );
+    // ...and it decodes: the committed run is well-formed at full depth.
+    final rec = RecordingVisitor();
+    expect(sofab.Decoder.decode(withLeaf, rec), sofab.DecodeStatus.complete);
+  });
+
+  test('a deep run drops only the empty sequences, at any depth', () {
+    // Interleaving past the old window: 40 nested frames, a leaf written at the
+    // bottom of the 30th, and empty siblings on either side. Only the empty
+    // ones vanish; the ancestors of the leaf are all framed.
+    final bytes = enc((e) {
+      for (var i = 0; i < 40; i++) {
+        e.beginSequenceLazy(1);
+        if (i == 29) {
+          e.beginSequenceLazy(2); // empty sibling before the content
+          e.endSequence();
+          e.writeUnsigned(0, 7);
+        }
+      }
+      for (var i = 0; i < 40; i++) {
+        e.endSequence();
+      }
+    });
+    // 30 headers (ids 1..1) are committed by the leaf; the 10 deeper ones and
+    // the empty sibling never reach the wire.
+    expect(
+      bytes,
+      equals(
+        List<int>.filled(30, 0x0E) +
+            <int>[0x00, 0x07] +
+            List<int>.filled(30, 0x07),
+      ),
     );
   });
 
