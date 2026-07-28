@@ -24,7 +24,7 @@ void main() {
         e.writeSignedArray(7, const [-1, -2]);
         e.writeFp32Array(8, const [1.0, 2.0]);
         e.writeFp64Array(9, const [1.0, 2.0]);
-        e.beginSequence(10);
+        e.beginSequenceLazy(10);
         e.writeUnsigned(0, 42);
         e.endSequence();
       });
@@ -76,7 +76,7 @@ void main() {
     expect(
       () => sofab.Encoder.encodeToBytes((e) {
         for (var i = 0; i <= sofab.maxDepth; i++) {
-          e.beginSequence(0);
+          e.beginSequenceLazy(0);
         }
       }),
       throwsA(

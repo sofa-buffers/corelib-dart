@@ -122,6 +122,16 @@ String fp64Hex(double v) {
 // Encoding a vector's `fields` through the corelib encoder.
 // --------------------------------------------------------------------------
 
+/// Replays a vector's op list through the **raw** encoder and compares against
+/// the vector's dense `serialized` bytes, which always carry the frame. (The
+/// vectors' other column, `serialized_sparse`, is deliberately never read in
+/// this repo — see the note in `vectors_test.dart`.)
+///
+/// The `sequence_end` op therefore closes with [sofab.Encoder.endSequenceKeep]:
+/// this harness is the primitive layer, with no message layer above it that
+/// could decide a sequence is all-default. Closing with `endSequence` would make
+/// the three empty-sequence vectors encode to nothing (MESSAGE_SPEC §2) and fail
+/// against the dense expectation.
 Uint8List encodeFields(List<dynamic> fields, {int offset = 0}) {
   return sofab.Encoder.encodeToBytes((e) {
     for (final f in fields.cast<Map<String, dynamic>>()) {
@@ -153,10 +163,10 @@ Uint8List encodeFields(List<dynamic> fields, {int offset = 0}) {
           _encodeArray(e, f);
           break;
         case 'sequence_begin':
-          e.beginSequence(jInt(f['id']));
+          e.beginSequenceLazy(jInt(f['id']));
           break;
         case 'sequence_end':
-          e.endSequence();
+          e.endSequenceKeep();
           break;
         default:
           throw StateError('unknown op $op');

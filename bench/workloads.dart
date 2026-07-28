@@ -26,7 +26,7 @@ void encodeTypical(sofab.Encoder e) {
   e.writeFp32(4, 3.14159);
   e.writeString(5, 'sofab');
   e.writeUnsignedArray(6, const [10, 20, 30, 40]); // u16 values
-  e.beginSequence(7);
+  e.beginSequenceLazy(7);
   e.writeUnsigned(1, 99);
   e.writeSigned(2, -7);
   e.endSequence();
@@ -63,7 +63,7 @@ void encodePerf(sofab.Encoder e) {
     -800000,
   ]); // i32
   e.writeFp64Array(11, const [3.14159265, 6.28318530, 9.42477795, 12.56637060]);
-  e.beginSequence(12);
+  e.beginSequenceLazy(12);
   e.writeUnsigned(1, 99);
   e.writeSigned(2, -7);
   e.endSequence();
