@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Fixed — a skipped `string` is no longer UTF-8-validated (CORELIB_PLAN §6.4)
+
+Crucible finding **F-0038** (#22). UTF-8 validation now fires only where a
+`string` is **materialized** — read into a declared destination — never on a
+payload the consumer is skipping, whether it is skipped because the field id is
+unknown to the schema (§6.4) or because the header's wire type/subtype
+contradicts it (MESSAGE_SPEC §7.3, which routes to the same skip).
+
+- **Added** `MessageVisitor.onStringBytes(int id, Uint8List bytes)` — the
+  decoder's string path. It delivers the **raw wire bytes**, un-validated and
+  un-transcoded, and fires only for a field being materialized. A Dart `String`
+  cannot carry invalid bytes without the lossy U+FFFD substitution §6.4 forbids,
+  so handing the bytes over is the only way a push consumer can resolve its
+  destination *before* deciding to validate. Schema-bound (generated) consumers
+  override it, switch on `id` first, and call `utf8Valid` + `utf8.decode` only
+  inside a matched arm.
+- **Not breaking.** The default `onStringBytes` keeps this port's always-strict
+  behaviour for hand-written visitors: it validates, fails the decode with
+  `invalid` on malformed bytes, and forwards the decoded value to `onString`.
+  Existing visitors are unaffected; `onString` is now documented as a
+  convenience layered on `onStringBytes` rather than the decoder's own path.
+- Unchanged: framing is still fully validated while skipping (the F-0012 half) —
+  the field header, the `fixlen_word`, reserved subtypes 0x4–0x7,
+  `FIXLEN_MAX`/`ARRAY_MAX`, `MAX_DEPTH`, varint overflow, and the exact
+  `length`-byte advance. Also unchanged: the strict encode side, `blob` (never
+  UTF-8-validated), and the `utf8Valid` validator itself.
+
 ### Breaking — sequence framing is now lazy (MESSAGE_SPEC §2, CORELIB_PLAN §6)
 
 Depends on the spec change in `sofa-buffers/documentation#29`.
