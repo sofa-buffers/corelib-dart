@@ -43,6 +43,32 @@ class FixlenType {
   // 4..7 are reserved and MUST be rejected as INVALID.
 }
 
+/// Which element kind an array field carries, reported to
+/// [MessageVisitor.onArrayBegin] (CORELIB_PLAN §4.8).
+///
+/// The two fixlen kinds are kept **apart**: a fixlen array's element subtype is
+/// what decides whether the field is this schema field's value at all
+/// (MESSAGE_SPEC §7.3), so a collapsed "fixlen" kind would leave a schema-bound
+/// consumer unable to tell an `fp64` header at an `fp32` slot from a real one.
+/// That is why the hook is delivered *after* the `fixlen_word` for wire type
+/// `arrayFixlen` — see [MessageVisitor.onArrayBegin].
+///
+/// The ordinals (`index`) are **normative** and identical across every
+/// SofaBuffers port: unsigned 0, signed 1, fp32 2, fp64 3.
+enum ArrayKind {
+  /// Unsigned-varint elements (wire type [WireType.arrayUnsigned]).
+  unsigned,
+
+  /// Signed (zig-zag) varint elements (wire type [WireType.arraySigned]).
+  signed,
+
+  /// IEEE-754 32-bit float elements (`fixlen_word` subtype fp32, 4 bytes each).
+  fp32,
+
+  /// IEEE-754 64-bit double elements (`fixlen_word` subtype fp64, 8 bytes each).
+  fp64,
+}
+
 /// The three-valued decode outcome (CORELIB_PLAN §5.2), plus [limitExceeded]
 /// which surfaces a receiver-side policy limit distinctly (CORELIB_PLAN §6.2.1,
 /// §6.3): the four-outcome option the spec explicitly permits.

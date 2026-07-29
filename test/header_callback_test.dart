@@ -8,9 +8,11 @@ import 'vector_support.dart';
 /// Header-callback tests for MESSAGE_SPEC §5.2 anti-folding (Crucible F-0032).
 ///
 /// The corelib exposes [sofab.MessageVisitor.onArrayBegin] /
-/// [sofab.MessageVisitor.onFixlenHeader], fired the instant the count / length
-/// word is read — *before* the element / payload and *before* the truncation
-/// check. A schema-bound visitor (as the generator emits) rejects
+/// [sofab.MessageVisitor.onFixlenHeader], fired at header time — *before* the
+/// element / payload and *before* the truncation check. (For a fixlen *array*
+/// the hook waits for the `fixlen_word` as well, so it can name the element kind;
+/// that ordering is CORELIB_PLAN §4.8 and is covered by
+/// `fixlen_array_subtype_test.dart`.) A schema-bound visitor (as the generator emits) rejects
 /// `count > N` / `length > maxlen` there, so the resulting INVALID **dominates**
 /// a truncated tail: a message that is both malformed and cut short is INVALID,
 /// never INCOMPLETE. The corelib itself carries no verdict logic — it only calls
@@ -26,7 +28,13 @@ void main() {
     Map<int, int> arrayMax = const {},
     Map<int, int> strMax = const {},
     Set<int> skipIds = const {},
-  }) => SchemaVisitor(arrayMax: arrayMax, strMax: strMax, skipIds: skipIds);
+    Map<int, sofab.ArrayKind> declared = const {},
+  }) => SchemaVisitor(
+    arrayMax: arrayMax,
+    strMax: strMax,
+    skipIds: skipIds,
+    declared: declared,
+  );
 
   // Runs the same bytes through both decode paths — one-shot contiguous, and the
   // streaming state machine fed one byte at a time (worst-case suspend/resume) —
@@ -120,7 +128,7 @@ void main() {
       ),
       v,
     );
-    expect(v.order, ['begin:15:4', 'arr:15']);
+    expect(v.order, ['begin:15:unsigned:4', 'arr:15']);
   });
 
   group('string over-maxlen (id 5 = header 0x2a, subtype 2)', () {
@@ -230,8 +238,10 @@ class SchemaVisitor extends sofab.MessageVisitor {
     this.arrayMax = const {},
     this.strMax = const {},
     this.skipIds = const {},
+    this.declared = const {},
   });
   final Map<int, int> arrayMax; // id -> schema element-count bound N
+  final Map<int, sofab.ArrayKind> declared; // id -> declared element kind
   final Map<int, int> strMax; // id -> schema byte-length bound (maxlen)
   final Set<int> skipIds;
   bool inv = false; // sticky INVALID flag, as the generated visitor keeps
@@ -241,8 +251,13 @@ class SchemaVisitor extends sofab.MessageVisitor {
   bool shouldRead(int id, int type) => !skipIds.contains(id);
 
   @override
-  void onArrayBegin(int id, int count) {
-    order.add('begin:$id:$count');
+  void onArrayBegin(int id, sofab.ArrayKind kind, int count) {
+    order.add('begin:$id:${kind.name}:$count');
+    // Model the generated guard: the schema bound applies only to a header whose
+    // element kind matches the declared one (CORELIB_PLAN §4.8 step 3/4). `null`
+    // in [declared] means "any kind", which is what the pre-F-0042 tests assume.
+    final want = declared[id];
+    if (want != null && want != kind) return; // §7.3 skip — no bound applies
     final n = arrayMax[id];
     if (n != null && count > n) inv = true;
   }
