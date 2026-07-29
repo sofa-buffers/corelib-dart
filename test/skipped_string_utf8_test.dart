@@ -212,15 +212,22 @@ void main() {
       );
     });
 
-    test('an out-of-range string_array index is skipped, not validated', () {
-      // 2a = header id 5, FIXLEN — index 5 is past the declared count of 5, so
-      // it is not a destination and its payload is never inspected.
-      expectVerdict(
-        'c6 0c 2a 0a 8a 07',
-        sofab.DecodeStatus.complete,
-        events: ['SEQ:200', 'END'],
-      );
-    });
+    test(
+      'the string_array scope binds EVERY element id, not just id < count',
+      () {
+        // 2a = header id 5, FIXLEN — index 5 is past the declared count of 5. The
+        // wrapper scope is still a string destination for it: the destination
+        // guard is a wildcard over the scope, exactly like the store switch it
+        // mirrors. Narrowing it to `id < 5` would silently turn the §7.1
+        // over-capacity rejection into a skip-and-accept — and would take a
+        // position on the neighbouring, still-open F-0041 ordering dispute.
+        expectVerdict(
+          'c6 0c 2a 0a 8a 07',
+          sofab.DecodeStatus.invalid,
+          events: ['SEQ:200', 'END'],
+        );
+      },
+    );
 
     test('struct_array element `v` rejects invalid UTF-8', () {
       // d6 0c SEQ id 202 · 06 SEQ id 0 (element 0) · 0a FIXLEN id 1 (`v`) ·
@@ -461,20 +468,24 @@ class _Nested extends sofab.MessageVisitor {
 }
 
 /// `string_array` (id 200): element id = index, count 5, maxlen 64.
+///
+/// The scope binds a string destination for **every** id, with the same
+/// wildcard the store switch uses — not just `id < 5`. Whether an over-capacity
+/// index is *additionally* a §7.1 violation, and how that orders against a §7.3
+/// skip, is the open F-0041 dispute this stand-in deliberately stays out of.
 class _StringSeq extends sofab.MessageVisitor {
   _StringSeq(this.s);
   final _Sink s;
 
   @override
   void onFixlenHeader(int id, int subtype, int length) {
-    if (id < 5 && subtype == sofab.FixlenType.string && length > 64) {
+    if (subtype == sofab.FixlenType.string && length > 64) {
       s.inv = true;
     }
   }
 
   @override
   void onStringBytes(int id, Uint8List bytes) {
-    if (id >= 5) return; // past the declared count: not a destination
     if (!sofab.utf8Valid(bytes)) {
       s.inv = true;
       return;
@@ -502,7 +513,8 @@ class _StructSeq extends sofab.MessageVisitor {
 
   @override
   sofab.MessageVisitor? onSequenceStart(int id) {
-    if (id >= 5) return null;
+    // Same wildcard as above: every element index opens the element scope, so
+    // the `v` destination inside it binds regardless of the declared count.
     s.events.add('SEQ:$id');
     return _StructElem(s);
   }
