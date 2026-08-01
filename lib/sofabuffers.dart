@@ -37,6 +37,7 @@ export 'src/wire.dart'
         maxDepth,
         WireType,
         FixlenType,
+        ArrayKind,
         DecodeStatus,
         SofabError,
         SofabException;
