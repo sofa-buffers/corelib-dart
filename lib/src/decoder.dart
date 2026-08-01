@@ -92,17 +92,37 @@ abstract class MessageVisitor {
   void onFp32Array(int id, Float32List values) {}
   void onFp64Array(int id, Float64List values) {}
 
-  /// Called with the wire element count the instant an array's `count` varint is
-  /// read — for **every** array kind (unsigned / signed / fixlen) — *before* any
-  /// element is consumed and *before* the truncation check. Fires only for a
-  /// field being read (never a skipped one, matching the whole-array callbacks).
+  /// Called **once** per array field, for every array kind, with the wire
+  /// element [count] and the element [kind] — *before* any element is consumed
+  /// and *before* the truncation check. Fires only for a field being read (never
+  /// a skipped one, matching the whole-array callbacks), and never per element.
   ///
-  /// A schema-bound consumer overrides this to reject `count > N` at the header:
-  /// setting its own sticky INVALID flag here makes INVALID dominate a truncated
-  /// tail (MESSAGE_SPEC §5.2 anti-folding), which the post-assembly
+  /// **Where it fires** (CORELIB_PLAN §4.8):
+  ///
+  /// * for an integer array (`arrayUnsigned` / `arraySigned`) — the instant the
+  ///   `count` varint is read; there is no second word;
+  /// * for a fixlen array (`arrayFixlen`) — after the `fixlen_word` has been read
+  ///   *and* validated as a format matter, so [kind] is the real element subtype
+  ///   ([ArrayKind.fp32] or [ArrayKind.fp64]), never a collapsed "fixlen".
+  ///
+  /// That ordering is required, not incidental. A fixlen array whose element
+  /// subtype contradicts the declared element type is a **skipped** field
+  /// (MESSAGE_SPEC §7.3) and was never this field's value, so its element count
+  /// is not this field's count and the schema `count` bound MUST NOT be applied
+  /// to it. Only a header whose [kind] matches the declared element type gets the
+  /// bound. A message that ends *between* the two words is therefore INCOMPLETE,
+  /// not INVALID — the decoder cannot yet know which field it is looking at.
+  ///
+  /// A schema-bound consumer overrides this to reject `count > N` at the header
+  /// — inside the arm that matches the declared [kind]: setting its own sticky
+  /// INVALID flag here makes INVALID dominate a truncated tail (MESSAGE_SPEC §5.2
+  /// anti-folding), which the post-assembly
   /// [onUnsignedArray]/[onSignedArray]/[onFp32Array]/[onFp64Array] guard cannot —
   /// a truncated array never reaches those. Default: no-op.
-  void onArrayBegin(int id, int count) {}
+  ///
+  /// A zero-count fixlen array still carries its `fixlen_word`, so the hook still
+  /// fires exactly once with the correct [kind] and `count == 0`.
+  void onArrayBegin(int id, ArrayKind kind, int count) {}
 
   /// Called with a fixlen value's declared byte `length` and `subtype`
   /// ([FixlenType]) the instant its length word is read — *before* the payload
@@ -514,8 +534,18 @@ class Decoder {
       return _fail(DecodeStatus.limitExceeded);
     }
     // Header hand-off before any element (and thus before truncation) — an
-    // over-count set INVALID here dominates a short element tail (§5.2).
-    if (_read) _topVisitor!.onArrayBegin(_fieldId, count);
+    // over-count set INVALID here dominates a short element tail (§5.2). An
+    // integer array carries no second word, so this is already the point at
+    // which the element kind is fully known (§4.8).
+    if (_read) {
+      _topVisitor!.onArrayBegin(
+        _fieldId,
+        _arrType == WireType.arraySigned
+            ? ArrayKind.signed
+            : ArrayKind.unsigned,
+        count,
+      );
+    }
     _arrCount = count;
     _arrIndex = 0;
     _arrInts = _read ? Int64List(count) : null;
@@ -567,8 +597,11 @@ class Decoder {
         count > limits.maxArrayCount!) {
       return _fail(DecodeStatus.limitExceeded);
     }
-    // Header hand-off before the shared fixlen word / payload (before truncation).
-    if (_read) _topVisitor!.onArrayBegin(_fieldId, count);
+    // NO header hand-off here: for a fixlen array the element subtype lives in
+    // the *next* word, and §4.8 requires it to be decided before the field is
+    // offered (see [MessageVisitor.onArrayBegin]). The hook fires in
+    // [_stepArrFixWord]. The format ceiling and the receiver policy limit above
+    // stay on the count word — they are not schema bounds.
     _arrCount = count;
     _arrIndex = 0;
     _state = _sArrFixWord;
@@ -590,6 +623,17 @@ class Decoder {
       if (length != 8) return _fail(DecodeStatus.invalid);
     } else {
       return _fail(DecodeStatus.invalid); // string/blob/reserved not allowed
+    }
+    // The subtype is now known and legal, so this is the §4.8 point at which the
+    // field can be offered: the hook carries the real element kind, and still
+    // fires before the payload (thus before truncation), so an over-count set
+    // INVALID here dominates a short tail (§5.2). It also fires for count == 0.
+    if (_read) {
+      _topVisitor!.onArrayBegin(
+        _fieldId,
+        subtype == FixlenType.fp32 ? ArrayKind.fp32 : ArrayKind.fp64,
+        _arrCount,
+      );
     }
     _arrFixSubtype = subtype;
     _payloadTotal = _arrCount * length;
@@ -859,10 +903,17 @@ class _ContiguousDecoder {
         count > _limits.maxArrayCount!) {
       return _bad(DecodeStatus.limitExceeded);
     }
-    // Header hand-off before the element loop (before truncation) — over-count
-    // flagged here dominates a short tail (§5.2).
-    if (read) vis!.onArrayBegin(id, count);
     final signed = type == WireType.arraySigned;
+    // Header hand-off before the element loop (before truncation) — over-count
+    // flagged here dominates a short tail (§5.2). An integer array carries no
+    // second word, so the element kind is already fully known here (§4.8).
+    if (read) {
+      vis!.onArrayBegin(
+        id,
+        signed ? ArrayKind.signed : ArrayKind.unsigned,
+        count,
+      );
+    }
     final out = read ? Int64List(count) : null;
     // Note: hand-inlining the varint read here measured *slower* under AOT — the
     // compiler inlines `_uvarint` better than a manual copy — so keep the call.
@@ -890,9 +941,9 @@ class _ContiguousDecoder {
         count > _limits.maxArrayCount!) {
       return _bad(DecodeStatus.limitExceeded);
     }
-    // Header hand-off right after the count (before the word / payload, thus
-    // before truncation) — over-count flagged here dominates a short tail (§5.2).
-    if (read) vis!.onArrayBegin(id, count);
+    // NO header hand-off here: §4.8 has the element subtype decided first, so the
+    // hook waits for the word below (see [MessageVisitor.onArrayBegin]). EOF
+    // between the two words is therefore INCOMPLETE, not INVALID.
     final word = _uvarint();
     if (_st != DecodeStatus.complete) return false;
     final length = word >>> 3;
@@ -903,6 +954,16 @@ class _ContiguousDecoder {
       if (length != 8) return _bad(DecodeStatus.invalid);
     } else {
       return _bad(DecodeStatus.invalid);
+    }
+    // Subtype known and legal: offer the field now, carrying the real element
+    // kind, still before the payload (thus before truncation) — over-count
+    // flagged here dominates a short tail (§5.2). Fires for count == 0 too.
+    if (read) {
+      vis!.onArrayBegin(
+        id,
+        subtype == FixlenType.fp32 ? ArrayKind.fp32 : ArrayKind.fp64,
+        count,
+      );
     }
     final total = count * length;
     if (_pos + total > _len) return _bad(DecodeStatus.incomplete);

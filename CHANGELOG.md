@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### Breaking — `onArrayBegin` carries the element kind, and waits for it (§4.8)
+
+Crucible finding **F-0042** (issue #23). A fixlen array carries two words —
+`element_count`, then the `fixlen_word` — and CORELIB_PLAN §4.8 fixes the order in
+which they are acted on: the element **subtype** decides whether the field is this
+schema field's value at all (MESSAGE_SPEC §7.3), and only a field that survives
+that gets the schema `count` bound. The old hook fired between the two words and
+carried no kind, so generated code could not implement that order at all.
+
+- **Added** `sofab.ArrayKind` — `unsigned`, `signed`, `fp32`, `fp64`. The two
+  fixlen kinds are deliberately kept apart; the ordinals (0/1/2/3) are normative
+  and identical across every SofaBuffers port.
+- **Changed** `MessageVisitor.onArrayBegin(int id, int count)` →
+  `onArrayBegin(int id, ArrayKind kind, int count)`. Any override must be updated;
+  generated code is the expected consumer and sofabgen changes in lockstep.
+- **Changed** where the hook fires for wire type `arrayFixlen`: now **after** the
+  `fixlen_word` has been read and validated, so `kind` is the real element
+  subtype. Consequences, both intended: a message that ends *between* the two
+  words is `incomplete` rather than being judged on the count alone, and a header
+  whose kind contradicts the declared element type reaches the consumer as a
+  skippable field with no bound applied to its count.
+- **Unchanged**: the `ARRAY_MAX` format ceiling and the `maxArrayCount` receiver
+  policy limit both still fire on the *count* word (the latter still as
+  `limitExceeded`); an illegal fixlen-array element subtype (string/blob) or a
+  width mismatch is still `invalid`, never a §7.3 skip; integer arrays still fire
+  the hook immediately after their count word; a zero-count fixlen array still
+  fires the hook exactly once, with the correct kind. The hook still fires once
+  per array field, never per element.
+
 ### Fixed — a skipped `string` is no longer UTF-8-validated (CORELIB_PLAN §6.4)
 
 Crucible finding **F-0038** (#22). UTF-8 validation now fires only where a
