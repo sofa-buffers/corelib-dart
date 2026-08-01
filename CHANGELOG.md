@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.10.0 - 2026-08-01
 
 ### Breaking — `onArrayBegin` carries the element kind, and waits for it (§4.8)
 
