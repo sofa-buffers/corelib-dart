@@ -36,7 +36,56 @@ abstract class MessageVisitor {
   }
 
   void onFp64(int id, double value) {}
+
+  /// A `string` field was materialized and its bytes are valid UTF-8.
+  ///
+  /// This is a convenience layered on [onStringBytes]: it fires from that
+  /// method's **default** implementation, which validates the wire bytes and
+  /// transcodes them. A visitor that overrides [onStringBytes] owns the whole
+  /// string path and this method is then never called by the decoder.
   void onString(int id, String value) {}
+
+  /// A `string` field was materialized, carrying its **raw wire bytes** —
+  /// un-validated and un-transcoded (CORELIB_PLAN §6.4).
+  ///
+  /// This is the decoder's string path. It fires only for a field that is being
+  /// read into a destination: a skipped `string` (an id the consumer declined
+  /// via [shouldRead], an id inside a skipped sub-sequence, or any payload the
+  /// consumer discards) is a length jump whose bytes are never inspected, so it
+  /// never reaches here and is never UTF-8-validated — §6.4's *"skipped fields
+  /// are never validated"*, which MESSAGE_SPEC §7.3 extends to a field whose
+  /// wire type/subtype contradicts the schema.
+  ///
+  /// **Schema-bound (generated) consumers override this**, resolve the
+  /// destination for `id` *first*, and call `utf8Valid` + `utf8.decode` only
+  /// inside a matched destination arm — an unmatched id must return without
+  /// validating and without flagging INVALID. A Dart `String` cannot carry
+  /// invalid bytes without the lossy U+FFFD substitution §6.4 forbids, so
+  /// delivering the raw bytes is the only way a push consumer can honour the
+  /// materialize-only rule. Such an override reports a rejected payload through
+  /// its own sticky INVALID flag, exactly as it already does for a schema
+  /// `maxlen` breach seen in [onFixlenHeader].
+  ///
+  /// The default implementation preserves the always-strict behaviour of this
+  /// port for hand-written visitors: invalid UTF-8 at a materialized position
+  /// fails the decode with [DecodeStatus.invalid], and valid bytes are decoded
+  /// and forwarded to [onString].
+  ///
+  /// [bytes] is only valid for the duration of the call — the one-shot decoder
+  /// hands out a view onto the input buffer. Copy it to retain it.
+  void onStringBytes(int id, Uint8List bytes) {
+    if (!utf8Valid(bytes)) {
+      _stringRejected = true;
+      return;
+    }
+    onString(id, utf8.decode(bytes));
+  }
+
+  // Set by the default [onStringBytes] when the payload is not valid UTF-8, and
+  // consumed by `_deliverString` below. An override never touches it: a
+  // schema-bound consumer carries its own sticky INVALID flag.
+  bool _stringRejected = false;
+
   void onBlob(int id, Uint8List value) {}
   void onUnsignedArray(int id, Int64List values) {}
   void onSignedArray(int id, Int64List values) {}
@@ -93,6 +142,17 @@ abstract class MessageVisitor {
 
   /// The sequence whose children this visitor received has closed.
   void onSequenceEnd() {}
+}
+
+/// Hands a materialized `string` payload to [vis] as raw bytes. Returns `false`
+/// when the *default* [MessageVisitor.onStringBytes] rejected it as invalid
+/// UTF-8; an override signals a rejection through its own sticky flag instead,
+/// so this always returns `true` for one.
+bool _deliverString(MessageVisitor vis, int id, Uint8List bytes) {
+  vis.onStringBytes(id, bytes);
+  if (!vis._stringRejected) return true;
+  vis._stringRejected = false; // leave the visitor reusable for a fresh decode
+  return false;
 }
 
 /// Configured receiver-side technical limits (CORELIB_PLAN §6.2.1). These are a
@@ -446,10 +506,13 @@ class Decoder {
         );
         return true;
       case FixlenType.string:
-        // Validate first (strict, no U+FFFD substitution); only then decode the
-        // now-known-valid bytes (CORELIB_PLAN §6.4).
-        if (!utf8Valid(buf)) return _fail(DecodeStatus.invalid);
-        _topVisitor!.onString(_fieldId, utf8.decode(buf));
+        // Raw wire bytes go to the destination; validation happens there, never
+        // here — this point is only reached for a field being materialized
+        // (CORELIB_PLAN §6.4). The default hook validates strictly (no U+FFFD
+        // substitution) and only then decodes the now-known-valid bytes.
+        if (!_deliverString(_topVisitor!, _fieldId, buf)) {
+          return _fail(DecodeStatus.invalid);
+        }
         return true;
       case FixlenType.blob:
         _topVisitor!.onBlob(_fieldId, buf);
@@ -817,9 +880,11 @@ class _ContiguousDecoder {
           );
           break;
         case FixlenType.string:
+          // See _emitFixlen: the destination validates, the decoder does not.
           final view = Uint8List.sublistView(_buf, start, start + length);
-          if (!utf8Valid(view)) return _bad(DecodeStatus.invalid);
-          vis!.onString(id, utf8.decode(view));
+          if (!_deliverString(vis!, id, view)) {
+            return _bad(DecodeStatus.invalid);
+          }
           break;
         case FixlenType.blob:
           vis!.onBlob(id, Uint8List.sublistView(_buf, start, start + length));
