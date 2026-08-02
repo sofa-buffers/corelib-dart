@@ -3,6 +3,84 @@ import 'dart:typed_data';
 import 'utf8.dart';
 import 'wire.dart';
 
+/// The continuation bit of all eight bytes of a 64-bit word.
+const int _contBits = 0x8080808080808080;
+
+/// Spreads the low 56 bits of [v] into eight 7-bit groups, one per byte of the
+/// returned word (little-endian byte order = ascending varint groups).
+///
+/// This is the word-wise core of varint encoding: eight varint bytes are built
+/// in a register and stored with a **single** 64-bit write instead of eight
+/// bounds-checked byte writes. A byte store into a `Uint8List` costs ~15
+/// instructions under Dart AOT (bounds check + safepoint-checked loop), while a
+/// `ByteData.setUint64` costs ~20 for all eight — so this is worth ~2× on any
+/// varint-heavy payload.
+///
+/// The spread itself is three log-steps rather than eight mask-shift-or terms:
+/// split the 56 bits into two 28-bit halves four bytes apart, then each half
+/// into 14s two bytes apart, then each of those into 7s one byte apart. 12
+/// operations instead of 23.
+@pragma('vm:prefer-inline')
+int _spread56(int v) {
+  var x = v & 0xFFFFFFFFFFFFFF;
+  x = (x & 0xFFFFFFF) | ((x & 0xFFFFFFF0000000) << 4);
+  x = (x & 0x00003FFF00003FFF) | ((x & 0x0FFFC0000FFFC000) << 2);
+  return (x & 0x007F007F007F007F) | ((x & 0x3F803F803F803F80) << 1);
+}
+
+/// Byte length of the minimal unsigned-LEB128 encoding of [v], read as an
+/// unsigned 64-bit value (a negative Dart int has bit 63 set → 10 bytes).
+///
+/// A binary search, not a linear chain: three comparisons for any length rather
+/// than up to eight, which matters because large values (the ones that walk the
+/// whole chain) are exactly the ones a varint-heavy payload is full of.
+/// `bitLength` is not an option — it is a real call under Dart AOT, measured at
+/// twice the cost of the entire surrounding loop.
+@pragma('vm:prefer-inline')
+int _varintLen(int v) {
+  if (v < 0) return 10; // bit 63 set
+  if (v < 0x10000000) {
+    if (v < 0x4000) return v < 0x80 ? 1 : 2;
+    return v < 0x200000 ? 3 : 4;
+  }
+  if (v < 0x100000000000000) {
+    if (v < 0x40000000000) return v < 0x800000000 ? 5 : 6;
+    return v < 0x2000000000000 ? 7 : 8;
+  }
+  return 9;
+}
+
+/// Writes the varint for [v] at [p] in [bd] and returns the new position.
+///
+/// **Caller must guarantee `p + 10 <= buffer.length`**: up to eight bytes are
+/// stored unconditionally even for a shorter varint (the surplus lies beyond the
+/// returned position and is overwritten by the next write or never flushed).
+@pragma('vm:prefer-inline')
+int _putVarint(Uint8List buf, ByteData bd, int p, int v) {
+  if (v >= 0 && v < 0x80) {
+    // Plain list store: `ByteData.setUint8` measured ~10 instructions dearer,
+    // and single-byte varints are the most common thing the encoder writes.
+    buf[p] = v;
+    return p + 1;
+  }
+  final len = _varintLen(v);
+  var w = _spread56(v);
+  if (len <= 8) {
+    // Continuation bit on every byte but the last.
+    w |= _contBits & ((1 << ((len - 1) << 3)) - 1);
+    bd.setUint64(p, w, Endian.little);
+    return p + len;
+  }
+  bd.setUint64(p, w | _contBits, Endian.little);
+  final hi = v >>> 56; // the remaining 8 value bits
+  if (len == 9) {
+    bd.setUint8(p + 8, hi);
+    return p + 9;
+  }
+  bd.setUint16(p + 8, (hi & 0x7F) | 0x80 | ((hi >>> 7) << 8), Endian.little);
+  return p + 10;
+}
+
 /// A flush/drain callback (CORELIB_PLAN §5.1). Receives a **view** of the newly
 /// filled bytes; the encoder reuses its buffer immediately afterwards, so a
 /// callback that keeps the data must copy it. The view is only valid for the
@@ -139,22 +217,21 @@ class Encoder {
   /// value via unsigned shifts, so the full u64 range round-trips.
   ///
   /// Fast path: when the current buffer has room for a maximal (10-byte) varint,
-  /// write directly at the moving position with no per-byte flush-capacity
+  /// build the whole varint in a register and store it with one 64-bit write
+  /// ([_putVarint]) — no per-byte bounds check, no per-byte flush-capacity
   /// branch. Tiny streaming buffers fall back to the per-byte [_writeByte] path.
   void _writeVarint(int v) {
-    final buf = _buf;
-    var p = _pos;
-    if (p + 10 <= buf.length) {
-      while (true) {
-        final b = v & 0x7F;
-        v = v >>> 7;
-        if (v == 0) {
-          buf[p++] = b;
-          break;
-        }
-        buf[p++] = b | 0x80;
+    final p = _pos;
+    // Single-byte varint (every small id/count/value) — a plain `Uint8List`
+    // store, which is cheaper than routing through the `ByteData` view.
+    if (v >= 0 && v < 0x80) {
+      if (p < _buf.length) {
+        _buf[p] = v;
+        _pos = p + 1;
+        return;
       }
-      _pos = p;
+    } else if (p + 10 <= _buf.length) {
+      _pos = _putVarint(_buf, _bufData, p, v);
       return;
     }
     while (true) {
@@ -212,27 +289,53 @@ class Encoder {
     }
   }
 
+  /// Writes a field header immediately followed by one varint payload — the
+  /// shape of every integer scalar.
+  ///
+  /// Both varints are emitted under a **single** capacity check (a header plus a
+  /// value is at most 20 bytes), which halves the buffer-length loads and bounds
+  /// tests per field compared with two independent [_writeVarint] calls.
+  @pragma('vm:prefer-inline')
+  void _writeHeaderAndVarint(int id, int type, int value) {
+    if (id < 0 || id > idMax) {
+      throw const SofabException(
+        SofabError.invalidArgument,
+        'field id out of range 0..2^31-1',
+      );
+    }
+    // Must precede reading `_pos`: committing writes bytes of its own.
+    if (_nPendingSeq != 0) _commitPendingSequences();
+    final buf = _buf;
+    final p = _pos;
+    if (p + 20 <= buf.length) {
+      final bd = _bufData;
+      _pos = _putVarint(
+        buf,
+        bd,
+        _putVarint(buf, bd, p, (id << 3) | type),
+        value,
+      );
+      return;
+    }
+    _writeVarint((id << 3) | type);
+    _writeVarint(value);
+  }
+
   // ---- scalars -----------------------------------------------------------
 
   /// Writes an unsigned integer (CORELIB_PLAN §4.4). [value] is the raw 64-bit
   /// bit pattern; pass negative Dart ints to express values ≥ 2^63.
-  void writeUnsigned(int id, int value) {
-    _writeHeader(id, WireType.unsigned);
-    _writeVarint(value);
-  }
+  void writeUnsigned(int id, int value) =>
+      _writeHeaderAndVarint(id, WireType.unsigned, value);
 
   /// Writes a signed integer via zig-zag (CORELIB_PLAN §4.5).
-  void writeSigned(int id, int value) {
-    _writeHeader(id, WireType.signed);
-    _writeVarint((value << 1) ^ (value >> 63));
-  }
+  void writeSigned(int id, int value) =>
+      _writeHeaderAndVarint(id, WireType.signed, (value << 1) ^ (value >> 63));
 
   /// Writes a boolean — an unsigned `0`/`1`; booleans have no wire type of their
   /// own (CORELIB_PLAN §4.4).
-  void writeBool(int id, bool value) {
-    _writeHeader(id, WireType.unsigned);
-    _writeVarint(value ? 1 : 0);
-  }
+  void writeBool(int id, bool value) =>
+      _writeHeaderAndVarint(id, WireType.unsigned, value ? 1 : 0);
 
   /// Writes 4 float bytes little-endian straight into the buffer when there is
   /// room, else via the scratch slow path (tiny streaming buffer).
@@ -270,8 +373,7 @@ class Encoder {
 
   /// Writes an IEEE-754 32-bit float (fixlen subtype fp32, CORELIB_PLAN §4.6).
   void writeFp32(int id, double value) {
-    _writeHeader(id, WireType.fixlen);
-    _writeVarint((4 << 3) | FixlenType.fp32);
+    _writeHeaderAndVarint(id, WireType.fixlen, (4 << 3) | FixlenType.fp32);
     _putFloat32(value);
   }
 
@@ -283,15 +385,13 @@ class Encoder {
   /// The corelib never inspects or normalizes a float (CORELIB_PLAN §4.6), so
   /// the four bytes are emitted exactly as given.
   void writeFp32Bits(int id, int bits) {
-    _writeHeader(id, WireType.fixlen);
-    _writeVarint((4 << 3) | FixlenType.fp32);
+    _writeHeaderAndVarint(id, WireType.fixlen, (4 << 3) | FixlenType.fp32);
     _putUint32(bits & 0xFFFFFFFF);
   }
 
   /// Writes an IEEE-754 64-bit double (fixlen subtype fp64, CORELIB_PLAN §4.6).
   void writeFp64(int id, double value) {
-    _writeHeader(id, WireType.fixlen);
-    _writeVarint((8 << 3) | FixlenType.fp64);
+    _writeHeaderAndVarint(id, WireType.fixlen, (8 << 3) | FixlenType.fp64);
     _putFloat64(value);
   }
 
@@ -299,31 +399,32 @@ class Encoder {
   /// an unpaired surrogate with [SofabError.invalidArgument] — strict UTF-8,
   /// never lossy (CORELIB_PLAN §6.4).
   void writeString(int id, String value) {
-    final units = value.codeUnits;
-    final n = units.length;
     // Fast path: a pure-ASCII string (each code unit < 0x80 → 1 UTF-8 byte, and
     // trivially valid UTF-8) is written straight through with no intermediate
     // transcode buffer. This is the common case for field names, ids, tags, etc.
+    //
+    // `codeUnitAt` is read directly off the string — `value.codeUnits` would
+    // allocate a view object and turn every element read into an interface call.
+    final n = value.length;
     var ascii = true;
     for (var i = 0; i < n; i++) {
-      if (units[i] >= 0x80) {
+      if (value.codeUnitAt(i) >= 0x80) {
         ascii = false;
         break;
       }
     }
     if (ascii) {
-      _writeHeader(id, WireType.fixlen);
-      _writeVarint((n << 3) | FixlenType.string);
+      _writeHeaderAndVarint(id, WireType.fixlen, (n << 3) | FixlenType.string);
       final buf = _buf;
       var p = _pos;
       if (p + n <= buf.length) {
         for (var i = 0; i < n; i++) {
-          buf[p++] = units[i];
+          buf[p++] = value.codeUnitAt(i);
         }
         _pos = p;
       } else {
         for (var i = 0; i < n; i++) {
-          _writeByte(units[i]);
+          _writeByte(value.codeUnitAt(i));
         }
       }
       return;
@@ -336,15 +437,21 @@ class Encoder {
         'string is not valid UTF-8 (unpaired surrogate)',
       );
     }
-    _writeHeader(id, WireType.fixlen);
-    _writeVarint((bytes.length << 3) | FixlenType.string);
+    _writeHeaderAndVarint(
+      id,
+      WireType.fixlen,
+      (bytes.length << 3) | FixlenType.string,
+    );
     _writeRaw(bytes, 0, bytes.length);
   }
 
   /// Writes an opaque blob (fixlen subtype blob, CORELIB_PLAN §4.6).
   void writeBlob(int id, Uint8List value) {
-    _writeHeader(id, WireType.fixlen);
-    _writeVarint((value.length << 3) | FixlenType.blob);
+    _writeHeaderAndVarint(
+      id,
+      WireType.fixlen,
+      (value.length << 3) | FixlenType.blob,
+    );
     _writeRaw(value, 0, value.length);
   }
 
@@ -356,21 +463,23 @@ class Encoder {
     _writeHeader(id, WireType.arrayUnsigned);
     final n = values.length;
     _writeVarint(n);
-    final buf = _buf;
     var p = _pos;
-    // Bulk fast path: one capacity check for the whole array, indexed loop
-    // (no iterator), direct writes.
+    // Bulk fast path: one capacity check for the whole array, then a word-wise
+    // varint per element ([_putVarint]) with the position kept in a local — no
+    // per-element field reload and no per-byte bounds check.
+    //
+    // The `is Int64List` arm exists because `List<int>` is an *interface* call
+    // per element; promoting to the concrete type lets AOT inline the load.
+    final buf = _buf;
     if (p + n * 10 <= buf.length) {
-      for (var k = 0; k < n; k++) {
-        var v = values[k];
-        while (true) {
-          final b = v & 0x7F;
-          v = v >>> 7;
-          if (v == 0) {
-            buf[p++] = b;
-            break;
-          }
-          buf[p++] = b | 0x80;
+      final bd = _bufData;
+      if (values is Int64List) {
+        for (var k = 0; k < n; k++) {
+          p = _putVarint(buf, bd, p, values[k]);
+        }
+      } else {
+        for (var k = 0; k < n; k++) {
+          p = _putVarint(buf, bd, p, values[k]);
         }
       }
       _pos = p;
@@ -386,20 +495,19 @@ class Encoder {
     _writeHeader(id, WireType.arraySigned);
     final n = values.length;
     _writeVarint(n);
-    final buf = _buf;
     var p = _pos;
+    final buf = _buf;
     if (p + n * 10 <= buf.length) {
-      for (var k = 0; k < n; k++) {
-        final s = values[k];
-        var v = (s << 1) ^ (s >> 63); // zig-zag
-        while (true) {
-          final b = v & 0x7F;
-          v = v >>> 7;
-          if (v == 0) {
-            buf[p++] = b;
-            break;
-          }
-          buf[p++] = b | 0x80;
+      final bd = _bufData;
+      if (values is Int64List) {
+        for (var k = 0; k < n; k++) {
+          final s = values[k];
+          p = _putVarint(buf, bd, p, (s << 1) ^ (s >> 63)); // zig-zag
+        }
+      } else {
+        for (var k = 0; k < n; k++) {
+          final s = values[k];
+          p = _putVarint(buf, bd, p, (s << 1) ^ (s >> 63)); // zig-zag
         }
       }
       _pos = p;
