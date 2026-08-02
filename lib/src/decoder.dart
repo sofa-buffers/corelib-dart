@@ -74,7 +74,21 @@ abstract class MessageVisitor {
   /// [bytes] is only valid for the duration of the call — the one-shot decoder
   /// hands out a view onto the input buffer. Copy it to retain it.
   void onStringBytes(int id, Uint8List bytes) {
-    if (!utf8Valid(bytes)) {
+    // ASCII fast path: a byte < 0x80 is a complete, trivially valid UTF-8
+    // sequence, so one scan settles validity *and* the transcode —
+    // `String.fromCharCodes` builds the one-byte string directly, skipping both
+    // the general validator and the UTF-8 decoder. Field names, ids, tags and
+    // most identifiers hit this.
+    final n = bytes.length;
+    var i = 0;
+    while (i < n && bytes[i] < 0x80) {
+      i++;
+    }
+    if (i == n) {
+      onString(id, String.fromCharCodes(bytes));
+      return;
+    }
+    if (!utf8Valid(bytes, i)) {
       _stringRejected = true;
       return;
     }
@@ -183,6 +197,58 @@ class _Frame {
   final MessageVisitor? visitor;
 }
 
+/// The continuation bit of all eight bytes of a 64-bit word.
+const int _contBits = 0x8080808080808080;
+
+/// Shared 8-byte staging area for reading a **single** IEEE-754 payload.
+///
+/// Dart offers no bits→double conversion outside typed data, and building a view
+/// over the input costs ~300 instructions — far more than a scalar float read is
+/// worth. Copying the 4/8 payload bytes into this one permanently-allocated
+/// scratch and reading them back is several times cheaper, and it keeps a
+/// float-carrying message from paying for a whole-buffer view it needs nowhere
+/// else. Array payloads still use the buffer-wide view, where it amortizes.
+///
+/// Isolate-confined (Dart statics are per-isolate) and live only for the
+/// duration of one read, so there is no sharing hazard.
+final Uint8List _scratchBytes = Uint8List(8);
+final ByteData _scratchData = ByteData.view(_scratchBytes.buffer);
+
+/// Gathers eight 7-bit groups — one per byte of [x], little-endian — back into
+/// the low 56 bits of a value. The inverse of the encoder's spread step, and the
+/// core of the word-wise varint reader ([_ContiguousDecoder._uvarintWide]).
+/// Three log-steps rather than eight shift-mask-or terms — merge adjacent 7-bit
+/// groups into 14s, then 28s, then the full 56. 12 operations instead of 23.
+@pragma('vm:prefer-inline')
+int _unspread56(int x) {
+  var v = (x & 0x007F007F007F007F) | ((x & 0x7F007F007F007F00) >>> 1);
+  v = (v & 0x00003FFF00003FFF) | ((v & 0x3FFF00003FFF0000) >>> 2);
+  return (v & 0xFFFFFFF) | ((v & 0x0FFFFFFF00000000) >>> 4);
+}
+
+/// Index (0..7) of the byte holding the lowest set bit of [m], where [m] only
+/// ever has bits at the eight `0x80` positions — i.e. the varint's terminating
+/// byte.
+///
+/// A three-step binary search rather than `bitLength`: `bitLength` is a real
+/// method call under Dart AOT (not a count-leading-zeros intrinsic) and measured
+/// ~2× the cost of the whole surrounding loop.
+@pragma('vm:prefer-inline')
+int _termByte(int m) {
+  var idx = 0;
+  var x = m;
+  if ((x & 0xFFFFFFFF) == 0) {
+    idx = 4;
+    x >>>= 32;
+  }
+  if ((x & 0xFFFF) == 0) {
+    idx += 2;
+    x >>>= 16;
+  }
+  if ((x & 0xFF) == 0) idx += 1;
+  return idx;
+}
+
 /// Fills [dst] with [count] fp32 elements from little-endian wire bytes in [src]
 /// starting at [srcStart], preserving each element's raw 32-bit pattern
 /// (CORELIB_PLAN §4.6 — a signaling NaN must not be quieted). On a little-endian
@@ -257,6 +323,18 @@ class Decoder {
   DecodeStatus feed(List<int> data) {
     if (_terminal) return _terminalStatus;
     final n = data.length;
+    // `List<int>` indexing is an interface call per byte; promoting the common
+    // `Uint8List` case lets AOT compile the read down to a load. The elements
+    // are already 0..255 there, so the mask is a no-op and is dropped.
+    if (data is Uint8List) {
+      for (var i = 0; i < n; i++) {
+        if (!_step(data[i])) {
+          _terminal = true;
+          return _terminalStatus;
+        }
+      }
+      return _boundaryStatus();
+    }
     for (var i = 0; i < n; i++) {
       if (!_step(data[i] & 0xFF)) {
         _terminal = true;
@@ -707,6 +785,19 @@ class _ContiguousDecoder {
   final DecoderLimits _limits;
   final int _len;
   int _pos = 0;
+
+  ByteData? _bdCache;
+
+  /// Wide view of [_buf], created **on first use**.
+  ///
+  /// Constructing a typed-data view costs ~300 instructions under Dart AOT —
+  /// more than decoding a whole small message — so it is confined to the places
+  /// that amortize it over many elements (array payloads, §4.7–4.8) and created
+  /// only if such a field actually turns up. Scalar reads never trigger it: the
+  /// varint reader is a byte loop and one-off floats go through [_scratchData].
+  @pragma('vm:prefer-inline')
+  ByteData get _bd =>
+      _bdCache ??= ByteData.view(_buf.buffer, _buf.offsetInBytes, _len);
   // `complete` doubles as the "still ok" sentinel while walking.
   DecodeStatus _st = DecodeStatus.complete;
 
@@ -718,21 +809,42 @@ class _ContiguousDecoder {
   // Reads an unsigned LEB128 varint. On end-of-buffer sets INCOMPLETE; on an
   // overlong (>64-bit) varint sets INVALID. Value valid only when `_st` stays
   // `complete`.
+  //
+  // Three tiers, cheapest first: a single-byte varint (the overwhelmingly common
+  // case — field headers, small ids, counts, small values), then the word-wise
+  // reader when a maximal varint is guaranteed in bounds, then the byte loop for
+  // the last few bytes of the buffer.
+  @pragma('vm:prefer-inline')
   int _uvarint() {
-    // Hoist fields into locals (registers) for the hot loop, and keep the
-    // overflow guard out of the common per-byte path: bytes 1..9 (shift ≤ 56)
-    // can never overflow, so only the 10th byte (shift == 63) is checked.
+    final p = _pos;
+    if (p < _len) {
+      final b = _buf[p];
+      if (b < 0x80) {
+        _pos = p + 1;
+        return b;
+      }
+      // Hand the byte on rather than making the continuation re-read it.
+      return _uvarintMulti(b);
+    }
+    _st = DecodeStatus.incomplete;
+    return 0;
+  }
+
+  /// Continuation of a varint whose first byte [b0] is already in hand (and had
+  /// its continuation bit set), byte at a time.
+  ///
+  /// Deliberately *not* the word-wise reader: that needs the [_bd] view, whose
+  /// ~300-instruction construction only pays off when amortized over many
+  /// elements. A scalar field carries one varint, so the byte loop wins — the
+  /// word-wise reader lives in the array element loop ([_intArray]) instead.
+  /// This is also the path that reports INCOMPLETE.
+  int _uvarintMulti(int b0) {
     final buf = _buf;
     final len = _len;
-    var p = _pos;
-    var v = 0;
-    var shift = 0;
-    while (true) {
-      if (p >= len) {
-        _pos = p;
-        _st = DecodeStatus.incomplete;
-        return 0;
-      }
+    var p = _pos + 1; // [b0] is the byte at _pos
+    var v = b0 & 0x7F;
+    var shift = 7;
+    while (p < len) {
       final b = buf[p++];
       v |= (b & 0x7f) << shift;
       if ((b & 0x80) == 0) {
@@ -742,11 +854,7 @@ class _ContiguousDecoder {
       shift += 7;
       if (shift == 63) {
         // The 10th byte may set only bit 63 and must terminate the varint.
-        if (p >= len) {
-          _pos = p;
-          _st = DecodeStatus.incomplete;
-          return 0;
-        }
+        if (p >= len) break;
         final last = buf[p++];
         _pos = p;
         if ((last & 0x80) != 0 || (last & 0x7f) > 0x01) {
@@ -756,6 +864,9 @@ class _ContiguousDecoder {
         return v | ((last & 0x7f) << 63);
       }
     }
+    _pos = p;
+    _st = DecodeStatus.incomplete;
+    return 0;
   }
 
   void _walk(MessageVisitor? vis, int depth) {
@@ -858,36 +969,48 @@ class _ContiguousDecoder {
       switch (subtype) {
         case FixlenType.fp32:
           {
-            final view = ByteData.sublistView(_buf, start, start + 4);
-            final v = view.getFloat32(0, Endian.little);
+            // Stage the 4 payload bytes rather than building a view (see
+            // [_scratchData]).
+            final buf = _buf;
+            final s = _scratchBytes;
+            s[0] = buf[start];
+            s[1] = buf[start + 1];
+            s[2] = buf[start + 2];
+            s[3] = buf[start + 3];
+            final v = _scratchData.getFloat32(0, Endian.little);
             // See _emitFixlen: NaN goes out as raw bits so a signaling NaN's
             // is-quiet bit is not set by widening to a double (§4.6).
             if (v.isNaN) {
-              vis!.onFp32Bits(id, view.getUint32(0, Endian.little));
+              vis!.onFp32Bits(id, _scratchData.getUint32(0, Endian.little));
             } else {
               vis!.onFp32(id, v);
             }
             break;
           }
         case FixlenType.fp64:
-          vis!.onFp64(
-            id,
-            ByteData.sublistView(
-              _buf,
-              start,
-              start + 8,
-            ).getFloat64(0, Endian.little),
-          );
+          // `setRange` between two `Uint8List`s hits a bulk copy and measured
+          // cheaper than eight indexed stores at this width.
+          _scratchBytes.setRange(0, 8, _buf, start);
+          vis!.onFp64(id, _scratchData.getFloat64(0, Endian.little));
           break;
         case FixlenType.string:
           // See _emitFixlen: the destination validates, the decoder does not.
-          final view = Uint8List.sublistView(_buf, start, start + length);
+          // `Uint8List.view` is a little cheaper than `sublistView`, which adds
+          // a generic range check on top of the same work.
+          final view = Uint8List.view(
+            _buf.buffer,
+            _buf.offsetInBytes + start,
+            length,
+          );
           if (!_deliverString(vis!, id, view)) {
             return _bad(DecodeStatus.invalid);
           }
           break;
         case FixlenType.blob:
-          vis!.onBlob(id, Uint8List.sublistView(_buf, start, start + length));
+          vis!.onBlob(
+            id,
+            Uint8List.view(_buf.buffer, _buf.offsetInBytes + start, length),
+          );
           break;
       }
     }
@@ -914,20 +1037,82 @@ class _ContiguousDecoder {
         count,
       );
     }
-    final out = read ? Int64List(count) : null;
-    // Note: hand-inlining the varint read here measured *slower* under AOT — the
-    // compiler inlines `_uvarint` better than a manual copy — so keep the call.
-    for (var i = 0; i < count; i++) {
+    if (!read) {
+      // Skipping: walk the element varints without materializing anything.
+      for (var i = 0; i < count; i++) {
+        _uvarint();
+        if (_st != DecodeStatus.complete) return false;
+      }
+      return true;
+    }
+    final out = Int64List(count);
+    // Hot loop. The word-wise varint is inlined here with the read position and
+    // the buffer held in locals, so the whole array costs no per-element field
+    // reload, no `_st` re-check and no null check. (An earlier attempt at
+    // hand-inlining the *byte-wise* reader measured slower — the win here is the
+    // 64-bit load, not the inlining.)
+    final buf = _buf;
+    final len = _len;
+    var p = _pos;
+    var i = 0;
+    // Word-wise element loop. Entered only when a maximal varint is in bounds,
+    // which is also the condition under which building the [_bd] view pays for
+    // itself — a short array near the end of the buffer skips it entirely and
+    // takes the scalar reader below.
+    if (p + 10 <= len) {
+      final bd = _bd;
+      while (i < count && p + 10 <= len) {
+        int raw;
+        // One 64-bit load serves every length. The short-varint cases are
+        // derived from that same word rather than from extra byte loads (a
+        // bounds-checked `Uint8List` read costs ~8 instructions), and the
+        // all-continuation case is tested first because it is the one that
+        // cannot be short-circuited.
+        final x = bd.getUint64(p, Endian.little);
+        final m = ~x & _contBits;
+        if (m == 0) {
+          // 9- or 10-byte varint. (Folding the two tail bytes into one
+          // `ByteData.getUint16` measured very slightly *worse* than two
+          // `Uint8List` loads, so they stay separate.)
+          final b8 = buf[p + 8];
+          raw = _unspread56(x) | ((b8 & 0x7F) << 56);
+          if (b8 < 0x80) {
+            p += 9;
+          } else {
+            final last = buf[p + 9];
+            p += 10;
+            if ((last & 0x80) != 0 || (last & 0x7f) > 0x01) {
+              _pos = p;
+              return _bad(DecodeStatus.invalid);
+            }
+            raw |= (last & 0x7f) << 63;
+          }
+        } else if ((m & 0x80) != 0) {
+          raw = x & 0x7F; // 1 byte — skips the ~23-op un-spread
+          p += 1;
+        } else if ((m & 0x8000) != 0) {
+          raw = (x & 0x7F) | (((x >>> 8) & 0x7F) << 7); // 2 bytes
+          p += 2;
+        } else {
+          final nb = _termByte(m) + 1; // 3..8 bytes
+          p += nb;
+          raw = _unspread56(nb == 8 ? x : x & ((1 << (nb << 3)) - 1));
+        }
+        out[i++] = signed ? (raw >>> 1) ^ -(raw & 1) : raw;
+      }
+    }
+    _pos = p;
+    // Tail: the last elements, where a 64-bit load would overrun the buffer.
+    // Also the path that reports INCOMPLETE on a short element run.
+    for (; i < count; i++) {
       final raw = _uvarint();
       if (_st != DecodeStatus.complete) return false;
-      if (read) out![i] = signed ? (raw >>> 1) ^ -(raw & 1) : raw;
+      out[i] = signed ? (raw >>> 1) ^ -(raw & 1) : raw;
     }
-    if (read) {
-      if (signed) {
-        vis!.onSignedArray(id, out!);
-      } else {
-        vis!.onUnsignedArray(id, out!);
-      }
+    if (signed) {
+      vis!.onSignedArray(id, out);
+    } else {
+      vis!.onUnsignedArray(id, out);
     }
     return true;
   }
@@ -975,10 +1160,10 @@ class _ContiguousDecoder {
         _readFp32Array(o, _buf, start, count);
         vis!.onFp32Array(id, o);
       } else {
-        final bd = ByteData.sublistView(_buf, start, start + total);
+        final bd = _bd;
         final o = Float64List(count);
         for (var i = 0; i < count; i++) {
-          o[i] = bd.getFloat64(i * 8, Endian.little);
+          o[i] = bd.getFloat64(start + i * 8, Endian.little);
         }
         vis!.onFp64Array(id, o);
       }

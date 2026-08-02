@@ -1,5 +1,56 @@
 # Changelog
 
+## Unreleased
+
+### Performance — word-wise varints, and typed-data views only where they pay
+
+No API, wire-format or conformance change: every shared vector still produces
+byte-identical output, and both decode surfaces still agree on every status.
+Instruction cost (Callgrind `Ir/op`, the machine-independent measure of §10):
+
+| Workload | before | after | |
+|---|---:|---:|---:|
+| encode: u64 array (1000) | 274,696 | 95,214 | **2.89×** |
+| decode: u64 array (1000) | 290,847 | 101,520 | **2.86×** |
+| encode: typical message | 1,780 | 1,041 | **1.71×** |
+| decode: typical message | 2,707 | 2,078 | **1.30×** |
+
+The measurements behind these changes are Dart-AOT-specific and mostly
+counter-intuitive: a bounds-checked `Uint8List` byte access costs ~15
+instructions, a `ByteData.setUint64` ~2.5 per byte, and **constructing any
+typed-data view costs 174–311** — more than decoding a whole small message.
+`int.bitLength` is a real call, not a count-leading-zeros intrinsic. Int64
+boxing, by contrast, is *not* a factor: large values cost the same per byte as
+small ones, and a hi/lo Smi split measured slower.
+
+- **Changed** varint encoding and decoding to work a 64-bit word at a time.
+  The encoder scatters eight 7-bit groups into a register and stores them with a
+  single `setUint64`; the decoder loads eight bytes and locates the terminating
+  byte with `~x & 0x8080808080808080`. Both the scatter and the gather are three
+  log-steps rather than eight mask-shift-or terms (12 operations instead of 23).
+- **Changed** the decoder to build its wide `ByteData` view **lazily**, and only
+  in array element loops where it amortizes over many elements. Scalar varints
+  read byte-at-a-time and one-off `fp32`/`fp64` payloads stage through a shared
+  8-byte scratch, so a message carrying neither an array nor a float never
+  constructs a view at all. Fixed per-decode overhead: 316 → 121 instructions.
+- **Changed** integer scalar writes to emit the field header and its value under
+  a **single** buffer-capacity check (a header plus a value is at most 20 bytes),
+  roughly halving per-field encode cost.
+- **Changed** the default `MessageVisitor.onStringBytes` to settle validity and
+  transcoding in one pass for ASCII payloads, skipping both the general UTF-8
+  validator and `utf8.decode`. Non-ASCII payloads are validated exactly as
+  before — still strict, still never lossy (§6.4).
+- **Changed** `Decoder.feed` to take a `Uint8List` fast path, so streaming input
+  no longer pays an interface call per byte.
+- **Added** `test/varint_test.dart`. The rewritten paths had no coverage of the
+  §4.1 rule that a decoder **MUST accept** a non-minimal varint and normalize it
+  on re-encode, so a regression there would have passed the whole suite silently.
+  It pins every varint byte-length boundary (1..10), the non-minimal-accept rule,
+  the 64-bit bound being a property of the *encoding* (an eleventh byte is
+  `invalid` even when it contributes nothing), and arrays split across the
+  word/tail boundary — each asserted on **both** the one-shot and the streaming
+  decoder.
+
 ## 0.10.0 - 2026-08-01
 
 ### Breaking — `onArrayBegin` carries the element kind, and waits for it (§4.8)
