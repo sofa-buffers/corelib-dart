@@ -12,17 +12,35 @@ import 'workloads.dart';
 //   dart run bench/bench.dart
 
 const double _targetSeconds = 1.0;
+const double _batchSeconds = 0.01; // clock cost lands under ~0.01% of a batch
+
+/// Grow a batch until it spans [_batchSeconds], so the single clock read that
+/// ends it is a rounding error against the work it timed. A fixed batch of 200
+/// was a guess that silently degrades as ops get faster; calibrating removes
+/// the guess and doubles as extra warmup.
+int _calibrateBatch(void Function() op) {
+  final clock = CpuClock();
+  var batch = 1;
+  while (true) {
+    final start = clock.seconds();
+    for (var i = 0; i < batch; i++) {
+      op();
+    }
+    if (clock.seconds() - start >= _batchSeconds) return batch;
+    batch *= 2;
+  }
+}
 
 double _measure(int bytesPerOp, void Function() op) {
   // Warmup.
   for (var i = 0; i < 1000; i++) {
     op();
   }
+  final batch = _calibrateBatch(op);
   final clock = CpuClock();
   final start = clock.seconds();
   var iters = 0;
   var elapsed = 0.0;
-  const batch = 200;
   while (elapsed < _targetSeconds) {
     for (var i = 0; i < batch; i++) {
       op();
