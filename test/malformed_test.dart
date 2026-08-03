@@ -185,6 +185,46 @@ void main() {
     );
   });
 
+  test('over-ID_MAX id on a sequence-end is accepted and discarded (§4.9)', () {
+    // 76 — sequenceStart, undeclared id 14 → skipped subtree opened (§5.2).
+    // 87 80 80 80 40 — a header varint, wire type 7 (SequenceEnd), id 2^31,
+    // one past ID_MAX. §4.9/§6.2: a sequence-end discards its id regardless of
+    // value, so this closes the sequence and the message decodes to empty.
+    // Crucible F-0054; contrast the value-bearing over-ID_MAX case above.
+    expect(decode('768780808040'), sofab.DecodeStatus.complete);
+  });
+
+  test('over-ID_MAX id on a sequence-end is accepted on the streaming path', () {
+    // Same input, exercising Decoder.feed / _stepHeader — the ID_MAX guard was
+    // duplicated across both decode surfaces (§6.5), so both must be checked.
+    final d = sofab.Decoder(RecordingVisitor());
+    expect(
+      d.feed(hexToBytes('768780808040')),
+      sofab.DecodeStatus.complete,
+    );
+  });
+
+  test('seq-end id at ID_MAX still accepted (control, must not regress)', () {
+    // header ((2^31-1) << 3) | 7 → sequence-end, id idMax, inside a skipped
+    // sequence opened by 0x76 (id 14). Sits under the ceiling; already passing.
+    final b = BytesBuilder();
+    b.addByte(0x76); // sequenceStart, id 14
+    var header = ((BigInt.from(2147483647) << 3) | BigInt.from(7)).toInt();
+    while (true) {
+      final lo = header & 0x7f;
+      header = header >>> 7;
+      if (header == 0) {
+        b.addByte(lo);
+        break;
+      }
+      b.addByte(lo | 0x80);
+    }
+    expect(
+      sofab.Decoder.decode(b.toBytes(), RecordingVisitor()),
+      sofab.DecodeStatus.complete,
+    );
+  });
+
   test('INVALID takes precedence over INCOMPLETE when both apply', () {
     // 560a59 is malformed (fp64 wrong length) AND truncated → must be INVALID.
     expect(decode('560a59'), sofab.DecodeStatus.invalid);

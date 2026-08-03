@@ -430,7 +430,11 @@ class Decoder {
     _vreset();
     final type = header & 0x7;
     final id = header >>> 3;
-    if (id > idMax) return _fail(DecodeStatus.invalid); // id > ID_MAX (§6.2)
+    // ID_MAX bounds only value-bearing headers. A sequence-end (wire type 7)
+    // discards its id, so any id is accepted and normalized away (§4.9, §6.2).
+    if (type != WireType.sequenceEnd && id > idMax) {
+      return _fail(DecodeStatus.invalid); // id > ID_MAX (§6.2)
+    }
     _fieldId = id;
 
     switch (type) {
@@ -875,7 +879,9 @@ class _ContiguousDecoder {
       if (_st != DecodeStatus.complete) return;
       final type = header & 0x7;
       final id = header >>> 3;
-      if (id > idMax) {
+      // ID_MAX bounds only value-bearing headers. A sequence-end (wire type 7)
+      // discards its id, so any id is accepted and normalized away (§4.9, §6.2).
+      if (type != WireType.sequenceEnd && id > idMax) {
         _st = DecodeStatus.invalid; // id > ID_MAX (§6.2)
         return;
       }
