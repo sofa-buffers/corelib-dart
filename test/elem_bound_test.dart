@@ -1,0 +1,183 @@
+import 'dart:typed_data';
+
+import 'package:sofabuffers/sofabuffers.dart' as sofab;
+import 'package:test/test.dart';
+
+import 'vector_support.dart';
+
+/// An integer array's DECLARED ELEMENT WIDTH, applied at the element.
+///
+/// MESSAGE_SPEC §7.1 makes an element outside its declared width invalid, and
+/// §5.2 makes INVALID dominate INCOMPLETE: such an element is established by its
+/// own bytes, so truncating the array behind it cannot downgrade the verdict.
+/// The whole-array callbacks cannot express that — a guard over the assembled
+/// `onSignedArray`/`onUnsignedArray` list only runs for an array that arrives —
+/// so the bound travels into the decoder as
+/// [sofab.MessageVisitor.onArrayElemBound] (generator#267, Crucible F-0043).
+///
+/// Every case here pairs with a control one step away, so what is pinned is the
+/// ORDERING, not a blanket reject.
+void main() {
+  // Runs the same bytes through both decode paths — one-shot contiguous, and the
+  // streaming state machine fed one byte at a time — and asserts they agree.
+  // The two reach the verdict differently (the streaming path checks at the
+  // element, the contiguous one walks the decoded prefix when the array fails),
+  // so their agreeing is itself part of the contract.
+  sofab.DecodeStatus bothPaths(String hex, _WidthVisitor Function() make) {
+    final bytes = hexToBytes(hex);
+
+    final contig = make();
+    final cSt = _verdict(contig, sofab.Decoder.decode(bytes, contig));
+
+    final stream = make();
+    final dec = sofab.Decoder(stream);
+    var last = sofab.DecodeStatus.complete;
+    for (final b in bytes) {
+      last = dec.feed([b]);
+    }
+    if (bytes.isEmpty) last = dec.feed(const []);
+    final sSt = _verdict(stream, last);
+
+    expect(sSt, cSt, reason: 'streaming and contiguous paths must agree');
+    return cSt;
+  }
+
+  // id 1, signed array  -> header (1<<3)|4 = 0x0c
+  // id 0, unsigned array-> header (0<<3)|3 = 0x03
+  group('a truncated array is still decided by the elements in hand', () {
+    test('signed over-width then truncated → INVALID', () {
+      // Crucible width_elem_trunc: count 5, one element = zigzag(5208), end.
+      expect(
+        bothPaths('0c05b051', _WidthVisitor.new),
+        sofab.DecodeStatus.invalid,
+      );
+    });
+
+    test('signed in-range then truncated → INCOMPLETE', () {
+      // ctl_width_elem_inrange_trunc: the same cut, element 1. Nothing is
+      // decided yet, so the truncation IS the verdict.
+      expect(
+        bothPaths('0c0502', _WidthVisitor.new),
+        sofab.DecodeStatus.incomplete,
+      );
+    });
+
+    test('unsigned over-width then truncated → INVALID', () {
+      expect(
+        bothPaths('03058004', _WidthVisitor.new),
+        sofab.DecodeStatus.invalid,
+      );
+    });
+
+    test('unsigned in-range then truncated → INCOMPLETE', () {
+      // 255 == the u8 bound.
+      expect(
+        bothPaths('0305ff01', _WidthVisitor.new),
+        sofab.DecodeStatus.incomplete,
+      );
+    });
+
+    test('an unsigned value above 2^63 is out of range, not negative', () {
+      // Dart has no unsigned int: 0xffff_ffff_ffff_ffff arrives as -1, and a
+      // bare `v > 255` would wave through exactly the largest wire values.
+      expect(
+        bothPaths('0305ffffffffffffffffff01', _WidthVisitor.new),
+        sofab.DecodeStatus.invalid,
+      );
+    });
+  });
+
+  test('a complete array is left to the assembled-list guard', () {
+    // The decoder must not reject on its own account here: the consumer sees
+    // every element and decides. _WidthVisitor records rather than rejects.
+    final v = _WidthVisitor();
+    expect(
+      sofab.Decoder.decode(hexToBytes('03018004'), v),
+      sofab.DecodeStatus.complete,
+    );
+    expect(v.inv, isFalse);
+    expect(v.arrays, [
+      [512],
+    ]);
+  });
+
+  test('a contradicting wire kind is not measured against this bound', () {
+    // id 1 declares SIGNED; an unsigned array arrives. §7.3 skips the field
+    // whole, so its elements were never this field's value — 5208 must not be
+    // measured against the i8 range.
+    expect(
+      bothPaths('0b05b051', _WidthVisitor.new),
+      sofab.DecodeStatus.incomplete,
+    );
+  });
+
+  test('an id with no declared width keeps today\'s outcome', () {
+    expect(
+      bothPaths('1405b051', _WidthVisitor.new),
+      sofab.DecodeStatus.incomplete,
+    );
+  });
+
+  test('a visitor that declares no bound at all is unaffected', () {
+    // The additive contract: the vector that is INVALID above stays INCOMPLETE
+    // for a visitor that does not override onArrayElemBound.
+    final v = _PlainVisitor();
+    expect(
+      sofab.Decoder.decode(hexToBytes('0c05b051'), v),
+      sofab.DecodeStatus.incomplete,
+    );
+  });
+
+  test('the bound is asked once per array, never per element', () {
+    final v = _CountingVisitor();
+    sofab.Decoder.decode(hexToBytes('0c0402040608'), v);
+    expect(v.asked, 1);
+  });
+}
+
+/// The verdict a generated decoder reports: the sticky INVALID flag outranks the
+/// status, exactly as the generated `inv ? invalid : status` does.
+sofab.DecodeStatus _verdict(_PlainVisitor v, sofab.DecodeStatus st) =>
+    v.inv ? sofab.DecodeStatus.invalid : st;
+
+class _PlainVisitor extends sofab.MessageVisitor {
+  bool inv = false;
+  final List<List<int>> arrays = [];
+
+  @override
+  void onUnsignedArray(int id, Int64List values) => arrays.add(values.toList());
+
+  @override
+  void onSignedArray(int id, Int64List values) => arrays.add(values.toList());
+}
+
+/// A stand-in for generated code: `array<u8, count 5>` at id 0 and
+/// `array<i8, count 5>` at id 1, nothing at id 2.
+class _WidthVisitor extends _PlainVisitor {
+  @override
+  sofab.ElemRange? onArrayElemBound(int id, sofab.ArrayKind kind) {
+    switch (id) {
+      case 0:
+        if (kind == sofab.ArrayKind.unsigned) {
+          return const sofab.ElemRange(0, 255);
+        }
+        return null;
+      case 1:
+        if (kind == sofab.ArrayKind.signed) {
+          return const sofab.ElemRange(-128, 127);
+        }
+        return null;
+    }
+    return null;
+  }
+}
+
+class _CountingVisitor extends _PlainVisitor {
+  int asked = 0;
+
+  @override
+  sofab.ElemRange? onArrayElemBound(int id, sofab.ArrayKind kind) {
+    asked++;
+    return const sofab.ElemRange(-128, 127);
+  }
+}

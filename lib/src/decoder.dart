@@ -138,6 +138,33 @@ abstract class MessageVisitor {
   /// fires exactly once with the correct [kind] and `count == 0`.
   void onArrayBegin(int id, ArrayKind kind, int count) {}
 
+  /// The inclusive value range an element of the **integer array** field [id]
+  /// may take under the schema, or `null` when the field declares no width
+  /// narrower than the 64-bit value domain (`u64`/`i64`, an enum or bitfield
+  /// element, or an id this visitor does not declare).
+  ///
+  /// Asked **once per array field**, at the count word, never per element; the
+  /// decoder then applies the range as the elements go past.
+  ///
+  /// It exists because the whole-array callbacks cannot answer in time. A
+  /// declared width is a validity bound (MESSAGE_SPEC §7.1) and §5.2 makes
+  /// INVALID dominate INCOMPLETE, so an element already outside its width keeps
+  /// the message INVALID however little follows it — but a guard over the
+  /// assembled [onSignedArray]/[onUnsignedArray] list only runs for an array
+  /// that ARRIVES, and the array in question is precisely one that does not.
+  /// Same shape as [onArrayBegin] one level down: only the decoder sees the
+  /// element in time, only the schema knows the bound (generator#267, Crucible
+  /// F-0043).
+  ///
+  /// [kind] is the kind the WIRE declares. Return `null` for a kind this field
+  /// does not declare: an array whose element kind contradicts the schema is a
+  /// skipped field (§7.3) and its elements were never this field's value, so
+  /// this field's width must not be measured against them — the rule
+  /// [onArrayBegin] states for the count bound, one level down again.
+  ///
+  /// Return a `const` [ElemRange] to keep this allocation-free. Default: none.
+  ElemRange? onArrayElemBound(int id, ArrayKind kind) => null;
+
   /// Called with a fixlen value's declared byte `length` and `subtype`
   /// ([FixlenType]) the instant its length word is read — *before* the payload
   /// and *before* the truncation check. Fires only for a field being read.
@@ -156,6 +183,24 @@ abstract class MessageVisitor {
 
   /// The sequence whose children this visitor received has closed.
   void onSequenceEnd() {}
+}
+
+/// The inclusive range an integer array's elements may take under the schema —
+/// the answer to [MessageVisitor.onArrayElemBound].
+///
+/// Both bounds are `int`, which is what the decoder produces: a signed element
+/// arrives zig-zag-decoded, an unsigned one raw, and Dart's `int` is the same
+/// 64-bit two's-complement word either way.
+///
+/// The widest NARROWED unsigned kind is `u32`, so [max] never reaches 2^63 and
+/// an unsigned wire value whose top bit is set — which Dart's `int` shows as
+/// negative — is always out of range. That is why the unsigned comparison reads
+/// `raw < 0 || raw > max` rather than `raw > max`: an unsigned compare, written
+/// in a language without one.
+class ElemRange {
+  final int min;
+  final int max;
+  const ElemRange(this.min, this.max);
 }
 
 /// Hands a materialized `string` payload to [vis] as raw bytes. Returns `false`
@@ -310,6 +355,10 @@ class Decoder {
   int _arrCount = 0;
   int _arrIndex = 0;
   Int64List? _arrInts;
+  // The declared element width for the array in flight, asked once at the count
+  // word (see [MessageVisitor.onArrayElemBound]) and applied per element below,
+  // so the per-element cost is two integer compares and no call.
+  ElemRange? _arrElemRange;
 
   // Fixlen-array context.
   int _arrFixSubtype = 0;
@@ -616,13 +665,15 @@ class Decoder {
     // integer array carries no second word, so this is already the point at
     // which the element kind is fully known (§4.8).
     if (_read) {
-      _topVisitor!.onArrayBegin(
-        _fieldId,
-        _arrType == WireType.arraySigned
-            ? ArrayKind.signed
-            : ArrayKind.unsigned,
-        count,
-      );
+      final kind = _arrType == WireType.arraySigned
+          ? ArrayKind.signed
+          : ArrayKind.unsigned;
+      _topVisitor!.onArrayBegin(_fieldId, kind, count);
+      // Asked once, here, for the same reason onArrayBegin fires here: this is
+      // where the field is fully identified and no element has been consumed.
+      _arrElemRange = _topVisitor!.onArrayElemBound(_fieldId, kind);
+    } else {
+      _arrElemRange = null;
     }
     _arrCount = count;
     _arrIndex = 0;
@@ -643,9 +694,17 @@ class Decoder {
     final raw = _v;
     _vreset();
     if (_read) {
-      _arrInts![_arrIndex] = _arrType == WireType.arraySigned
-          ? (raw >>> 1) ^ -(raw & 1)
-          : raw;
+      final signed = _arrType == WireType.arraySigned;
+      final v = signed ? (raw >>> 1) ^ -(raw & 1) : raw;
+      // The declared width, applied AT the element (§7.1). The whole-array
+      // callback below is too late for an array that never completes, and §5.2
+      // makes this element's INVALID outrank that truncation.
+      final r = _arrElemRange;
+      if (r != null &&
+          (signed ? (v < r.min || v > r.max) : (v < 0 || v > r.max))) {
+        return _fail(DecodeStatus.invalid);
+      }
+      _arrInts![_arrIndex] = v;
     }
     _arrIndex++;
     if (_arrIndex < _arrCount) return true;
@@ -1030,12 +1089,11 @@ class _ContiguousDecoder {
     // Header hand-off before the element loop (before truncation) — over-count
     // flagged here dominates a short tail (§5.2). An integer array carries no
     // second word, so the element kind is already fully known here (§4.8).
+    ElemRange? range;
     if (read) {
-      vis!.onArrayBegin(
-        id,
-        signed ? ArrayKind.signed : ArrayKind.unsigned,
-        count,
-      );
+      final kind = signed ? ArrayKind.signed : ArrayKind.unsigned;
+      vis!.onArrayBegin(id, kind, count);
+      range = vis.onArrayElemBound(id, kind);
     }
     if (!read) {
       // Skipping: walk the element varints without materializing anything.
@@ -1106,7 +1164,18 @@ class _ContiguousDecoder {
     // Also the path that reports INCOMPLETE on a short element run.
     for (; i < count; i++) {
       final raw = _uvarint();
-      if (_st != DecodeStatus.complete) return false;
+      if (_st != DecodeStatus.complete) {
+        // The array does not complete, so neither whole-array callback below
+        // fires and the consumer's own width guard never runs. The elements
+        // already decoded are on the wire all the same, and §5.2 makes one
+        // outside its declared width outrank this truncation (generator#267).
+        // Checked HERE rather than in the loops above so the word-wise hot path
+        // stays a pure decode: the prefix is walked only when the array fails.
+        if (range != null && _elemOutOfRange(out, i, signed, range)) {
+          return _bad(DecodeStatus.invalid);
+        }
+        return false;
+      }
       out[i] = signed ? (raw >>> 1) ^ -(raw & 1) : raw;
     }
     if (signed) {
@@ -1115,6 +1184,26 @@ class _ContiguousDecoder {
       vis!.onUnsignedArray(id, out);
     }
     return true;
+  }
+
+  /// Whether any of `out[0..n)` falls outside [range]. See [ElemRange] for why
+  /// the unsigned arm also rejects a negative: Dart has no unsigned compare, and
+  /// a wire value above 2^63 is above every bound that can exist here.
+  static bool _elemOutOfRange(
+    Int64List out,
+    int n,
+    bool signed,
+    ElemRange range,
+  ) {
+    for (var i = 0; i < n; i++) {
+      final v = out[i];
+      if (signed
+          ? (v < range.min || v > range.max)
+          : (v < 0 || v > range.max)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   bool _fixArray(MessageVisitor? vis, int id, bool read) {
