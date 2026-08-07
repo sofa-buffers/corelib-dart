@@ -43,4 +43,5 @@ export 'src/wire.dart'
         SofabException;
 export 'src/utf8.dart' show utf8Valid, encodeUtf8Strict;
 export 'src/encoder.dart' show Encoder, FlushCallback;
-export 'src/decoder.dart' show Decoder, MessageVisitor, DecoderLimits;
+export 'src/decoder.dart'
+    show Decoder, MessageVisitor, DecoderLimits, ElemRange;

@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### Added — `onArrayElemBound`: an integer array's declared element width (§7.1)
+
+`MessageVisitor.onArrayElemBound(id, kind)` answers with an `ElemRange`, or
+`null` where the field declares no width narrower than the 64-bit value domain.
+It is asked **once per array field**, at the count word, and the decoder then
+applies the range as the elements go past.
+
+It exists because the whole-array callbacks cannot answer in time. A declared
+element width is a validity bound (MESSAGE_SPEC §7.1) and §5.2 makes INVALID
+dominate INCOMPLETE, so an element already outside its width keeps the message
+INVALID however little follows it — but a guard over the assembled
+`onSignedArray`/`onUnsignedArray` list only runs for an array that *arrives*,
+and the array in question is precisely one that does not:
+
+```
+arrays.i8 (count 5), first element 5208, message ends there
+a6 06 0c 05 b0 51   ->  INCOMPLETE, the 5208 never looked at
+```
+
+Same shape as `onArrayBegin` one level down — only the decoder sees the element
+in time, only the schema knows the bound — and the same §7.3 rule applies:
+`kind` is what the *wire* declares, and an implementation returns `null` for a
+kind it does not declare, because an array whose element kind contradicts the
+schema is a skipped field whose elements were never this field's value.
+
+Additive: a visitor that does not override it decodes exactly as before. The
+contiguous path pays nothing for it — it walks the decoded prefix only when the
+array fails, leaving the word-wise element loop a pure decode — and the
+streaming path checks at the element, two integer compares with no call. Found
+by Crucible F-0043; the generator half is sofa-buffers/generator#267.
+
 ### Performance — word-wise varints, and typed-data views only where they pay
 
 No API, wire-format or conformance change: every shared vector still produces
