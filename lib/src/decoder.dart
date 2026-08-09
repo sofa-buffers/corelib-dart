@@ -654,7 +654,11 @@ class Decoder {
     if (r == 0) return true;
     final count = _v;
     _vreset();
-    if (count > arrayMax) return _fail(DecodeStatus.invalid);
+    // ARRAY_MAX is an *unsigned* ceiling on a full u64 count word (§6.2, §4.8),
+    // and Dart has no unsigned compare: a count with bit 63 set is a negative
+    // int here, so `> arrayMax` alone would let it through. Rejected before any
+    // allocation, any `count * length` and any cursor move (§7.2 item 5).
+    if (count < 0 || count > arrayMax) return _fail(DecodeStatus.invalid);
     if (_read &&
         limits.maxArrayCount != null &&
         count > limits.maxArrayCount!) {
@@ -728,7 +732,9 @@ class Decoder {
     if (r == 0) return true;
     final count = _v;
     _vreset();
-    if (count > arrayMax) return _fail(DecodeStatus.invalid);
+    // Unsigned ceiling — see [_stepArrCount]. This one also guards the
+    // `_arrCount * length` below, which a bit-63 count would wrap.
+    if (count < 0 || count > arrayMax) return _fail(DecodeStatus.invalid);
     if (_read &&
         limits.maxArrayCount != null &&
         count > limits.maxArrayCount!) {
@@ -1079,7 +1085,11 @@ class _ContiguousDecoder {
   bool _intArray(MessageVisitor? vis, int id, int type, bool read) {
     final count = _uvarint();
     if (_st != DecodeStatus.complete) return false;
-    if (count > arrayMax) return _bad(DecodeStatus.invalid);
+    // Unsigned ceiling: the count word is a full u64, so a count with bit 63
+    // set lands as a negative Dart int and `> arrayMax` alone misses it — the
+    // element loop would then either allocate an impossible `Int64List` or, on
+    // the skip path, run zero times and accept a bogus empty array (§6.2, §4.8).
+    if (count < 0 || count > arrayMax) return _bad(DecodeStatus.invalid);
     if (read &&
         _limits.maxArrayCount != null &&
         count > _limits.maxArrayCount!) {
@@ -1209,7 +1219,9 @@ class _ContiguousDecoder {
   bool _fixArray(MessageVisitor? vis, int id, bool read) {
     final count = _uvarint();
     if (_st != DecodeStatus.complete) return false;
-    if (count > arrayMax) return _bad(DecodeStatus.invalid);
+    // Unsigned ceiling — see [_intArray]. It also keeps `count * length` below
+    // from wrapping, which would move `_pos` backwards.
+    if (count < 0 || count > arrayMax) return _bad(DecodeStatus.invalid);
     if (read &&
         _limits.maxArrayCount != null &&
         count > _limits.maxArrayCount!) {
