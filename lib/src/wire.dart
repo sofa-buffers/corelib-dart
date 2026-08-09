@@ -14,6 +14,23 @@ const int arrayMax = 2147483647;
 /// Maximum nested-sequence depth (CORELIB_PLAN §4.9, §6.2).
 const int maxDepth = 255;
 
+/// The smallest output buffer this port accepts **for streaming**
+/// (CORELIB_PLAN §5.1).
+///
+/// This port splits every atomic unit — a field header, a `fixlen_word`, an
+/// `element_count`, a scalar or array-element varint, an `fp32`/`fp64` element —
+/// across a flush, so it reserves nothing contiguously and declares the floor
+/// the spec reserves for that case: **1**. A one-byte streaming buffer produces
+/// output byte-identical to the one-shot path.
+///
+/// It binds a buffer installed **with a flush sink**, at construction and at
+/// every mid-stream `installBuffer`: such a buffer must satisfy
+/// `buffer.length - offset >= minOutputBuffer` and is rejected right there with
+/// [SofabError.invalidArgument]. A buffer installed **without** a sink
+/// (`Encoder.overBuffer`) is subject to no minimum — no flush can occur, so no
+/// atomic unit can be split and the constant has nothing to say.
+const int minOutputBuffer = 1;
+
 // There is deliberately no "lazy framing window" constant here: the encoder
 // holds sequence headers back to the full [maxDepth] (its pending run grows on
 // demand), so this port is canonical at every legal nesting level. Bounding the
