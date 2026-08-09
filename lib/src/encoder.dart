@@ -167,16 +167,37 @@ class Encoder {
 
   // ---- buffer management -------------------------------------------------
 
+  /// Hands the bytes written so far to the sink and re-arms the cursor.
+  ///
+  /// The cursor is rewound **before** the callback runs, not after: 0 is the
+  /// copying-sink default (a callback that returns without installing anything
+  /// has copied the bytes, so the active buffer stays active and is refilled
+  /// from its start), and rewinding first lets an [installBuffer] call made
+  /// from inside the callback have the last word. That is exactly the
+  /// CORELIB_PLAN §5.1 contract — *the start offset belongs to the
+  /// installation, not to the buffer* — and it is what makes the taking-sink
+  /// shape work: a sink that hands its buffer on installs a replacement with
+  /// its own offset and so re-arms framing-header room in **every** flushed
+  /// unit, where resetting afterwards would silently drop that offset and
+  /// overwrite the room the caller reserved.
   void _drain() {
-    if (_pos > _flushStart) {
-      _flush(Uint8List.sublistView(_buf, _flushStart, _pos));
-    }
+    final start = _flushStart, end = _pos;
     _pos = 0;
     _flushStart = 0;
+    if (end > start) {
+      _flush(Uint8List.sublistView(_buf, start, end));
+    }
   }
 
   /// Installs a fresh output buffer mid-stream (typically from inside the flush
   /// callback) so encoding continues without interruption (CORELIB_PLAN §5.1).
+  ///
+  /// [offset] belongs to *this* installation: writing resumes at that byte of
+  /// [buffer], leaving room at the front for a framing header. The offset is
+  /// consumed by the installation, so a later flush that the callback returns
+  /// from without installing anything resumes at 0. Passing the **same** buffer
+  /// back is a new installation like any other — that is how a sink re-arms its
+  /// header room once per flushed packet.
   void installBuffer(Uint8List buffer, {int offset = 0}) {
     _buf = buffer;
     _bufData = ByteData.sublistView(buffer);
