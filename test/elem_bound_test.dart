@@ -87,18 +87,92 @@ void main() {
     });
   });
 
-  test('a complete array is left to the assembled-list guard', () {
-    // The decoder must not reject on its own account here: the consumer sees
-    // every element and decides. _WidthVisitor records rather than rejects.
-    final v = _WidthVisitor();
-    expect(
-      sofab.Decoder.decode(hexToBytes('03018004'), v),
-      sofab.DecodeStatus.complete,
-    );
-    expect(v.inv, isFalse);
-    expect(v.arrays, [
-      [512],
-    ]);
+  group('an array that COMPLETES is decided by the same bound', () {
+    // The hook's contract is "the decoder then applies the range as the
+    // elements go past": an element outside its declared width is INVALID
+    // wherever it sits (§7.1), not only where a truncation follows it. The
+    // whole-array callbacks return `void`, so a visitor that answered the bound
+    // has no channel left to reject through — leaving the completing array to
+    // them made the two surfaces disagree on the same bytes (#38).
+    test('unsigned over-width, array complete → INVALID on both paths', () {
+      expect(
+        bothPaths('03018004', _WidthVisitor.new),
+        sofab.DecodeStatus.invalid,
+      );
+    });
+
+    test('signed over-width, array complete → INVALID on both paths', () {
+      // zigzag(5208) = 0xb051, the same element the truncated case uses.
+      expect(
+        bothPaths('0c01b051', _WidthVisitor.new),
+        sofab.DecodeStatus.invalid,
+      );
+    });
+
+    test('the rejected array is not handed to the visitor', () {
+      final c = _WidthVisitor();
+      expect(
+        sofab.Decoder.decode(hexToBytes('03018004'), c),
+        sofab.DecodeStatus.invalid,
+      );
+      expect(c.arrays, isEmpty);
+
+      final s = _WidthVisitor();
+      expect(
+        sofab.Decoder(s).feed(hexToBytes('03018004')),
+        sofab.DecodeStatus.invalid,
+      );
+      expect(s.arrays, isEmpty);
+    });
+
+    test('an over-width element in the word-wise loop is caught', () {
+      // 13 elements, the offender first: long enough that the contiguous
+      // decoder enters its 64-bit-load element loop (entered while a maximal
+      // varint still fits) instead of running the scalar tail alone.
+      expect(
+        bothPaths('030d80040102030405060708090a0b0c', _WidthVisitor.new),
+        sofab.DecodeStatus.invalid,
+      );
+    });
+
+    test('an over-width element in the scalar tail is caught', () {
+      // The same 13 elements with the offender near the end, where the
+      // word-wise loop has already handed over to the byte-wise tail.
+      expect(
+        bothPaths('030d0102030405060708090a0b80047f', _WidthVisitor.new),
+        sofab.DecodeStatus.invalid,
+      );
+    });
+
+    test('an in-range array still arrives, in full, on both paths', () {
+      final c = _WidthVisitor();
+      expect(
+        sofab.Decoder.decode(hexToBytes('0303ff01007f'), c),
+        sofab.DecodeStatus.complete,
+      );
+      expect(c.inv, isFalse);
+      expect(c.arrays, [
+        [255, 0, 127],
+      ]);
+
+      final s = _WidthVisitor();
+      expect(
+        sofab.Decoder(s).feed(hexToBytes('0303ff01007f')),
+        sofab.DecodeStatus.complete,
+      );
+      expect(s.arrays, [
+        [255, 0, 127],
+      ]);
+    });
+
+    test('an id with no declared width is unaffected when it completes', () {
+      // The control for the group: the same over-wide value at an id this
+      // visitor declares nothing for stays a non-event.
+      expect(
+        bothPaths('13018004', _WidthVisitor.new),
+        sofab.DecodeStatus.complete,
+      );
+    });
   });
 
   test('a contradicting wire kind is not measured against this bound', () {
