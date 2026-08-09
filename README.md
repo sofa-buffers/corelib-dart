@@ -161,6 +161,39 @@ for (var i = 0; i < 1000; i++) {
 enc.flush();
 ```
 
+#### Copying vs. taking sinks, and where the cursor resumes
+
+What the callback does before it returns says which of the two handover shapes
+is in effect (CORELIB_PLAN §5.1):
+
+- **Returning without installing anything** means the sink **copied** the bytes.
+  The active buffer stays active and the encoder refills it from offset **0**.
+- A sink that **takes** the buffer — queues it for an async write, hands it to a
+  transport — **must** call `installBuffer` before returning, or the encoder
+  would keep writing into storage the transport now owns.
+
+The start offset belongs to the *installation*, not to the buffer. Each
+`installBuffer(buf, offset: n)` starts writing at byte `n` of `buf`, and that
+offset is consumed by that installation only. Passing the **same** buffer back
+counts as a new installation, which is how a sink re-arms framing-header room in
+every flushed packet:
+
+```dart
+late sofab.Encoder enc;
+enc = sofab.Encoder(
+  (chunk) {
+    socket.add(framed(chunk));            // fills the 4 reserved bytes
+    enc.installBuffer(Uint8List(1024), offset: 4); // re-arms the reservation
+  },
+  buffer: Uint8List(1024),
+  offset: 4,
+);
+```
+
+The constructor's `offset` is the first installation and behaves the same way: a
+callback that just returns resumes at 0, so a per-packet reservation has to be
+re-armed per packet.
+
 ### OStream (output-stream / writer sink)
 
 The encoder *is* the ostream wrapper: a `FlushCallback` is any
@@ -222,9 +255,11 @@ Only two buffers matter, and both are caller-visible.
 - **Output buffer (encoding).** You pass a `Uint8List` (or a `bufferSize`); the
   library never grows it. When it fills, the `FlushCallback` receives a
   `sublistView` of the written bytes and the encoder continues into the same
-  buffer (or a new one you install). If the buffer fills with no room after a
-  flush, `writeX` throws `BufferFull` rather than overflowing. `Encoder.reset()`
-  rewinds it for the next message.
+  buffer (or a new one you install). A buffer installed from inside the callback
+  wins over the default rewind, so its `offset` — the framing-header room — is
+  honoured on every installation, not just the first. If the buffer fills with no
+  room after a flush, `writeX` throws `BufferFull` rather than overflowing.
+  `Encoder.reset()` rewinds it for the next message.
 - **Input buffer (decoding).** You own the chunks you feed. The hot path
   allocates nothing for scalars; the only library-owned heap is a small per-field
   carry buffer used to reassemble a `string`/`blob`/float payload that straddles a

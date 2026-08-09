@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### Fixed — a buffer installed from inside the flush callback keeps its start offset (§5.1)
+
+`_drain` rewound the cursor **after** invoking the sink, so an
+`installBuffer(buf, offset: n)` call made from inside that callback had its
+offset immediately overwritten with 0. Only the constructor's installation kept
+its offset: every later packet started at byte 0 of the freshly installed buffer
+and wrote over the framing-header room the caller had just reserved. A
+take-and-replace sink re-arming 4 bytes per packet over a 24-byte buffer
+produced packets of 20, 24, 24, … bytes — the 24-byte ones having clobbered
+their own header room.
+
+The cursor is now rewound **before** the sink runs. That leaves 0 as the
+copying-sink default (a callback that returns without installing anything has
+copied the bytes, so the active buffer stays active and is refilled from its
+start) while letting `installBuffer` have the last word — §5.1 exactly: *the
+start offset belongs to the installation, not to the buffer*. A bare return
+resumes at 0, a buffer-set resumes at that call's offset, and passing the
+**same** buffer back re-arms the reservation like any other installation.
+
+No API, wire-format or performance change: the encoded bytes were always
+correct, only the caller's reserved prefix was not. The §7.2 item-4 handover
+cases — taking sink, copying sink, same-buffer re-installation, reserved-prefix
+integrity — now live in `test/buffer_install_test.dart`, and the README's
+streaming section documents both halves of the returning-callback contract.
+
 ### Fixed — a one-shot integer array no longer sizes its result from the wire count (§5.2, §6.2.1, §7.2)
 
 `Decoder.decode` allocated the whole `Int64List` from the array's
