@@ -53,8 +53,11 @@ void main() {
 
       // Chunked encode — a buffer far smaller than the message, driving the
       // flush callback repeatedly; concatenated output must match one-shot.
+      // The first size is the port's declared `minOutputBuffer` (CORELIB_PLAN
+      // §7.2 item 4): the smallest streaming buffer it accepts must already
+      // produce the one-shot bytes.
       test('$group/$name · chunked-encode', () {
-        for (final bufSize in const [1, 3, 7]) {
+        for (final bufSize in [sofab.minOutputBuffer, 3, 7]) {
           final out = BytesBuilder(copy: true);
           final enc = sofab.Encoder(out.add, bufferSize: bufSize);
           replay(enc, fields);

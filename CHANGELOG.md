@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+### Added — `minOutputBuffer`, declared and enforced at buffer handover (§5.1)
+
+`sofab.minOutputBuffer` is the port's **`MIN_OUTPUT_BUFFER`**: the smallest
+buffer this library accepts *for streaming*. Its value is **1** — the encoder
+splits every atomic unit (field header, `fixlen_word`, `element_count`, a scalar
+or array-element varint, an `fp32`/`fp64` element) across a flush and reserves
+nothing contiguously, which is the case §5.1 gives the floor of `1`. A one-byte
+streaming buffer produces output byte-identical to the one-shot path.
+
+The constant was previously nowhere: not declared, not exported, not documented,
+and — the part with teeth — not enforced. §5.1 binds it to a buffer installed
+**with a flush sink**, at construction and at every mid-stream buffer-set, where
+`buflen - offset >= MIN_OUTPUT_BUFFER` must hold and a shortfall is rejected
+*where the buffer is handed over*. Without that check a degenerate handover was
+accepted and silently corrupted the caller's reservation instead: an encoder
+built over `Uint8List(4)` with `offset: 4` — zero room — took the buffer, and the
+first flush rebased the cursor to 0 and wrote the message straight through the
+four bytes the caller had reserved for its framing header.
+
+`Encoder(...)` and `installBuffer(...)` now validate the handover and throw
+`SofabException(invalidArgument, …)` — the same mechanism as an out-of-range
+`offset`, which `installBuffer` now checks too — before any byte is written, so a
+rejected installation leaves the encoder writing into the buffer it already had.
+A buffer installed **without** a sink (`Encoder.overBuffer`) keeps its exemption:
+no flush can occur, no atomic unit can be split, so a two-byte message still
+encodes into a two-byte buffer.
+
+Note for callers handing over a zero-length buffer together with a sink: that
+installation now fails with `invalidArgument` where it is made, instead of with
+`bufferFull` at the first write. No wire-format or hot-path change — the check
+runs once per handover. `test/min_output_buffer_test.dart` covers the §7.2
+item-4 pair (encode at exactly the minimum, incl. a `blob`/`string` run longer
+than the buffer; one byte short rejected at handover; and the sink-less
+converse), the shared-vector chunked-encode test now uses `minOutputBuffer` as
+its first buffer size, and the README's memory section states the value.
+
 ### Added — a caller-supplied output buffer without a flush sink (§5.1)
 
 `Encoder.overBuffer(buffer, {offset})` installs a caller-owned buffer with **no**

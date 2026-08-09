@@ -122,12 +122,7 @@ class Encoder {
   }) : _buf = buffer ?? Uint8List(bufferSize),
        _pos = offset,
        _flushStart = offset {
-    if (offset < 0 || offset > _buf.length) {
-      throw const SofabException(
-        SofabError.invalidArgument,
-        'offset out of range',
-      );
-    }
+    _checkHandover(_buf.length, offset, streaming: true);
     _bufData = ByteData.sublistView(_buf);
   }
 
@@ -157,13 +152,38 @@ class Encoder {
       _buf = buffer,
       _pos = offset,
       _flushStart = offset {
-    if (offset < 0 || offset > buffer.length) {
+    _checkHandover(buffer.length, offset, streaming: false);
+    _bufData = ByteData.sublistView(buffer);
+  }
+
+  /// Validates a buffer handover (CORELIB_PLAN §5.1) — the constructor, the
+  /// sink-less [Encoder.overBuffer] and every mid-stream [installBuffer] pass
+  /// through here, so a buffer the encoder cannot use is refused **where it is
+  /// handed over** rather than partway through a message.
+  ///
+  /// [streaming] is true exactly when a flush sink is present. Only then does
+  /// [minOutputBuffer] bind: without a sink no flush can occur, no atomic unit
+  /// can be split, and the buffer either holds the message or reports
+  /// buffer-full — so a message that encodes to two bytes may be encoded into a
+  /// two-byte buffer.
+  static void _checkHandover(
+    int buflen,
+    int offset, {
+    required bool streaming,
+  }) {
+    if (offset < 0 || offset > buflen) {
       throw const SofabException(
         SofabError.invalidArgument,
         'offset out of range',
       );
     }
-    _bufData = ByteData.sublistView(buffer);
+    if (streaming && buflen - offset < minOutputBuffer) {
+      throw const SofabException(
+        SofabError.invalidArgument,
+        'a buffer installed with a flush sink needs '
+        'buflen - offset >= $minOutputBuffer (MIN_OUTPUT_BUFFER)',
+      );
+    }
   }
 
   Uint8List _buf;
@@ -251,7 +271,15 @@ class Encoder {
   /// from without installing anything resumes at 0. Passing the **same** buffer
   /// back is a new installation like any other — that is how a sink re-arms its
   /// header room once per flushed packet.
+  ///
+  /// On an encoder **with** a flush sink the installation must leave at least
+  /// [minOutputBuffer] bytes of room (`buffer.length - offset`); one byte less
+  /// is rejected right here with [SofabError.invalidArgument] — the same
+  /// mechanism as an out-of-range [offset] — and the encoder keeps writing into
+  /// the buffer it already had (CORELIB_PLAN §5.1). A buffer installed
+  /// **without** a sink is subject to no minimum.
   void installBuffer(Uint8List buffer, {int offset = 0}) {
+    _checkHandover(buffer.length, offset, streaming: _flush != null);
     _buf = buffer;
     _bufData = ByteData.sublistView(buffer);
     _pos = offset;

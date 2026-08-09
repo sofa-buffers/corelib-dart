@@ -65,8 +65,10 @@ void main() {
   });
 
   test('encoder buffer-full without flush room throws BufferFull', () {
-    // A zero-length buffer with a no-op flush cannot hold any byte.
-    final enc = sofab.Encoder((_) {}, buffer: Uint8List(0));
+    // A zero-length buffer cannot hold any byte. It can only be handed over
+    // without a sink: installed *with* one it is below `minOutputBuffer` and is
+    // refused at handover (CORELIB_PLAN §5.1, min_output_buffer_test.dart).
+    final enc = sofab.Encoder.overBuffer(Uint8List(0));
     expect(
       () => enc.writeUnsigned(0, 1),
       throwsA(

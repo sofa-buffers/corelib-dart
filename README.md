@@ -161,6 +161,14 @@ for (var i = 0; i < 1000; i++) {
 enc.flush();
 ```
 
+`sofab.minOutputBuffer` is how small "smaller" may get: this port's
+`MIN_OUTPUT_BUFFER` (CORELIB_PLAN §5.1) is **1**, because the encoder splits
+every atomic unit across a flush and reserves nothing contiguously. A buffer
+handed over **with a sink** must leave at least that much room — `buffer.length -
+offset >= sofab.minOutputBuffer` — and one byte less is rejected right where it
+is handed over, with `SofabException(invalidArgument, …)`, by the constructor or
+by `installBuffer`. See [Memory handling](#memory-handling).
+
 #### Copying vs. taking sinks, and where the cursor resumes
 
 What the callback does before it returns says which of the two handover shapes
@@ -283,6 +291,18 @@ Only two buffers matter, and both are caller-visible.
   honoured on every installation, not just the first. If the buffer fills with no
   room after a flush, `writeX` throws `BufferFull` rather than overflowing.
   `Encoder.reset()` rewinds it for the next message.
+- **`MIN_OUTPUT_BUFFER` = `sofab.minOutputBuffer` = 1.** The smallest buffer this
+  port accepts for *streaming* (CORELIB_PLAN §5.1). It is 1 because the encoder
+  splits every atomic unit — a field header, a `fixlen_word`, an
+  `element_count`, a scalar or array-element varint, an `fp32`/`fp64` element —
+  across a flush, so it never needs a contiguous reservation; a one-byte
+  streaming buffer produces byte-identical output to the one-shot path. It binds
+  a buffer installed **with a flush sink**, and only such a buffer: at
+  construction and at every mid-stream `installBuffer`, `buffer.length - offset`
+  must be at least `minOutputBuffer`, and a shortfall is rejected there with
+  `SofabException(invalidArgument, …)` — the same mechanism as an out-of-range
+  `offset`, never partway through a message. A buffer installed **without** a
+  sink is subject to no minimum (next bullet).
 - **Output buffer with no sink (`Encoder.overBuffer`).** The buffer is the only
   room there is: no flush can occur, nothing is handed downstream and nothing is
   ever dropped. A write that does not fit throws `BufferFull` — the encoder

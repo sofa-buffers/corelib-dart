@@ -35,6 +35,7 @@ export 'src/wire.dart'
         fixlenMax,
         arrayMax,
         maxDepth,
+        minOutputBuffer,
         WireType,
         FixlenType,
         ArrayKind,
