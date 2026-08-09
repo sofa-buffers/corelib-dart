@@ -128,6 +128,88 @@ void main() {
     );
   });
 
+  // ---------------------------------------------------------------------------
+  // The ARRAY_MAX ceiling is an *unsigned* ceiling (CORELIB_PLAN §6.2, §4.8):
+  // the count word is a full u64 on the wire, so a count with bit 63 set arrives
+  // as a negative Dart int and must still be rejected — before any allocation,
+  // any `count * length` and any cursor move (§7.2 item 5: never crash).
+  group('array element_count ceiling is unsigned', () {
+    /// Varint-encodes [value] as an unsigned 64-bit number. Dart has no
+    /// unsigned int, so a negative [value] stands for its two's-complement u64
+    /// bit pattern (`>>>` is the logical shift that makes that work).
+    List<int> uvarint(int value) {
+      final out = <int>[];
+      var v = value;
+      while (true) {
+        final lo = v & 0x7f;
+        v = v >>> 7;
+        if (v == 0) {
+          out.add(lo);
+          break;
+        }
+        out.add(lo | 0x80);
+      }
+      return out;
+    }
+
+    /// Every decode surface must agree, on both the materializing and the
+    /// skipping path: one-shot, whole-chunk streaming, and byte-at-a-time
+    /// streaming (where the count word itself straddles every boundary).
+    void expectInvalidEverywhere(List<int> message) {
+      final bytes = Uint8List.fromList(message);
+      for (final skip in [false, true]) {
+        final ids = skip ? <int>{0} : <int>{};
+        expect(
+          sofab.Decoder.decode(bytes, RecordingVisitor(skipIds: ids)),
+          sofab.DecodeStatus.invalid,
+          reason: 'one-shot, skip=$skip',
+        );
+        expect(
+          sofab.Decoder(RecordingVisitor(skipIds: ids)).feed(bytes),
+          sofab.DecodeStatus.invalid,
+          reason: 'streaming (one chunk), skip=$skip',
+        );
+        final dec = sofab.Decoder(RecordingVisitor(skipIds: ids));
+        var st = sofab.DecodeStatus.complete;
+        for (final b in bytes) {
+          st = dec.feed(Uint8List.fromList([b]));
+          if (st == sofab.DecodeStatus.invalid) break;
+        }
+        expect(
+          st,
+          sofab.DecodeStatus.invalid,
+          reason: 'streaming (byte-at-a-time), skip=$skip',
+        );
+      }
+    }
+
+    // header id0 array-unsigned / array-signed; array-fixlen carries the
+    // fp32 fixlen_word (4 << 3 | 0 = 0x20) after the count.
+    const cases = <String, (int, List<int>)>{
+      'array-unsigned': (0x03, <int>[]),
+      'array-signed': (0x04, <int>[]),
+      'array-fixlen (fp32)': (0x05, <int>[0x20]),
+    };
+
+    // 2^63, the smallest count whose Dart int is negative, and all-ones — the
+    // two shapes a signed `count > arrayMax` lets through. ARRAY_MAX + 1 is the
+    // existing-behaviour anchor: it was already rejected and must stay so.
+    const counts = <String, int>{
+      'ARRAY_MAX + 1': 2147483648,
+      '2^63 (bit 63 set)': -9223372036854775808, // 1 << 63
+      '2^64 - 1 (all ones)': -1,
+    };
+
+    for (final c in cases.entries) {
+      for (final n in counts.entries) {
+        test('${c.key}, count ${n.key} → INVALID', () {
+          final (header, tail) = c.value;
+          expectInvalidEverywhere([header, ...uvarint(n.value), ...tail]);
+        });
+      }
+    }
+  });
+
   test('nesting past MAX_DEPTH (256 sequences) → INVALID', () {
     // 256 sequence-start headers (id0 → single byte 0x06) must be rejected.
     final b = BytesBuilder();

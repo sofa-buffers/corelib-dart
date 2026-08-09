@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Fixed — `ARRAY_MAX` is an unsigned ceiling (§6.2, §4.8)
+
+An array `element_count` with **bit 63 set** slipped past the format ceiling.
+The count word is a full u64 on the wire and the varint readers accept the whole
+range, but Dart has no unsigned compare: `count > arrayMax` on a value ≥ 2^63
+tests a *negative* `int` and is false. What followed depended on the path — a
+materializing decode threw an uncaught `RangeError` out of `decode`/`feed`
+(`Int64List(count)` / `Float32List(count)`), while a skipping decode ran its
+element loop zero times and reported `COMPLETE` for a bogus **empty array**.
+`count * length` wrapped for the fixlen shape, moving the read cursor backwards.
+
+All four count guards — both array wire types, on both decode surfaces — now
+test the sign bit first (`count < 0 || count > arrayMax`), before any
+allocation, any multiplication and any cursor move, so such a count is the
+`INVALID` outcome §7.2 item 5 requires and never a crash. No API, wire-format or
+performance change: a legal count (≤ `ARRAY_MAX`) takes exactly the path it
+always did. Regression cases for both array wire types × 2^63 / 2^64−1 /
+`ARRAY_MAX`+1 × read and skip × one-shot, chunked and byte-at-a-time live in
+`test/malformed_test.dart`.
+
 ### Added — `onArrayElemBound`: an integer array's declared element width (§7.1)
 
 `MessageVisitor.onArrayElemBound(id, kind)` answers with an `ElemRange`, or
