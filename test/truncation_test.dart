@@ -69,4 +69,52 @@ void main() {
     expect(dec.feed(hexToBytes('80')), sofab.DecodeStatus.incomplete);
     expect(dec.feed(const []), sofab.DecodeStatus.incomplete);
   });
+
+  // On the one-shot surface the whole message is in hand, so a count above the
+  // bytes that remain (one byte per element, minimum) already proves the array
+  // can never complete. Sizing the result from that count alone turns a 6-byte
+  // message into a 17 GB allocation request — §7.2 item 5 says an oversized
+  // count is a well-defined outcome, never a crash, and §6.2.1 says the decision
+  // comes *before* the allocation it prevents.
+  group('an element count larger than the input never sizes the result', () {
+    // count = ARRAY_MAX (2^31-1, the largest legal count) with zero elements.
+    const maxCount = 'ffffffff07';
+
+    test('unsigned array, count ARRAY_MAX, no elements → INCOMPLETE', () {
+      expect(decode('03$maxCount'), sofab.DecodeStatus.incomplete);
+    });
+
+    test('signed array, count ARRAY_MAX, no elements → INCOMPLETE', () {
+      expect(decode('0c$maxCount'), sofab.DecodeStatus.incomplete);
+    });
+
+    test('the skipping path decides the same way', () {
+      expect(
+        sofab.Decoder.decode(
+          hexToBytes('03$maxCount'),
+          RecordingVisitor(skipIds: const {0}),
+        ),
+        sofab.DecodeStatus.incomplete,
+      );
+    });
+
+    test('a decodable prefix is still not delivered', () {
+      final rec = RecordingVisitor();
+      // Three elements on the wire, ARRAY_MAX declared.
+      expect(
+        sofab.Decoder.decode(hexToBytes('03${maxCount}010203'), rec),
+        sofab.DecodeStatus.incomplete,
+      );
+      expect(rec.events.where((e) => e.startsWith('AU:')), isEmpty);
+    });
+
+    test('a count that the input can satisfy is unaffected', () {
+      final rec = RecordingVisitor();
+      expect(
+        sofab.Decoder.decode(hexToBytes('0303010203'), rec),
+        sofab.DecodeStatus.complete,
+      );
+      expect(rec.events, ['AU:0:1,2,3']);
+    });
+  });
 }

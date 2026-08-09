@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+### Fixed — a one-shot integer array no longer sizes its result from the wire count (§5.2, §6.2.1, §7.2)
+
+`Decoder.decode` allocated the whole `Int64List` from the array's
+`element_count` before reading a single element. With no receiver limit
+configured, a **6-byte** message declaring a legal-under-`ARRAY_MAX` count of
+2^31−1 (`03 ff ff ff ff 07`) asked the VM for 17 GB and died with
+`OutOfMemoryError` — a crash where §7.2 item 5 requires a well-defined outcome,
+and an allocation where §6.2.1 puts the decision *before* it.
+
+On the one-shot surface the entire message is already in hand and every element
+costs at least one varint byte, so a count above the bytes that remain is
+refuted by the input itself. The result is now sized from what those bytes can
+hold, capping the allocation at the order of the message; the array still
+decodes over the prefix, so an element outside its declared width
+(`onArrayElemBound`) keeps outranking the truncation (§5.2) rather than being
+lost to an early bail-out, and the outcome is `INCOMPLETE`. No API, wire-format
+or performance change: a count the input can satisfy takes exactly the path it
+always did.
+
+The streaming surface is unchanged by design — a chunked decoder cannot know how
+many bytes still follow, and `DecoderLimits(maxArrayCount: …)` is §6.2.1's
+instrument there. Regression cases live in `test/truncation_test.dart`, with the
+INVALID-over-INCOMPLETE ordering pinned in `test/elem_bound_test.dart`.
+
 ### Fixed — `ARRAY_MAX` is an unsigned ceiling (§6.2, §4.8)
 
 An array `element_count` with **bit 63 set** slipped past the format ceiling.
