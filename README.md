@@ -230,6 +230,16 @@ Only two buffers matter, and both are caller-visible.
   carry buffer used to reassemble a `string`/`blob`/float payload that straddles a
   chunk boundary. Decoded values are delivered to your visitor at completion —
   copy them out if you need them past the callback.
+- **Array counts are never trusted for sizing.** On the one-shot surface
+  (`Decoder.decode`) the whole message is in hand, so an `element_count` larger
+  than the bytes that remain is already refuted by the input: the result is
+  sized from what those bytes can actually hold, and the decode reports
+  `incomplete`. A short message claiming `ARRAY_MAX` elements therefore costs an
+  allocation on the order of the message, not of the count. When the input
+  arrives in chunks the count cannot be refuted that way — there set
+  `DecoderLimits(maxArrayCount: …)`, which is enforced at the count word,
+  *before* the allocation it prevents (CORELIB_PLAN §6.2.1), and reports
+  `limitExceeded`.
 
 ## Build & test
 

@@ -128,6 +128,20 @@ void main() {
     );
   });
 
+  test('an over-width element outranks even an impossible count', () {
+    // Contiguous path only: the count here is ARRAY_MAX, which the streaming
+    // decoder has no way to refute (it cannot know how many bytes still
+    // follow) — §6.2.1's `maxArrayCount` is the instrument for that side. On
+    // the one-shot surface the input itself refutes the count, but a decoder
+    // that bailed on the count alone would lose the over-width element that
+    // §5.2 says decides first.
+    final v = _WidthVisitor();
+    expect(
+      _verdict(v, sofab.Decoder.decode(hexToBytes('0cffffffff07b051'), v)),
+      sofab.DecodeStatus.invalid,
+    );
+  });
+
   test('the bound is asked once per array, never per element', () {
     final v = _CountingVisitor();
     sofab.Decoder.decode(hexToBytes('0c0402040608'), v);

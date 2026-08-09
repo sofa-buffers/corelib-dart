@@ -1113,7 +1113,18 @@ class _ContiguousDecoder {
       }
       return true;
     }
-    final out = Int64List(count);
+    // Size the result from the bytes actually in hand, not from the wire count.
+    // Every element costs at least one varint byte, so a count above the bytes
+    // that remain has already been refuted by the input: at most `avail`
+    // elements can ever be written, and the array is bound for INCOMPLETE. The
+    // allocation is therefore capped at the input's own size — a 6-byte message
+    // claiming ARRAY_MAX elements would otherwise ask the VM for 17 GB (§7.2
+    // item 5: a well-defined outcome, never a crash; §6.2.1: decide *before*
+    // the allocation). The decode itself still runs over the prefix, so an
+    // element outside its declared width keeps outranking the truncation (§5.2)
+    // instead of being lost to an early bail-out.
+    final avail = _len - _pos;
+    final out = Int64List(count <= avail ? count : avail);
     // Hot loop. The word-wise varint is inlined here with the read position and
     // the buffer held in locals, so the whole array costs no per-element field
     // reload, no `_st` re-check and no null check. (An earlier attempt at
