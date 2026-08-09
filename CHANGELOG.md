@@ -163,10 +163,16 @@ in time, only the schema knows the bound — and the same §7.3 rule applies:
 kind it does not declare, because an array whose element kind contradicts the
 schema is a skipped field whose elements were never this field's value.
 
-Additive: a visitor that does not override it decodes exactly as before. The
-contiguous path pays nothing for it — it walks the decoded prefix only when the
-array fails, leaving the word-wise element loop a pure decode — and the
-streaming path checks at the element, two integer compares with no call. Found
+The bound decides **every** array of that field, not only a truncated one: an
+element outside its declared width is INVALID wherever it sits, and the
+whole-array callbacks return `void`, so a visitor that answered the hook has no
+channel left to reject through. Both decode surfaces apply it — the streaming
+one at the element, two integer compares with no call; the contiguous one in a
+single sweep once the array has arrived (and over the decoded prefix when it
+does not), which keeps its word-wise element loop a pure decode and costs
+nothing at all for a field that declares no narrowed width.
+
+Additive: a visitor that does not override it decodes exactly as before. Found
 by Crucible F-0043; the generator half is sofa-buffers/generator#267.
 
 ### Performance — word-wise varints, and typed-data views only where they pay

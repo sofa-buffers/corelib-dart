@@ -1199,6 +1199,18 @@ class _ContiguousDecoder {
       }
       out[i] = signed ? (raw >>> 1) ^ -(raw & 1) : raw;
     }
+    // ... and the same sweep once the array HAS arrived. An element outside its
+    // declared width is INVALID wherever it sits (§7.1), and the whole-array
+    // callbacks below return `void`, so a visitor that answered
+    // [MessageVisitor.onArrayElemBound] has no channel left to reject through:
+    // leaving this case to them contradicted the hook's own contract ("the
+    // decoder then applies the range as the elements go past") and made this
+    // surface disagree with [Decoder.feed], which checks at every element (#38).
+    // Still off the hot path in the sense that matters: one pass over an
+    // in-cache `Int64List`, and only for a field that declares a narrowed width.
+    if (range != null && _elemOutOfRange(out, count, signed, range)) {
+      return _bad(DecodeStatus.invalid);
+    }
     if (signed) {
       vis!.onSignedArray(id, out);
     } else {
