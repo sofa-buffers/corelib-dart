@@ -106,9 +106,16 @@ typedef FlushCallback = void Function(Uint8List chunk);
 /// with [endSequence] to let a contentless one vanish, or [endSequenceKeep] to
 /// force the frame out — the wrapper-array **element** case, where presence
 /// carries the array's length (MESSAGE_SPEC §5.1).
+///
+/// A buffer can also be handed over **without** a sink ([Encoder.overBuffer]):
+/// then no flush can occur, so the buffer either holds the whole message —
+/// [written] hands it back — or the write that does not fit throws
+/// [SofabError.bufferFull]. That is the shape a caller sizing its buffer from a
+/// generated `MAX_SIZE` wants, and it stays exact: a two-byte message encodes
+/// into a two-byte buffer (CORELIB_PLAN §5.1).
 class Encoder {
   Encoder(
-    this._flush, {
+    FlushCallback this._flush, {
     Uint8List? buffer,
     int bufferSize = 4096,
     int offset = 0,
@@ -124,10 +131,48 @@ class Encoder {
     _bufData = ByteData.sublistView(_buf);
   }
 
+  /// Encodes into a caller-supplied [buffer] with **no flush sink** — the first
+  /// required capability of CORELIB_PLAN §5.1.
+  ///
+  /// No flush can occur, so nothing is ever handed downstream and nothing is
+  /// ever dropped: the buffer holds the message, which [written] returns, or the
+  /// write that runs out of room throws [SofabError.bufferFull]. [offset] leaves
+  /// room at the front of [buffer] for a framing header, exactly as in the
+  /// sink-installed form.
+  ///
+  /// No minimum applies to a sink-less buffer — a minimum is a *streaming*
+  /// precondition, and here there is no streaming — so a message that encodes to
+  /// two bytes fits a two-byte buffer. [flush] on such an encoder has nowhere to
+  /// drain to and is a no-op that leaves the bytes in place.
+  ///
+  /// ```dart
+  /// final buf = Uint8List(Person.maxSize);   // sized from the schema
+  /// final enc = sofab.Encoder.overBuffer(buf);
+  /// person.serialize(enc);
+  /// enc.flush();
+  /// socket.add(enc.written);                 // the whole message, zero-copy
+  /// ```
+  Encoder.overBuffer(Uint8List buffer, {int offset = 0})
+    : _flush = null,
+      _buf = buffer,
+      _pos = offset,
+      _flushStart = offset {
+    if (offset < 0 || offset > buffer.length) {
+      throw const SofabException(
+        SofabError.invalidArgument,
+        'offset out of range',
+      );
+    }
+    _bufData = ByteData.sublistView(buffer);
+  }
+
   Uint8List _buf;
   int _pos;
   int _flushStart;
-  final FlushCallback _flush;
+
+  /// The flush sink, or `null` for a buffer installed without one — in which
+  /// case [_drain] has nowhere to go and the buffer is all the room there is.
+  final FlushCallback? _flush;
 
   /// Cached `ByteData` view of [_buf] so floats can be written straight into the
   /// output buffer (no scratch, no per-call view allocation). Refreshed whenever
@@ -180,12 +225,20 @@ class Encoder {
   /// its own offset and so re-arms framing-header room in **every** flushed
   /// unit, where resetting afterwards would silently drop that offset and
   /// overwrite the room the caller reserved.
+  ///
+  /// **Without a sink there is nowhere to drain to** (CORELIB_PLAN §5.1): the
+  /// bytes stay exactly where they are and the cursor is *not* rewound, so the
+  /// caller that runs out of room gets [SofabError.bufferFull] from the write
+  /// itself instead of watching the overflow disappear. Rewinding here would
+  /// return partial output as if it were complete, which §5.1 forbids.
   void _drain() {
+    final flush = _flush;
+    if (flush == null) return;
     final start = _flushStart, end = _pos;
     _pos = 0;
     _flushStart = 0;
     if (end > start) {
-      _flush(Uint8List.sublistView(_buf, start, end));
+      flush(Uint8List.sublistView(_buf, start, end));
     }
   }
 
@@ -704,6 +757,10 @@ class Encoder {
 
   /// Drains any buffered bytes downstream (CORELIB_PLAN §5.1). Call once at the
   /// end of a message.
+  ///
+  /// On a sink-less encoder ([Encoder.overBuffer]) there is nowhere to drain to:
+  /// the message is already in the caller's buffer, where [written] returns it,
+  /// and this is a no-op that leaves it there.
   void flush() => _drain();
 
   /// Resets the write position to [offset] so the encoder + its buffer can be
@@ -717,6 +774,15 @@ class Encoder {
 
   /// Bytes written into the current buffer but not yet flushed.
   int get pending => _pos - _flushStart;
+
+  /// The bytes written into the active buffer since it was installed — the
+  /// whole message for a sink-less encoder ([Encoder.overBuffer]) that had room
+  /// for it, and whatever has not been flushed yet otherwise.
+  ///
+  /// A **view** over the caller's buffer (no copy), valid until the next write
+  /// or buffer installation. It starts at the installation's `offset`, so the
+  /// framing-header room a caller reserved is not part of it.
+  Uint8List get written => Uint8List.sublistView(_buf, _flushStart, _pos);
 
   // ---- one-shot convenience ---------------------------------------------
 

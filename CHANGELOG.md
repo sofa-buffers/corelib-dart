@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### Added — a caller-supplied output buffer without a flush sink (§5.1)
+
+`Encoder.overBuffer(buffer, {offset})` installs a caller-owned buffer with **no**
+sink — the first of §5.1's required capabilities — and `Encoder.written` returns
+the bytes of the active installation as a zero-copy view: the whole message, for
+a sink-less encoder that had room for it.
+
+Before this the only constructor took the flush callback as a required
+positional argument, so "here is my buffer, tell me if it is too small" could not
+be expressed at all. A caller with nothing to flush to had to pass a no-op sink,
+and that produced the exact behaviour §5.1 forbids: `_drain` handed the bytes to
+the callback and rewound the cursor, so everything past the end of the buffer was
+**silently discarded** and the encode returned as if it had succeeded — a 4-byte
+buffer swallowed a 10-byte varint without a word.
+
+`_drain` now returns without touching the cursor when there is no sink, so the
+buffer stays full and the write that does not fit throws `BufferFull`: no partial
+output dressed up as complete. `flush()` on such an encoder is a no-op that
+leaves the message in the caller's buffer, and `installBuffer` / `reset()` work
+in this mode too. No minimum binds a sink-less buffer — a minimum is a streaming
+precondition and nothing streams here — so a two-byte message encodes into a
+two-byte buffer, which is what keeps a buffer sized from a generated `MAX_SIZE`
+exact.
+
+No wire-format or hot-path change: the sink-installed path is untouched apart
+from one null test in the cold drain. Every shared vector is now also encoded
+sink-less into an exactly-sized buffer and asserted byte-identical, with the
+one-byte-short buffer asserted to report `BufferFull` (the converse half of §7.2
+item 4); the sink-less handover cases live in `test/buffer_install_test.dart`,
+and the README documents the mode and its memory behaviour.
+
 ### Fixed — a buffer installed from inside the flush callback keeps its start offset (§5.1)
 
 `_drain` rewound the cursor **after** invoking the sink, so an

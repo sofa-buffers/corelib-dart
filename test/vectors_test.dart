@@ -67,6 +67,41 @@ void main() {
         }
       });
 
+      // Sink-less encode — the same vector into a caller-supplied buffer sized
+      // exactly to the message (plus its start offset) with **no** flush sink:
+      // no minimum applies, the buffer holds the message and `written` hands it
+      // back byte-identical. One byte short must report buffer-full rather than
+      // truncate — the encoder never returns partial output as complete
+      // (CORELIB_PLAN §5.1).
+      test('$group/$name · sink-less encode', () {
+        final expected = hexToBytes(expectedHex);
+        final buf = Uint8List(offset + expected.length);
+        final enc = sofab.Encoder.overBuffer(buf, offset: offset);
+        replay(enc, fields);
+        enc.flush();
+        expect(bytesToHex(enc.written), expectedHex);
+
+        if (expected.isNotEmpty) {
+          final tight = sofab.Encoder.overBuffer(
+            Uint8List(offset + expected.length - 1),
+            offset: offset,
+          );
+          expect(
+            () {
+              replay(tight, fields);
+              tight.flush();
+            },
+            throwsA(
+              isA<sofab.SofabException>().having(
+                (e) => e.code,
+                'code',
+                sofab.SofabError.bufferFull,
+              ),
+            ),
+          );
+        }
+      });
+
       // 2. Vector decode — feed serialized.hex, assert recovered fields match.
       test('$group/$name · decode', () {
         final rec = RecordingVisitor();
