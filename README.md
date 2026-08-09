@@ -57,7 +57,7 @@ import it aliased.
 
 | Design goal | How `corelib-dart` achieves it |
 |-------------|--------------------------------|
-| Streaming output | `Encoder` writes into a fixed `Uint8List` and invokes a `FlushCallback` when it fills; the buffer can be smaller than the message and swapped mid-stream (`installBuffer`). |
+| Streaming output | `Encoder` writes into a fixed `Uint8List` and invokes a `FlushCallback` when it fills; the buffer can be smaller than the message and swapped mid-stream (`installBuffer`). `Encoder.overBuffer` takes the same caller buffer **without** a sink: it holds the whole message (`written`) or reports `BufferFull`. |
 | Streaming input | `Decoder.feed()` accepts any-size chunks; an explicit byte-state machine resumes across boundaries and returns the three-valued `DecodeStatus` — no finalize step. |
 | Zero unnecessary copies | Flush hands out a `Uint8List.sublistView` of the live buffer; decoded blobs bind the payload buffer directly; string bytes are validated in place before one decode. |
 | Low / no allocation on the hot path | Header/varint/array writes go straight to the buffer; `Encoder.reset()` reuses buffer + encoder across messages; typed-data (`Int64List`/`Float64List`) for arrays. |
@@ -194,6 +194,29 @@ The constructor's `offset` is the first installation and behaves the same way: a
 callback that just returns resumes at 0, so a per-packet reservation has to be
 re-armed per packet.
 
+### A caller-supplied buffer with no sink
+
+The other half of the §5.1 contract: hand over a buffer and *no* flush
+callback. Nothing can be flushed, so the buffer either holds the whole message
+— `written` gives it back as a view, no copy — or the write that runs out of
+room throws `BufferFull`. This is the shape for a caller that sized its buffer
+from a schema's `MAX_SIZE`, and for anyone who wants "here is my buffer, tell me
+if it is too small" rather than a sink.
+
+```dart
+final buf = Uint8List(64);                        // sized from the schema
+final enc = sofab.Encoder.overBuffer(buf, offset: 4); // 4 bytes framing room
+enc.writeString(0, 'fits or throws');
+enc.flush();                                      // no sink: a no-op
+socket.add(enc.written);                          // exactly the message bytes
+```
+
+No minimum applies to a sink-less buffer — a minimum is a *streaming*
+precondition and nothing streams here — so a two-byte message encodes into a
+two-byte buffer, and one byte less reports `BufferFull` instead of silently
+dropping the tail. `installBuffer` works in this mode too: take the bytes out of
+the buffer you own, then install the next one.
+
 ### OStream (output-stream / writer sink)
 
 The encoder *is* the ostream wrapper: a `FlushCallback` is any
@@ -260,6 +283,13 @@ Only two buffers matter, and both are caller-visible.
   honoured on every installation, not just the first. If the buffer fills with no
   room after a flush, `writeX` throws `BufferFull` rather than overflowing.
   `Encoder.reset()` rewinds it for the next message.
+- **Output buffer with no sink (`Encoder.overBuffer`).** The buffer is the only
+  room there is: no flush can occur, nothing is handed downstream and nothing is
+  ever dropped. A write that does not fit throws `BufferFull` — the encoder
+  never reports partial output as complete — and `flush()` is a no-op that
+  leaves the bytes where they are. `written` is a zero-copy view of the message
+  inside your buffer, starting at the installation's `offset`, valid until the
+  next write.
 - **Input buffer (decoding).** You own the chunks you feed. The hot path
   allocates nothing for scalars; the only library-owned heap is a small per-field
   carry buffer used to reassemble a `string`/`blob`/float payload that straddles a

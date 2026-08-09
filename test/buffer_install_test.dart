@@ -162,6 +162,160 @@ void main() {
       expect(packets.any((p) => p.length > 24 - _reserve), isTrue);
     });
   });
+
+  // A buffer handed over *without* a flush sink: no flush can occur, so the
+  // buffer either holds the whole message or reports buffer-full — it must
+  // never drop what it could not write (CORELIB_PLAN §5.1, "Required
+  // capabilities" bullet 1 and the MUST NOT on partial output).
+  group('CORELIB_PLAN §5.1 sink-less buffer', () {
+    test('a message that fits encodes into the caller buffer, byte-exact', () {
+      final buf = Uint8List(oneShot.length);
+      final enc = sofab.Encoder.overBuffer(buf);
+      _build(enc);
+      enc.flush();
+      expect(bytesToHex(enc.written), bytesToHex(oneShot));
+      expect(enc.pending, oneShot.length);
+      // `flush()` has nowhere to drain to: the bytes stay in the buffer and a
+      // second read returns the same message, not an empty one.
+      enc.flush();
+      expect(bytesToHex(enc.written), bytesToHex(oneShot));
+    });
+
+    test('a buffer one byte short reports buffer-full, never truncates', () {
+      final buf = Uint8List(oneShot.length - 1);
+      final enc = sofab.Encoder.overBuffer(buf);
+      expect(
+        () {
+          _build(enc);
+          enc.flush();
+        },
+        throwsA(
+          isA<sofab.SofabException>().having(
+            (e) => e.code,
+            'code',
+            sofab.SofabError.bufferFull,
+          ),
+        ),
+      );
+    });
+
+    test('the issue repro: a 4-byte buffer cannot swallow a 10-byte varint', () {
+      // Before the fix the only way to hand over a buffer was with a sink, and
+      // a no-op sink discarded every byte that did not fit — partial output
+      // reported as success.
+      final enc = sofab.Encoder.overBuffer(Uint8List(4));
+      expect(
+        () => enc.writeUnsigned(1, 0x1122334455667788),
+        throwsA(
+          isA<sofab.SofabException>().having(
+            (e) => e.code,
+            'code',
+            sofab.SofabError.bufferFull,
+          ),
+        ),
+      );
+    });
+
+    test('no minimum applies: a two-byte message fits a two-byte buffer', () {
+      // §5.1: "a message that encodes to two bytes may be encoded into a
+      // two-byte buffer on any port, whatever that port declares" — the
+      // converse half of the §7.2 item-4 minimum test.
+      final buf = Uint8List(2);
+      final enc = sofab.Encoder.overBuffer(buf);
+      enc.writeUnsigned(0, 127);
+      enc.flush();
+      expect(bytesToHex(enc.written), '007f');
+      // …and the byte after it does not fit.
+      expect(
+        () => enc.writeUnsigned(0, 1),
+        throwsA(isA<sofab.SofabException>()),
+      );
+    });
+
+    test('every write kind reports buffer-full rather than dropping bytes', () {
+      final cases = <String, void Function(sofab.Encoder)>{
+        'blob': (e) => e.writeBlob(1, Uint8List(32)),
+        'string': (e) => e.writeString(1, 'a string longer than the buffer'),
+        'fp64': (e) => e.writeFp64(1, 3.5),
+        'fp32 array': (e) => e.writeFp32Array(1, Float32List(8)),
+        'fp64 array': (e) => e.writeFp64Array(1, Float64List(8)),
+        'unsigned array': (e) => e.writeUnsignedArray(1, List.filled(8, -1)),
+        'signed array': (e) => e.writeSignedArray(1, List.filled(8, -1 << 62)),
+        'sequence end': (e) {
+          e.writeUnsigned(0, 0x7F);
+          e.endSequenceKeep();
+        },
+      };
+      cases.forEach((what, write) {
+        final enc = sofab.Encoder.overBuffer(Uint8List(2));
+        expect(
+          () => write(enc),
+          throwsA(isA<sofab.SofabException>()),
+          reason: '$what silently discarded output',
+        );
+      });
+    });
+
+    test('the start offset reserves header room the encoder never writes', () {
+      final buf = Uint8List(_reserve + oneShot.length)
+        ..fillRange(0, _reserve, _marker);
+      final enc = sofab.Encoder.overBuffer(buf, offset: _reserve);
+      _build(enc);
+      enc.flush();
+      expect(buf.sublist(0, _reserve), List<int>.filled(_reserve, _marker));
+      expect(bytesToHex(enc.written), bytesToHex(oneShot));
+      expect(
+        bytesToHex(buf.sublist(_reserve)),
+        bytesToHex(oneShot),
+        reason: 'the message must start at the installation offset',
+      );
+    });
+
+    test('an out-of-range offset is rejected at handover', () {
+      expect(
+        () => sofab.Encoder.overBuffer(Uint8List(4), offset: 5),
+        throwsA(
+          isA<sofab.SofabException>().having(
+            (e) => e.code,
+            'code',
+            sofab.SofabError.invalidArgument,
+          ),
+        ),
+      );
+      expect(
+        () => sofab.Encoder.overBuffer(Uint8List(4), offset: -1),
+        throwsA(isA<sofab.SofabException>()),
+      );
+    });
+
+    test('installBuffer works sink-less: the caller takes the message out', () {
+      // The caller drives the handover itself: encode, take the bytes, install
+      // the next buffer. `written` is the extent of the current installation.
+      final first = Uint8List(2);
+      final enc = sofab.Encoder.overBuffer(first);
+      enc.writeUnsigned(0, 127);
+      expect(bytesToHex(enc.written), '007f');
+      final second = Uint8List(8)..fillRange(0, 2, _marker);
+      enc.installBuffer(second, offset: 2);
+      enc.writeUnsigned(1, 1);
+      enc.flush();
+      expect(bytesToHex(enc.written), '0801');
+      expect(second.sublist(0, 2), [_marker, _marker]);
+      expect(bytesToHex(first), '007f', reason: 'the taken buffer is intact');
+    });
+
+    test('reset rewinds a sink-less encoder for the next message', () {
+      final buf = Uint8List(4);
+      final enc = sofab.Encoder.overBuffer(buf);
+      enc.writeUnsigned(0, 127);
+      enc.flush();
+      expect(bytesToHex(enc.written), '007f');
+      enc.reset();
+      enc.writeUnsigned(1, 1);
+      enc.flush();
+      expect(bytesToHex(enc.written), '0801');
+    });
+  });
 }
 
 Uint8List _concat(List<Uint8List> parts) {
