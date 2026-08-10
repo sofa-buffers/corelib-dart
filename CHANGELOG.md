@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### CI — the release (AOT) configuration is now built and run (§12.1)
+
+`ci.yml` ran `dart pub get`, `dart format`, `dart analyze`, `dart test` and a
+`dart run` sanity pass — all of which are the **debug** (JIT) configuration.
+`dart compile exe` appeared nowhere, so the AOT toolchain was never exercised:
+an AOT-only failure would have shipped unnoticed, and `bench/run_bench.sh` and
+`bench/run_callgrind.sh` — the two scripts the README names as the recommended
+way to benchmark, both of which drive `dart compile exe` — were never executed,
+so a break in either script, or in `bench/callgrind_target.dart`, stayed
+invisible until someone ran it by hand.
+
+* The `stable` matrix leg gained a release step that runs both benchmark
+  scripts, which between them AOT-compile `bench/bench.dart`, `bench/perf.dart`
+  and `bench/callgrind_target.dart` and then run the executables (installing
+  `valgrind` only if the runner image lacks it). One SDK is enough — the matrix
+  exists for language-version drift, not for the AOT toolchain. The JIT step is
+  kept and relabelled, so both configurations are built as §12.1 requires.
+* No library, API or wire-format change; `build/` stays git-ignored.
+* Tests: `test/ci_release_build_test.dart` reads the AOT entrypoints out of
+  `bench/*.sh` — it invents no list — and fails unless CI builds every one of
+  them and runs every benchmark script the README recommends. Adding an AOT
+  entrypoint without teaching CI about it now fails the suite. Closes #46.
+
 ### Docs — `### Requirements` names the SDK floor that is actually enforced (§9.2)
 
 The README promised **Dart SDK ≥ 3.4.0** while `pubspec.yaml` requires
