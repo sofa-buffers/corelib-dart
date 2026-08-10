@@ -285,12 +285,15 @@ final person = dec.value;                   // assembled incrementally
 
 ## Memory handling
 
-Only two buffers matter, and both are caller-visible.
+Only two buffers matter — the one you encode into and the one you decode from —
+and both are caller-owned. The two decode surfaces answer the ownership question
+differently, so they get a row each.
 
 | Buffer | Owner | Lifetime |
 |--------|-------|----------|
 | Output buffer (encode) | Caller — always | Reused after every flush; caller may swap it mid-stream. The flush view is valid only during the callback — copy to keep. |
-| Input bytes (decode) | Caller | Must outlive the `feed` call. Decoded `blob` values may reference a freshly-allocated payload buffer; `string` values are fresh Dart strings. |
+| Input buffer, one-shot decode (`Decoder.decode`) | Caller | Must outlive the call **and every value kept from it**: delivered `blob` / `onStringBytes` values are zero-copy views into your buffer. Copy to retain. |
+| Input chunk, streaming decode (`Decoder.feed`) | Caller | Reusable the moment `feed` returns. Nothing delivered aliases the chunk. |
 
 - **The library allocates no output buffer** (CORELIB_PLAN §5.1). Every buffer
   the encoder writes into is one you handed over: `buffer:` is a **required**
@@ -330,11 +333,26 @@ Only two buffers matter, and both are caller-visible.
   leaves the bytes where they are. `written` is a zero-copy view of the message
   inside your buffer, starting at the installation's `offset`, valid until the
   next write.
-- **Input buffer (decoding).** You own the chunks you feed. The hot path
-  allocates nothing for scalars; the only library-owned heap is a small per-field
-  carry buffer used to reassemble a `string`/`blob`/float payload that straddles a
-  chunk boundary. Decoded values are delivered to your visitor at completion —
-  copy them out if you need them past the callback.
+- **Input buffer, one-shot decode — zero-copy** (CORELIB_PLAN §9.6). You own the
+  buffer you pass to `Decoder.decode`, and the decoder borrows it: `onBlob` and
+  `onStringBytes` receive a `Uint8List` **view** onto your bytes, not a copy. The
+  view is valid exactly as long as the buffer is alive and unmodified — a value
+  kept past the visitor call moves with any later write into that buffer, so
+  copy it (`Uint8List.fromList(value)`) to retain it. `onString` is the
+  exception in the other direction: transcoding to a Dart `String` always
+  copies, so that value is yours unconditionally. Passing a plain `List<int>`
+  that is not a `Uint8List` copies it into one up front — the views then point
+  into that private copy, and your list is untouched. Only `blob` and
+  `onStringBytes` borrow: an array field is a freshly allocated typed list on
+  either surface, and scalars are values.
+- **Input chunk, streaming decode — copied out.** You own the chunks you feed
+  and may reuse or overwrite each one the moment `feed` returns: a payload is
+  reassembled into a library-owned carry buffer, so no delivered value ever
+  aliases a fed chunk, however the chunk boundaries fall. The hot path allocates
+  nothing for scalars; that small per-field carry buffer — for a `string`,
+  `blob` or float payload that straddles a chunk boundary — is the only
+  library-owned heap. Values are delivered to your visitor at completion; copy
+  them out if you need them past the callback.
 - **A streamed array is never staged twice.** An `array<fp32>`/`array<fp64>`
   payload *is* the little-endian byte image of the `Float32List`/`Float64List`
   it decodes into, so a chunked decode has no carry buffer for it at all: the
