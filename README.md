@@ -59,7 +59,7 @@ import it aliased.
 |-------------|--------------------------------|
 | Streaming output | `Encoder` writes into a fixed `Uint8List` and invokes a `FlushCallback` when it fills; the buffer can be smaller than the message and swapped mid-stream (`installBuffer`). `Encoder.overBuffer` takes the same caller buffer **without** a sink: it holds the whole message (`written`) or reports `BufferFull`. |
 | Streaming input | `Decoder.feed()` accepts any-size chunks; an explicit byte-state machine resumes across boundaries and returns the three-valued `DecodeStatus` — no finalize step. |
-| Zero unnecessary copies | Flush hands out a `Uint8List.sublistView` of the live buffer; decoded blobs bind the payload buffer directly; string bytes are validated in place before one decode. |
+| Zero unnecessary copies | Flush hands out a `Uint8List.sublistView` of the live buffer; decoded blobs bind the payload buffer directly; string bytes are validated in place before one decode; a streamed `fp32`/`fp64` array is assembled *in* the typed list it is delivered as. |
 | Low / no allocation on the hot path | Header/varint/array writes go straight to the buffer; `Encoder.reset()` reuses buffer + encoder across messages; typed-data (`Int64List`/`Float64List`) for arrays. |
 | Small, predictable footprint | One tiny per-field carry buffer for chunk-straddling payloads; no reflection, no codegen at runtime. |
 | Type safety | Typed `write*` methods and a typed `MessageVisitor`; `SofabException` carries a `SofabError` code, `Decoder` reports `DecodeStatus`. |
@@ -335,6 +335,15 @@ Only two buffers matter, and both are caller-visible.
   carry buffer used to reassemble a `string`/`blob`/float payload that straddles a
   chunk boundary. Decoded values are delivered to your visitor at completion —
   copy them out if you need them past the callback.
+- **A streamed array is never staged twice.** An `array<fp32>`/`array<fp64>`
+  payload *is* the little-endian byte image of the `Float32List`/`Float64List`
+  it decodes into, so a chunked decode has no carry buffer for it at all: the
+  arriving bytes are written straight into the list that will be delivered.
+  Peak memory is one array, whatever the chunking, and the elements are never
+  copied or converted a second time — the streamed decode costs what the
+  one-shot decode costs. Payload bytes (this and `string`/`blob` alike) are
+  moved a chunk-run at a time rather than byte by byte, so a large payload
+  arriving in reasonable chunks is a bulk copy, not a per-byte loop.
 - **Array counts are never trusted for sizing.** On the one-shot surface
   (`Decoder.decode`) the whole message is in hand, so an `element_count` larger
   than the bytes that remain is already refuted by the input: the result is

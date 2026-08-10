@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### Performance — a streamed fixlen array is allocated once, and filled in bulk
+
+Streaming decode of an `array<fp32>` / `array<fp64>` allocated the payload
+**twice**: a byte-sized staging buffer that the state machine filled one byte
+per dispatch, plus the `Float32List`/`Float64List` it was then copied into. Peak
+memory was 2× the payload and every element was touched twice — on a port whose
+one-shot path never did either.
+
+* The result list *is* the staging buffer now. A fixlen payload already is that
+  list's little-endian byte image, so the arriving bytes go straight into its
+  storage (`Uint8List.sublistView`) and delivery copies nothing. Peak memory is
+  one array. A big-endian host — none exists among Dart's targets — keeps the
+  separate buffer and the element-wise conversion.
+* `Decoder.feed` now moves a payload run — `string`, `blob`, `fp32`/`fp64` and
+  fixlen-array elements alike — in one bounded `setRange` per chunk instead of
+  one state-machine dispatch per byte, whenever at least four bytes are on
+  offer. The last byte of every payload still goes through the per-byte step, so
+  completion is decided in one place. Measured on a 1000-element `array<fp64>`
+  fed in 4 KiB chunks (AOT): **~66 → ~1.2 µs/op**, and ~10× at 64-byte chunks. A
+  byte-at-a-time feed of the same array pays ~20% for the halved memory, the
+  trade this port wants at that chunk size.
+* No API, wire-format or visitor-order change. `fp64` array elements now reach
+  the visitor without passing through a `double` conversion at all, as `fp32`
+  elements already did (§4.6 / §6.5).
+* Tests: `test/fixlen_array_staging_test.dart` — peak memory measured in a child
+  VM under an old-generation heap cap sized for one copy, plus bit-exact
+  fp32/fp64 streaming at chunk sizes 1/3/7/8/64, back-to-back arrays, skipped
+  arrays and `List<int>` chunks. The shared-vector `chunked-decode` leg now
+  replays every vector at chunk sizes 2/3/5/16/4096 as well as byte-at-a-time.
+  Closes #43.
+
 ### Changed — the generated-object example speaks the closed name set (§6.1.1)
 
 `example/person.dart` is this port's only description of the generated-object

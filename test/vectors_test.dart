@@ -113,7 +113,11 @@ void main() {
         expect(rec.events, expectedEvents(fields));
       });
 
-      // Chunked decode — one byte at a time must equal all-at-once.
+      // Chunked decode — one byte at a time must equal all-at-once, and so must
+      // every chunk size in between. The sizes matter: a byte-at-a-time feed of
+      // a `List<int>` and a multi-byte `Uint8List` take different paths through
+      // `feed` — only the latter reaches the bulk payload move (corelib-dart#43),
+      // and only a payload straddling a chunk boundary exercises the seam.
       test('$group/$name · chunked-decode', () {
         final bytes = hexToBytes(expectedHex);
         final rec = RecordingVisitor();
@@ -124,6 +128,22 @@ void main() {
         }
         expect(status, sofab.DecodeStatus.complete);
         expect(rec.events, expectedEvents(fields));
+
+        for (final size in const [2, 3, 5, 16, 4096]) {
+          final rec2 = RecordingVisitor();
+          final dec2 = sofab.Decoder(rec2);
+          var st = sofab.DecodeStatus.complete;
+          for (var i = 0; i < bytes.length; i += size) {
+            final end = i + size < bytes.length ? i + size : bytes.length;
+            st = dec2.feed(Uint8List.sublistView(bytes, i, end));
+          }
+          expect(st, sofab.DecodeStatus.complete, reason: 'chunk size $size');
+          expect(
+            rec2.events,
+            expectedEvents(fields),
+            reason: 'chunk size $size',
+          );
+        }
       });
 
       // 3. Roundtrip — encode → decode → compare.
