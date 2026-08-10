@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+### Fixed — a receiver limit no longer overrides a schema bound (§6.2.1, §6.3)
+
+`DecoderLimits` was applied to **every** materialized field, and applied
+*before* the hooks through which a schema-bound consumer states its own bound.
+Both halves are wrong. §6.2.1: a `max_dyn_*` limit is deployment configuration
+protecting the receiver from a field the schema leaves *unbounded*, and it "MUST
+NOT be applied to a field the schema already bounds. There the schema bound
+governs and its violation is `INVALID`". §6.3 says the same from the other end —
+`LimitExceeded` is "never raised for a field the schema bounds". So a deployment
+cap of 4 turned a `blob<maxlen 64>` carrying 100 bytes into `limitExceeded`
+where §7.1 requires `invalid`, rejected a perfectly valid 32-byte value of that
+same field, and the consumer never even learned of the header.
+
+Two changes, both at the header word, both still ahead of the allocation the
+limit exists to prevent:
+
+* **Order.** `onFixlenHeader` / `onArrayBegin` now fire *before* the limit is
+  weighed, so a schema-bound consumer sees the breach it is supposed to judge.
+  For a fixlen array that moves the limit behind the `fixlen_word` — deciding
+  whether the schema bounds the count is a question about the element kind
+  (§7.3) — where it lands before the payload allocation just the same.
+* **Exemption.** Two new hooks say which fields the schema bounds:
+
+  ```dart
+  int? onArrayCountBound(int id, ArrayKind kind) => null; // schema `count:`
+  int? onFixlenLenBound(int id, int subtype) => null;     // schema `maxlen:`
+  ```
+
+  Answering swaps the rule for that field: the configured limit stops applying
+  and the returned bound decides instead, with a wire count/length past it
+  reported as `invalid` — the outcome §7.1 wants — at the count/length word. As
+  everywhere else, `kind`/`subtype` are what the *wire* declares, so returning
+  `null` for a kind the field does not declare keeps the receiver limit on a
+  §7.3 skip, which no schema bound covers.
+
+Both are asked at most once per field and only just after a configured limit has
+already been exceeded — the only place the answer changes an outcome — so a
+decode with no `DecoderLimits` set pays nothing for them, and a visitor that
+does not override them decodes exactly as before. `DecoderLimits` is documented
+as the unbounded-field backstop it is; `test/schema_bound_limit_test.dart`
+covers both surfaces with an unbounded control one byte from every bounded case.
+Closes #40.
+
 ### Added — `minOutputBuffer`, declared and enforced at buffer handover (§5.1)
 
 `sofab.minOutputBuffer` is the port's **`MIN_OUTPUT_BUFFER`**: the smallest

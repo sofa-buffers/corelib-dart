@@ -14,16 +14,21 @@ import 'vector_support.dart';
 ///
 ///  1. read `element_count`; enforce only the **format** ceiling `ARRAY_MAX`,
 ///     allocating nothing on the strength of it;
-///  2. enforce the receiver **policy** limit ([sofab.DecoderLimits.maxArrayCount])
-///     — still on the count word, still `limitExceeded`, never `invalid`;
-///  3. read the `fixlen_word`; EOF before or inside it is **INCOMPLETE**;
-///  4. validate the word as a **format** matter — only fp32/4 and fp64/8 are legal
+///  2. read the `fixlen_word`; EOF before or inside it is **INCOMPLETE**;
+///  3. validate the word as a **format** matter — only fp32/4 and fp64/8 are legal
 ///     elements — anything else is INVALID and is *not* routed to a §7.3 skip;
-///  5. only now offer the field, via `onArrayBegin(id, kind, count)` with
+///  4. only now offer the field, via `onArrayBegin(id, kind, count)` with
 ///     `kind` ∈ {[sofab.ArrayKind.fp32], [sofab.ArrayKind.fp64]};
-///  6. a consumer whose declared element type **contradicts** `kind` skips the
+///  5. a consumer whose declared element type **contradicts** `kind` skips the
 ///     field (§7.3) and MUST NOT apply the schema `count` bound — the field was
-///     never this array's value. A matching `kind` gets the bound.
+///     never this array's value. A matching `kind` gets the bound;
+///  6. last, the receiver **policy** limit
+///     ([sofab.DecoderLimits.maxArrayCount]) — `limitExceeded`, never `invalid`,
+///     and still ahead of the payload allocation it prevents. It waits for the
+///     subtype because whether the *schema* bounds this count is itself a
+///     question about the element kind, and a schema-bounded field is exempt
+///     from the limit altogether (CORELIB_PLAN §6.2.1 — corelib-dart#40,
+///     covered in `schema_bound_limit_test.dart`).
 ///
 /// The corelib carries no verdict logic of its own here: it only decides *when*
 /// the hook fires and *what kind* it carries. The generated, schema-bound
@@ -164,16 +169,20 @@ void main() {
       expect(v.begins, isEmpty);
     });
 
-    test('maxArrayCount still fires on the count word as limitExceeded', () {
-      // A receiver *policy* limit (CORELIB_PLAN §6.2.1), deliberately NOT
-      // reordered behind the subtype and never folded into invalid.
+    test('maxArrayCount is still limitExceeded, never folded into invalid', () {
+      // A receiver *policy* limit (CORELIB_PLAN §6.2.1) stays its own outcome.
+      // What DID move (#40) is only *where* it is decided: behind the
+      // fixlen_word and behind the hook, because a schema-bounded field is
+      // exempt from it and the exemption is asked per element kind. This
+      // consumer declares no bound through onArrayCountBound, so the limit
+      // applies to it exactly as before — but the hook has already fired.
       final v = _run(
         _fixArray(count: '03', word: _fp32, elems: 3),
         limits: const sofab.DecoderLimits(maxArrayCount: 2),
       );
       expect(v.status, sofab.DecodeStatus.limitExceeded);
       expect(v.inv, isFalse);
-      expect(v.begins, isEmpty);
+      expect(v.begins, ['0:fp32:3']);
     });
 
     test('a skipped fixlen array still fires no hook at all', () {
