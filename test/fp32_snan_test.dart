@@ -86,6 +86,60 @@ void main() {
     },
   );
 
+  test('writeFp32Bits splits its four raw bytes across a flush', () {
+    // The encode-side twin of the test above, and the intersection of two
+    // obligations: §5.1 says every atomic unit — an `fp32` value included —
+    // splits across a flush, since MIN_OUTPUT_BUFFER is 1 here; §4.6 says the
+    // raw bit pattern is never normalized. Together they mean the split path
+    // has to move the same four bytes the contiguous path does. It is a
+    // separate code path (a scratch-buffer write, not a direct one), reached
+    // only when the value straddles the end of the buffer, so it needs a buffer
+    // small enough to make that happen.
+    final oneShot = sofab.Encoder.encodeToBytes(
+      (e) => e.writeFp32Bits(1, 0x7F800001),
+    );
+    for (final size in const [1, 2, 3, 4, 5]) {
+      final out = BytesBuilder();
+      final enc = sofab.Encoder(out.add, buffer: Uint8List(size));
+      enc.writeFp32Bits(1, 0x7F800001);
+      enc.flush();
+      expect(
+        bytesToHex(out.toBytes()),
+        bytesToHex(oneShot),
+        reason: 'a $size-byte streaming buffer must produce the same bytes',
+      );
+      final v = _BitVisitor();
+      expect(
+        sofab.Decoder.decode(out.toBytes(), v),
+        sofab.DecodeStatus.complete,
+      );
+      expect(v.bits.single, 0x7F800001, reason: 'buffer size $size');
+    }
+  });
+
+  test('an fp32 sNaN array splits across a flush too', () {
+    // Same obligation one level down: an array *element* is an atomic unit as
+    // well, so a tiny buffer must not quiet an element it has to split.
+    final arr = Float32List(2);
+    arr.buffer.asUint32List(arr.offsetInBytes, 2)
+      ..[0] = 0x7F800001
+      ..[1] = 0xFF800001;
+    final oneShot = sofab.Encoder.encodeToBytes(
+      (e) => e.writeFp32Array(1, arr),
+    );
+    for (final size in const [1, 3, 6]) {
+      final out = BytesBuilder();
+      final enc = sofab.Encoder(out.add, buffer: Uint8List(size));
+      enc.writeFp32Array(1, arr);
+      enc.flush();
+      expect(
+        bytesToHex(out.toBytes()),
+        bytesToHex(oneShot),
+        reason: 'a $size-byte streaming buffer must produce the same bytes',
+      );
+    }
+  });
+
   test('F-0031 reproduce message: nested.f32 = 0x7F800001 is preserved', () {
     // The exact wire from the issue: a sequence carrying an fp32 sNaN.
     final wire = hexToBytes('5602200100807f07a606560707c60c07ce0c07');
