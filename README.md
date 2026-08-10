@@ -38,7 +38,9 @@ import it aliased.
 
 ### Requirements
 
-- **Dart SDK ≥ 3.4.0.**
+- **Dart SDK ≥ 3.8.0** — the floor `pubspec.yaml` enforces
+  (`environment: sdk: ^3.8.0`) and the lowest leg of the CI matrix, so it is
+  also the oldest SDK this port is proven on.
 - Install:
 
   ```console

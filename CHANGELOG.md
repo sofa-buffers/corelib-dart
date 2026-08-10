@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Docs — `### Requirements` names the SDK floor that is actually enforced (§9.2)
+
+The README promised **Dart SDK ≥ 3.4.0** while `pubspec.yaml` requires
+`^3.8.0` and the CI matrix's lowest leg is `3.8`. A reader on 3.4–3.7 followed
+the README's install command and got a resolution failure instead of a library.
+
+* The Requirements bullet now states **≥ 3.8.0** and says where the number
+  comes from — the `environment.sdk` bound and the lowest CI leg, i.e. the
+  oldest SDK this port is proven on.
+* No behaviour, API or wire-format change; the enforced floor did not move.
+* Tests: `test/sdk_floor_test.dart` parses `pubspec.yaml`, the README's
+  Requirements section and `.github/workflows/ci.yml`, and fails the moment the
+  three disagree — so the next bump of `environment.sdk` cannot silently leave
+  the README behind. It also re-asserts §9.2's install command. Closes #45.
+
 ### Docs — `## Memory handling` states what one-shot decode does with your bytes (§9.6)
 
 The section described the streaming surface only, and got the one-shot surface
