@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+### Tests — strict UTF-8 through the streaming decoder, at the boundaries the vectors cannot reach (§6.4)
+
+No behaviour change; this closes a coverage gap in the shared conformance
+vectors themselves.
+
+Every `invalid_utf8` seed in `assets/test_vectors.json` is a message of at most
+six bytes whose bad sequence sits at payload offset 0, and this repo only ever
+fed them one-shot. That leaves untested the arrival shape where "validate what
+is new" and "validate the payload" come apart: an invalid sequence that
+**begins at a payload offset at or beyond everything fed so far**, so that every
+byte the decoder has already consumed was valid UTF-8.
+
+`test/invalid_utf8_chunked_test.dart` builds that shape for each seed — a
+96-byte ASCII prefix, the seed's bad bytes (parsed out of the vector, not
+restated), a valid multi-byte tail — and feeds it with the chunk cut exactly at
+the bad sequence, then one byte at a time, then split at every byte of the
+message. It also covers the skip twin (§6.4: a skipped string is a length jump,
+never validated, however many feeds it spans), that `onStringBytes` fires once
+with the whole reassembled payload whatever the chunk size, that a cut inside a
+*valid* 2-/3-/4-byte sequence still transcodes exactly, and that the INVALID
+verdict is terminal against later well-formed bytes. Confirmed non-vacuous by
+mutation: validating only the first 96 payload bytes keeps the existing
+`invalid_utf8` suite green and fails 34 of the new cases.
+
+`test/fp32_snan_test.dart` gains the encode-side twin of its streaming case:
+`writeFp32Bits` and `writeFp32Array` through 1-, 2-, 3-, 5- and 6-byte output
+buffers, where the four raw bytes straddle a flush and take the scratch-buffer
+path (§5.1 + §4.6). That was the last reachable unexecuted line in
+`lib/src/encoder.dart`, which is now at 100%.
+
+Line coverage 98.35% → 98.57%. The 13 remaining lines are unreachable by
+design: the big-endian-host fallbacks in `_readFp32Array`/`_readFp64Array` and
+`_onArrFixWord` (no platform Dart targets is big-endian), the defensive
+`return _fail(invalid)` after four already-exhaustive switches, and the private
+constructors of the `WireType`/`FixlenType` constant holders.
+
 ### Perf — the streaming decoder stops paying per byte for bytes it already has (§5.2)
 
 `Decoder.feed` walked every chunk one byte at a time through the state machine,
