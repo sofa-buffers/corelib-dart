@@ -344,8 +344,10 @@ DecodeStatus? _fixlenLenVerdict(
 
 // Internal decoder states. The two *payload* states are deliberately last and
 // adjacent: they are the only ones whose bytes are opaque — no varint to
-// accumulate, nothing to decide per byte — so [Decoder.feed] takes them in bulk,
-// and `_state >= _sFixPayload` is the one compare per byte that spots them.
+// accumulate, nothing to decide per byte — so [Decoder.feed] moves them in bulk
+// and [Decoder._step] splits them off with one compare. Every other state is
+// waiting for a varint, which is what lets `< _sFixPayload` stand for "a whole
+// varint may be lifted straight out of the chunk".
 const int _sHeader = 0;
 const int _sUValue = 1; // unsigned value varint
 const int _sSValue = 2; // signed value varint
@@ -361,11 +363,13 @@ const int _sArrFixPayload = 9; // opaque payload — bulk-copied
 /// [Decoder._bulkPayload]).
 const int _bulkPayloadMin = 4;
 
-class _Frame {
-  _Frame(this.visitor);
-  // null visitor => this scope is being skipped.
-  final MessageVisitor? visitor;
-}
+/// Fewest chunk bytes worth entering the word-wise array-element run for (see
+/// [Decoder._bulkArrElems]): one maximal varint, the reader's step size.
+const int _bulkVarintMin = 10;
+
+/// The empty payload every zero-length `string`/`blob` is delivered as — one
+/// object for the whole isolate rather than one per field.
+final Uint8List _noBytes = Uint8List(0);
 
 /// The continuation bit of all eight bytes of a 64-bit word.
 const int _contBits = 0x8080808080808080;
@@ -419,6 +423,89 @@ int _termByte(int m) {
   return idx;
 }
 
+/// Decodes a run of array-element varints (CORELIB_PLAN §4.7) **word-wise** —
+/// the shared element engine of both decode surfaces, so the one-shot path and
+/// the streaming path cost the same per element and cannot drift apart.
+///
+/// Reads from [buf] (viewed as [bd], valid to [len]) starting at [p] and fills
+/// `out[i..limit)`. Returns the position it stopped at in the low 32 bits and
+/// the index it stopped at in the high bits — a packed pair rather than a record
+/// so the run itself allocates nothing; both fit comfortably, `len` and `limit`
+/// being bounded by `ARRAY_MAX` = 2^31−1.
+///
+/// It stops **before** anything it cannot settle inside the range: [limit], a
+/// maximal varint that would leave the buffer, or a malformed 10-byte varint.
+/// The caller's byte-wise reader then re-reads those bytes and owns the
+/// INCOMPLETE/INVALID verdict — one place decides, whichever surface got here.
+///
+/// Callers must guarantee `out.length >= limit`.
+int _varintRun(
+  Uint8List buf,
+  ByteData bd,
+  int len,
+  int p,
+  Int64List out,
+  int i,
+  int limit,
+  bool signed,
+) {
+  while (i < limit && p + 10 <= len) {
+    int raw;
+    // One 64-bit load serves every length. The short-varint cases are derived
+    // from that same word rather than from extra byte loads (a bounds-checked
+    // `Uint8List` read costs ~8 instructions), and the all-continuation case is
+    // tested first because it is the one that cannot be short-circuited.
+    final x = bd.getUint64(p, Endian.little);
+    final m = ~x & _contBits;
+    if (m == 0) {
+      // 9- or 10-byte varint. (Folding the two tail bytes into one
+      // `ByteData.getUint16` measured very slightly *worse* than two
+      // `Uint8List` loads, so they stay separate.)
+      final b8 = buf[p + 8];
+      raw = _unspread56(x) | ((b8 & 0x7F) << 56);
+      if (b8 < 0x80) {
+        p += 9;
+      } else {
+        final last = buf[p + 9];
+        if ((last & 0x80) != 0 || (last & 0x7f) > 0x01) break; // malformed
+        raw |= (last & 0x7f) << 63;
+        p += 10;
+      }
+    } else if ((m & 0x80) != 0) {
+      raw = x & 0x7F; // 1 byte — skips the ~23-op un-spread
+      p += 1;
+    } else if ((m & 0x8000) != 0) {
+      raw = (x & 0x7F) | (((x >>> 8) & 0x7F) << 7); // 2 bytes
+      p += 2;
+    } else {
+      final nb = _termByte(m) + 1; // 3..8 bytes
+      p += nb;
+      raw = _unspread56(nb == 8 ? x : x & ((1 << (nb << 3)) - 1));
+    }
+    out[i++] = signed ? (raw >>> 1) ^ -(raw & 1) : raw;
+  }
+  return (i << 32) | p;
+}
+
+/// Whether any of `out[from..to)` falls outside [range]. See [ElemRange] for why
+/// the unsigned arm also rejects a negative: Dart has no unsigned compare, and a
+/// wire value above 2^63 is above every bound that can exist here.
+bool _elemOutOfRange(
+  Int64List out,
+  int from,
+  int to,
+  bool signed,
+  ElemRange range,
+) {
+  for (var i = from; i < to; i++) {
+    final v = out[i];
+    if (signed ? (v < range.min || v > range.max) : (v < 0 || v > range.max)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /// Whether the host stores typed-data elements in wire (little-endian) order —
 /// true on every platform Dart targets. Where it holds, a fixlen array's wire
 /// payload *is* the byte image of the `Float32List`/`Float64List` it decodes
@@ -464,14 +551,31 @@ void _readFp64Array(Float64List dst, Uint8List src, int srcStart, int count) {
 /// resumes at **any** byte boundary. Each [feed] (and the one-shot [decode])
 /// returns the three-valued [DecodeStatus] describing the bytes consumed so far —
 /// there is **no** finalize step, and `incomplete` is never auto-promoted to an
-/// error. The only heap the hot path touches is a per-field carry buffer for a
-/// payload that straddles a chunk boundary.
+/// error.
+///
+/// Resuming anywhere is a guarantee, not a tariff: whatever a chunk carries
+/// whole is taken whole — a varint out of it in one read ([_fastVarint]), a run
+/// of integer array elements 64 bits at a time ([_bulkArrElems], the same reader
+/// the one-shot surface uses), an opaque payload in one copy ([_bulkPayload]) —
+/// and only a field genuinely straddling a boundary falls back to the per-byte
+/// state machine. The only heap the hot path touches is a per-field carry buffer
+/// for a `string`/`blob` payload; a float payload stages in a reusable slot.
 class Decoder {
   Decoder(MessageVisitor root, {this.limits = const DecoderLimits()})
-    : _frames = <_Frame>[_Frame(root)];
+    : _vis = root;
 
   final DecoderLimits limits;
-  final List<_Frame> _frames;
+
+  /// The visitor of the innermost open scope, or `null` while that scope is
+  /// being skipped — held directly rather than re-read off the stack, because
+  /// every field consults it several times.
+  MessageVisitor? _vis;
+
+  /// The *enclosing* scopes' visitors, innermost last; its length is the number
+  /// of open sequences. A plain visitor list, not a wrapper object per scope —
+  /// the scope carried nothing else, so a nested message no longer allocates one
+  /// per `sequence_start`. Empty (and never touched) for a flat message.
+  final List<MessageVisitor?> _enclosing = <MessageVisitor?>[];
 
   int _state = _sHeader;
   bool _terminal = false; // an INVALID / limitExceeded outcome is sticky
@@ -511,38 +615,70 @@ class Decoder {
   Float32List? _arrF32;
   Float64List? _arrF64;
 
-  MessageVisitor? get _topVisitor => _frames.last.visitor;
+  /// Reusable 8-byte staging area for one `fp32`/`fp64` scalar payload, and its
+  /// `ByteData` twin — the widest a float payload gets. A float field therefore
+  /// allocates nothing: no per-field payload buffer and no per-field typed-data
+  /// view (whose construction costs ~300 instructions under Dart AOT, several
+  /// times a float read). Per **decoder**, not a shared static, so interleaved
+  /// decoders cannot overwrite each other's half-arrived payload.
+  ///
+  /// `late` so a decode that never sees a float never allocates it.
+  late final Uint8List _fscratch = Uint8List(8);
+  late final ByteData _fscratchData = ByteData.view(_fscratch.buffer);
 
   /// Feeds a chunk of raw bytes. Returns the outcome for everything consumed so
   /// far (CORELIB_PLAN §5.2).
   DecodeStatus feed(List<int> data) {
     if (_terminal) return _terminalStatus;
-    final n = data.length;
-    // `List<int>` indexing is an interface call per byte; promoting the common
-    // `Uint8List` case lets AOT compile the read down to a load. The elements
-    // are already 0..255 there, so the mask is a no-op and is dropped.
-    if (data is Uint8List) {
-      var i = 0;
-      while (i < n) {
-        if (_state >= _sFixPayload && n - i >= _bulkPayloadMin) {
-          i += _bulkPayload(data, i, n);
-          if (i == n) break;
-        }
-        if (!_step(data[i])) {
-          _terminal = true;
-          return _terminalStatus;
-        }
-        i++;
-      }
-      return _boundaryStatus();
-    }
+    // Everything below reads bytes through a `Uint8List`: on that type AOT
+    // compiles an element read down to a load, where `List<int>` indexing is an
+    // interface call per byte, and only there can the bulk moves below reach
+    // memcpy and a 64-bit varint load. A caller that hands over some other
+    // `List<int>` pays one copy for it — `Uint8List.fromList` truncates to 8
+    // bits exactly as the per-byte mask did — and nothing delivered ever
+    // aliases a fed chunk either way (CORELIB_PLAN §9.6).
+    final chunk = data is Uint8List ? data : Uint8List.fromList(data);
+    final n = chunk.length;
     var i = 0;
     while (i < n) {
-      if (_state >= _sFixPayload && n - i >= _bulkPayloadMin) {
-        i += _bulkPayload(data, i, n);
-        if (i == n) break;
+      final state = _state;
+      if (state >= _sFixPayload) {
+        // Opaque payload: move the run this chunk holds in one go.
+        if (n - i >= _bulkPayloadMin) {
+          i += _bulkPayload(chunk, i, n);
+          if (_payloadPos == _payloadTotal && !_payloadComplete()) {
+            _terminal = true;
+            return _terminalStatus;
+          }
+          if (i == n) break;
+          continue;
+        }
+      } else if (_vn == 0) {
+        // A varint state with nothing accumulated yet — so the chunk may hold
+        // whole varints, and reading them as varints beats one state-machine
+        // dispatch per byte by roughly an order of magnitude.
+        if (state == _sArrElem) {
+          final took = _bulkArrElems(chunk, i, n);
+          if (took < 0) {
+            _terminal = true;
+            return _terminalStatus;
+          }
+          i += took;
+          if (i == n) break;
+        }
+        final took = _fastVarint(chunk, i, n);
+        if (took != 0) {
+          i += took;
+          final v = _v;
+          _v = 0;
+          if (!_onVarint(v)) {
+            _terminal = true;
+            return _terminalStatus;
+          }
+          continue;
+        }
       }
-      if (!_step(data[i] & 0xFF)) {
+      if (!_step(chunk[i])) {
         _terminal = true;
         return _terminalStatus;
       }
@@ -551,17 +687,45 @@ class Decoder {
     return _boundaryStatus();
   }
 
+  /// Reads one **whole** varint out of `data[from..end)` into [_v], and returns
+  /// how many bytes it took — or 0, leaving [_v] untouched, when the chunk does
+  /// not carry the whole of it or the encoding is malformed.
+  ///
+  /// Both refusals hand the bytes back to the byte-wise reader unread, which is
+  /// where suspend-and-resume and the INVALID verdict live: this is a fast path,
+  /// never a second opinion. Caller must have `_vn == 0` (nothing accumulated).
+  int _fastVarint(Uint8List data, int from, int end) {
+    var p = from;
+    var v = 0;
+    var shift = 0;
+    while (p < end) {
+      final b = data[p++];
+      v |= (b & 0x7F) << shift;
+      if (b < 0x80) {
+        _v = v;
+        return p - from;
+      }
+      shift += 7;
+      if (shift == 63) {
+        // The 10th byte may set only bit 63 and must terminate the varint.
+        if (p >= end) return 0;
+        final last = data[p++];
+        if ((last & 0x80) != 0 || (last & 0x7F) > 0x01) return 0; // malformed
+        _v = v | ((last & 0x7F) << 63);
+        return p - from;
+      }
+    }
+    return 0;
+  }
+
   /// Takes the run of opaque payload bytes this chunk holds — a `string`,
   /// `blob`, `fp32`/`fp64` value or a fixlen array's elements — in **one move**
   /// instead of one state-machine dispatch per byte, and returns how many it
-  /// took (0 if there is nothing to take in bulk).
-  ///
-  /// It stops one byte short of the payload's end on purpose: the last byte
-  /// goes through [_stepFixPayload]/[_stepArrFixPayload], which own the
-  /// completion — delivering the value to the visitor is decided in exactly one
-  /// place whether the payload arrived byte-by-byte or in a single chunk.
-  int _bulkPayload(List<int> data, int from, int end) {
-    final want = _payloadTotal - _payloadPos - 1;
+  /// took. Completion is the caller's to notice ([_payloadComplete]), the same
+  /// as for the byte-wise [_stepPayload], so the value is delivered from one
+  /// place however the payload arrived.
+  int _bulkPayload(Uint8List data, int from, int end) {
+    final want = _payloadTotal - _payloadPos;
     final have = end - from;
     final take = want < have ? want : have;
     if (take <= 0) return 0;
@@ -572,10 +736,52 @@ class Decoder {
     return take;
   }
 
+  /// Takes the run of **whole array-element varints** this chunk can supply in
+  /// one word-wise pass ([_varintRun]) instead of one state-machine dispatch per
+  /// byte, and returns how many bytes it took (0 when there is nothing to take;
+  /// −1 when an element turned out to be outside its declared width, which is
+  /// terminal INVALID).
+  ///
+  /// Like [_bulkPayload] it stops one **element** short of the array's end: the
+  /// last one goes through [_onArrElem], which owns the completion, so the
+  /// array is delivered from exactly one place whether it arrived byte-by-byte
+  /// or in a single chunk. It also declines a skipped array, whose elements are
+  /// walked rather than materialized.
+  int _bulkArrElems(Uint8List data, int from, int end) {
+    final out = _arrInts;
+    final limit = _arrCount - 1;
+    final first = _arrIndex;
+    // The run reads a maximal varint at a time, so it needs that much room.
+    // (`feed` only calls this with nothing accumulated, `_vn == 0`.)
+    if (out == null || first >= limit || end - from < _bulkVarintMin) return 0;
+    final signed = _arrType == WireType.arraySigned;
+    final packed = _varintRun(
+      data,
+      ByteData.sublistView(data),
+      end,
+      from,
+      out,
+      first,
+      limit,
+      signed,
+    );
+    _arrIndex = packed >>> 32;
+    // The declared width, applied AT the element (§7.1) — over the run rather
+    // than one element at a time, which is the same `feed` call and so the same
+    // reported outcome, INVALID still outranking a truncated tail (§5.2).
+    final range = _arrElemRange;
+    if (range != null &&
+        _elemOutOfRange(out, first, _arrIndex, signed, range)) {
+      _fail(DecodeStatus.invalid);
+      return -1;
+    }
+    return (packed & 0xFFFFFFFF) - from;
+  }
+
   DecodeStatus _boundaryStatus() {
     // COMPLETE only at a field boundary with no open sequence (CORELIB_PLAN
     // §5.2 framing invariant).
-    if (_state == _sHeader && _vn == 0 && _frames.length == 1) {
+    if (_state == _sHeader && _vn == 0 && _enclosing.isEmpty) {
       return DecodeStatus.complete;
     }
     return DecodeStatus.incomplete;
@@ -606,56 +812,52 @@ class Decoder {
   }
 
   // Process a single byte. Returns false on a terminal outcome.
+  //
+  // Every state but the two opaque payloads is waiting for a varint, so the
+  // accumulate-and-test preamble lives here once rather than in each of them;
+  // the state's actual decision is [_onVarint], which [feed]'s whole-varint fast
+  // path reaches directly.
   bool _step(int b) {
+    if (_state >= _sFixPayload) return _stepPayload(b);
+    final r = _vfeed(b);
+    if (r < 0) return _fail(DecodeStatus.invalid);
+    if (r == 0) return true;
+    final v = _v;
+    _vreset();
+    return _onVarint(v);
+  }
+
+  /// Acts on the varint [v] the current state was waiting for, however it was
+  /// read — accumulated byte by byte by [_step] or lifted whole out of the chunk
+  /// by [_fastVarint]. One place decides per state, so the two readers cannot
+  /// drift apart.
+  bool _onVarint(int v) {
     switch (_state) {
       case _sHeader:
-        return _stepHeader(b);
+        return _onHeader(v);
       case _sUValue:
-        {
-          final r = _vfeed(b);
-          if (r < 0) return _fail(DecodeStatus.invalid);
-          if (r == 0) return true;
-          final value = _v;
-          _vreset();
-          _state = _sHeader;
-          if (_read) _topVisitor!.onUnsigned(_fieldId, value);
-          return true;
-        }
+        _state = _sHeader;
+        if (_read) _vis!.onUnsigned(_fieldId, v);
+        return true;
       case _sSValue:
-        {
-          final r = _vfeed(b);
-          if (r < 0) return _fail(DecodeStatus.invalid);
-          if (r == 0) return true;
-          final raw = _v;
-          _vreset();
-          _state = _sHeader;
-          if (_read) _topVisitor!.onSigned(_fieldId, (raw >>> 1) ^ -(raw & 1));
-          return true;
-        }
+        _state = _sHeader;
+        if (_read) _vis!.onSigned(_fieldId, (v >>> 1) ^ -(v & 1));
+        return true;
       case _sFixWord:
-        return _stepFixWord(b);
-      case _sFixPayload:
-        return _stepFixPayload(b);
+        return _onFixWord(v);
       case _sArrCount:
-        return _stepArrCount(b);
+        return _onArrCount(v);
       case _sArrElem:
-        return _stepArrElem(b);
+        return _onArrElem(v);
       case _sArrFixCount:
-        return _stepArrFixCount(b);
+        return _onArrFixCount(v);
       case _sArrFixWord:
-        return _stepArrFixWord(b);
-      case _sArrFixPayload:
-        return _stepArrFixPayload(b);
+        return _onArrFixWord(v);
     }
     return _fail(DecodeStatus.invalid);
   }
 
-  bool _stepHeader(int b) {
-    final r = _vfeed(b);
-    if (r < 0) return _fail(DecodeStatus.invalid);
-    if (r == 0) return true;
-    final header = _v;
-    _vreset();
+  bool _onHeader(int header) {
     final type = header & 0x7;
     final id = header >>> 3;
     if (id > idMax) return _fail(DecodeStatus.invalid); // id > ID_MAX (§6.2)
@@ -695,50 +897,43 @@ class Decoder {
   // Decide read-vs-skip for a leaf field at header time.
   bool _decideRead(int id, int type) {
     if (_skipDepth > 0) return false;
-    final v = _topVisitor;
+    final v = _vis;
     if (v == null) return false;
     return v.shouldRead(id, type);
   }
 
   bool _openSequence(int id) {
     // Open count includes skipped sequences, so COMPLETE waits for them too.
-    if (_frames.length - 1 >= maxDepth) {
+    if (_enclosing.length >= maxDepth) {
       return _fail(DecodeStatus.invalid); // nesting past MAX_DEPTH
     }
+    _enclosing.add(_vis);
     if (_skipDepth > 0) {
       _skipDepth++;
-      _frames.add(_Frame(null));
+      _vis = null;
       return true;
     }
-    final child = _topVisitor!.onSequenceStart(id);
-    if (child == null) {
-      _skipDepth = 1;
-      _frames.add(_Frame(null));
-    } else {
-      _frames.add(_Frame(child));
-    }
+    final child = _vis!.onSequenceStart(id);
+    if (child == null) _skipDepth = 1;
+    _vis = child;
     return true;
   }
 
   bool _closeSequence() {
-    if (_frames.length == 1) {
+    if (_enclosing.isEmpty) {
       return _fail(DecodeStatus.invalid); // sequence-end with no open sequence
     }
-    final frame = _frames.removeLast();
+    final closed = _vis;
+    _vis = _enclosing.removeLast();
     if (_skipDepth > 0) {
       _skipDepth--;
     } else {
-      frame.visitor?.onSequenceEnd();
+      closed?.onSequenceEnd();
     }
     return true;
   }
 
-  bool _stepFixWord(int b) {
-    final r = _vfeed(b);
-    if (r < 0) return _fail(DecodeStatus.invalid);
-    if (r == 0) return true;
-    final word = _v;
-    _vreset();
+  bool _onFixWord(int word) {
     final length = word >>> 3;
     final subtype = word & 0x7;
     if (length > fixlenMax) return _fail(DecodeStatus.invalid);
@@ -756,11 +951,11 @@ class Decoder {
     // limit is a statement about the receiver's capacity, never about the
     // field's validity (§6.2.1).
     if (_read) {
-      _topVisitor!.onFixlenHeader(_fieldId, subtype, length);
+      _vis!.onFixlenHeader(_fieldId, subtype, length);
       // Receiver-side limit (well-formed bytes → limitExceeded, not INVALID) —
       // unless the schema bounds this field, where the schema bound decides.
       final verdict = _fixlenLenVerdict(
-        _topVisitor!,
+        _vis!,
         limits,
         _fieldId,
         subtype,
@@ -771,71 +966,79 @@ class Decoder {
     _fixSubtype = subtype;
     _payloadTotal = length;
     _payloadPos = 0;
-    _payloadBuf = _read && length > 0 ? Uint8List(length) : null;
-    if (length == 0) {
-      _emitFixlen();
-      _state = _sHeader;
-      return true;
-    }
+    // A float payload stages in the reusable per-decoder scratch (4/8 bytes,
+    // both validated above); only a `string`/`blob`, which is handed to the
+    // visitor, needs storage of its own.
+    _payloadBuf = !_read || length == 0
+        ? null
+        : (subtype == FixlenType.fp32 || subtype == FixlenType.fp64
+              ? _fscratch
+              : Uint8List(length));
     _state = _sFixPayload;
-    return true;
+    return length == 0 ? _payloadComplete() : true;
   }
 
-  bool _stepFixPayload(int b) {
+  /// One opaque payload byte — a `string`/`blob`/float value or a fixlen array
+  /// element — into the staging area, and the payload's completion when it is
+  /// the last one.
+  bool _stepPayload(int b) {
     if (_read) _payloadBuf![_payloadPos] = b;
     _payloadPos++;
     if (_payloadPos < _payloadTotal) return true;
-    if (!_emitFixlen()) return false;
+    return _payloadComplete();
+  }
+
+  /// Delivers a payload that has just become whole, however its bytes arrived —
+  /// one byte at a time through [_stepPayload] or in a single move through
+  /// [_bulkPayload] — and reopens the field boundary. The single place a fixlen
+  /// value or a fixlen array reaches the visitor.
+  bool _payloadComplete() {
+    if (_state == _sFixPayload) {
+      if (!_emitFixlen()) return false;
+    } else if (_read) {
+      _emitFixArray();
+    }
     _state = _sHeader;
     return true;
   }
 
   bool _emitFixlen() {
     if (!_read) return true;
-    final buf = _payloadBuf ?? Uint8List(0);
     switch (_fixSubtype) {
       case FixlenType.fp32:
         {
-          final view = ByteData.sublistView(buf);
+          final view = _fscratchData;
           final v = view.getFloat32(0, Endian.little);
           // Non-NaN widens to a double and back losslessly (hot path). A NaN can
           // carry a payload/signaling bit the double would quiet, so re-read the
           // raw wire bits and deliver those (§4.6: never normalize).
           if (v.isNaN) {
-            _topVisitor!.onFp32Bits(_fieldId, view.getUint32(0, Endian.little));
+            _vis!.onFp32Bits(_fieldId, view.getUint32(0, Endian.little));
           } else {
-            _topVisitor!.onFp32(_fieldId, v);
+            _vis!.onFp32(_fieldId, v);
           }
           return true;
         }
       case FixlenType.fp64:
-        _topVisitor!.onFp64(
-          _fieldId,
-          ByteData.sublistView(buf).getFloat64(0, Endian.little),
-        );
+        _vis!.onFp64(_fieldId, _fscratchData.getFloat64(0, Endian.little));
         return true;
       case FixlenType.string:
         // Raw wire bytes go to the destination; validation happens there, never
         // here — this point is only reached for a field being materialized
         // (CORELIB_PLAN §6.4). The default hook validates strictly (no U+FFFD
         // substitution) and only then decodes the now-known-valid bytes.
-        if (!_deliverString(_topVisitor!, _fieldId, buf)) {
+        if (!_deliverString(_vis!, _fieldId, _payloadBuf ?? _noBytes)) {
           return _fail(DecodeStatus.invalid);
         }
         return true;
       case FixlenType.blob:
-        _topVisitor!.onBlob(_fieldId, buf);
+        _vis!.onBlob(_fieldId, _payloadBuf ?? _noBytes);
         return true;
     }
     return _fail(DecodeStatus.invalid);
   }
 
-  bool _stepArrCount(int b) {
-    final r = _vfeed(b);
-    if (r < 0) return _fail(DecodeStatus.invalid);
-    if (r == 0) return true;
-    final count = _v;
-    _vreset();
+  bool _onArrCount(int count) {
     // ARRAY_MAX is an *unsigned* ceiling on a full u64 count word (§6.2, §4.8),
     // and Dart has no unsigned compare: a count with bit 63 set is a negative
     // int here, so `> arrayMax` alone would let it through. Rejected before any
@@ -850,18 +1053,12 @@ class Decoder {
       final kind = _arrType == WireType.arraySigned
           ? ArrayKind.signed
           : ArrayKind.unsigned;
-      _topVisitor!.onArrayBegin(_fieldId, kind, count);
-      final verdict = _arrayCountVerdict(
-        _topVisitor!,
-        limits,
-        _fieldId,
-        kind,
-        count,
-      );
+      _vis!.onArrayBegin(_fieldId, kind, count);
+      final verdict = _arrayCountVerdict(_vis!, limits, _fieldId, kind, count);
       if (verdict != null) return _fail(verdict);
       // Asked once, here, for the same reason onArrayBegin fires here: this is
       // where the field is fully identified and no element has been consumed.
-      _arrElemRange = _topVisitor!.onArrayElemBound(_fieldId, kind);
+      _arrElemRange = _vis!.onArrayElemBound(_fieldId, kind);
     } else {
       _arrElemRange = null;
     }
@@ -877,12 +1074,7 @@ class Decoder {
     return true;
   }
 
-  bool _stepArrElem(int b) {
-    final r = _vfeed(b);
-    if (r < 0) return _fail(DecodeStatus.invalid);
-    if (r == 0) return true;
-    final raw = _v;
-    _vreset();
+  bool _onArrElem(int raw) {
     if (_read) {
       final signed = _arrType == WireType.arraySigned;
       final v = signed ? (raw >>> 1) ^ -(raw & 1) : raw;
@@ -906,25 +1098,20 @@ class Decoder {
   void _emitIntArray() {
     final v = _arrInts!;
     if (_arrType == WireType.arraySigned) {
-      _topVisitor!.onSignedArray(_fieldId, v);
+      _vis!.onSignedArray(_fieldId, v);
     } else {
-      _topVisitor!.onUnsignedArray(_fieldId, v);
+      _vis!.onUnsignedArray(_fieldId, v);
     }
   }
 
-  bool _stepArrFixCount(int b) {
-    final r = _vfeed(b);
-    if (r < 0) return _fail(DecodeStatus.invalid);
-    if (r == 0) return true;
-    final count = _v;
-    _vreset();
-    // Unsigned ceiling — see [_stepArrCount]. This one also guards the
+  bool _onArrFixCount(int count) {
+    // Unsigned ceiling — see [_onArrCount]. This one also guards the
     // `_arrCount * length` below, which a bit-63 count would wrap.
     if (count < 0 || count > arrayMax) return _fail(DecodeStatus.invalid);
     // NO header hand-off here: for a fixlen array the element subtype lives in
     // the *next* word, and §4.8 requires it to be decided before the field is
     // offered (see [MessageVisitor.onArrayBegin]). The hook fires in
-    // [_stepArrFixWord], and so does the receiver-side count limit — deciding
+    // [_onArrFixWord], and so does the receiver-side count limit — deciding
     // whether the SCHEMA bounds this count needs the element kind, for the
     // reason the hook does (a mismatched subtype is another field's shape,
     // §7.3). Only the format ceiling above belongs to the bare count word; the
@@ -935,12 +1122,7 @@ class Decoder {
     return true;
   }
 
-  bool _stepArrFixWord(int b) {
-    final r = _vfeed(b);
-    if (r < 0) return _fail(DecodeStatus.invalid);
-    if (r == 0) return true;
-    final word = _v;
-    _vreset();
+  bool _onArrFixWord(int word) {
     final length = word >>> 3;
     final subtype = word & 0x7;
     // Only fp32/fp64 are legal in a fixlen array (CORELIB_PLAN §4.8).
@@ -957,9 +1139,9 @@ class Decoder {
     // INVALID here dominates a short tail (§5.2). It also fires for count == 0.
     if (_read) {
       final kind = subtype == FixlenType.fp32 ? ArrayKind.fp32 : ArrayKind.fp64;
-      _topVisitor!.onArrayBegin(_fieldId, kind, _arrCount);
+      _vis!.onArrayBegin(_fieldId, kind, _arrCount);
       final verdict = _arrayCountVerdict(
-        _topVisitor!,
+        _vis!,
         limits,
         _fieldId,
         kind,
@@ -995,36 +1177,22 @@ class Decoder {
           ? Uint8List.sublistView(out)
           : Uint8List(_payloadTotal);
     }
-    if (_payloadTotal == 0) {
-      if (_read) _emitFixArray();
-      _state = _sHeader;
-      return true;
-    }
     _state = _sArrFixPayload;
-    return true;
-  }
-
-  bool _stepArrFixPayload(int b) {
-    if (_read) _payloadBuf![_payloadPos] = b;
-    _payloadPos++;
-    if (_payloadPos < _payloadTotal) return true;
-    if (_read) _emitFixArray();
-    _state = _sHeader;
-    return true;
+    return _payloadTotal == 0 ? _payloadComplete() : true;
   }
 
   void _emitFixArray() {
     // Where the payload was staged in the result list's own bytes (the rule —
-    // see [_stepArrFixWord]) the elements are already there, bit-exact; only a
+    // see [_onArrFixWord]) the elements are already there, bit-exact; only a
     // big-endian host still has a staging buffer to convert out of.
     if (_arrFixSubtype == FixlenType.fp32) {
       final out = _arrF32!;
       if (!_hostIsLittleEndian) _readFp32Array(out, _payloadBuf!, 0, _arrCount);
-      _topVisitor!.onFp32Array(_fieldId, out);
+      _vis!.onFp32Array(_fieldId, out);
     } else {
       final out = _arrF64!;
       if (!_hostIsLittleEndian) _readFp64Array(out, _payloadBuf!, 0, _arrCount);
-      _topVisitor!.onFp64Array(_fieldId, out);
+      _vis!.onFp64Array(_fieldId, out);
     }
   }
 
@@ -1327,64 +1495,20 @@ class _ContiguousDecoder {
     // instead of being lost to an early bail-out.
     final avail = _len - _pos;
     final out = Int64List(count <= avail ? count : avail);
-    // Hot loop. The word-wise varint is inlined here with the read position and
-    // the buffer held in locals, so the whole array costs no per-element field
-    // reload, no `_st` re-check and no null check. (An earlier attempt at
-    // hand-inlining the *byte-wise* reader measured slower — the win here is the
-    // 64-bit load, not the inlining.)
-    final buf = _buf;
-    final len = _len;
-    var p = _pos;
     var i = 0;
-    // Word-wise element loop. Entered only when a maximal varint is in bounds,
-    // which is also the condition under which building the [_bd] view pays for
-    // itself — a short array near the end of the buffer skips it entirely and
-    // takes the scalar reader below.
-    if (p + 10 <= len) {
-      final bd = _bd;
-      while (i < count && p + 10 <= len) {
-        int raw;
-        // One 64-bit load serves every length. The short-varint cases are
-        // derived from that same word rather than from extra byte loads (a
-        // bounds-checked `Uint8List` read costs ~8 instructions), and the
-        // all-continuation case is tested first because it is the one that
-        // cannot be short-circuited.
-        final x = bd.getUint64(p, Endian.little);
-        final m = ~x & _contBits;
-        if (m == 0) {
-          // 9- or 10-byte varint. (Folding the two tail bytes into one
-          // `ByteData.getUint16` measured very slightly *worse* than two
-          // `Uint8List` loads, so they stay separate.)
-          final b8 = buf[p + 8];
-          raw = _unspread56(x) | ((b8 & 0x7F) << 56);
-          if (b8 < 0x80) {
-            p += 9;
-          } else {
-            final last = buf[p + 9];
-            p += 10;
-            if ((last & 0x80) != 0 || (last & 0x7f) > 0x01) {
-              _pos = p;
-              return _bad(DecodeStatus.invalid);
-            }
-            raw |= (last & 0x7f) << 63;
-          }
-        } else if ((m & 0x80) != 0) {
-          raw = x & 0x7F; // 1 byte — skips the ~23-op un-spread
-          p += 1;
-        } else if ((m & 0x8000) != 0) {
-          raw = (x & 0x7F) | (((x >>> 8) & 0x7F) << 7); // 2 bytes
-          p += 2;
-        } else {
-          final nb = _termByte(m) + 1; // 3..8 bytes
-          p += nb;
-          raw = _unspread56(nb == 8 ? x : x & ((1 << (nb << 3)) - 1));
-        }
-        out[i++] = signed ? (raw >>> 1) ^ -(raw & 1) : raw;
-      }
+    // Word-wise element run — the same [_varintRun] the streaming surface uses,
+    // so both cost the same per element. Entered only when a maximal varint is
+    // in bounds, which is also the condition under which building the [_bd] view
+    // pays for itself: a short array near the end of the buffer skips it
+    // entirely and takes the byte-wise reader below.
+    if (_pos + 10 <= _len) {
+      final packed = _varintRun(_buf, _bd, _len, _pos, out, 0, count, signed);
+      i = packed >>> 32;
+      _pos = packed & 0xFFFFFFFF;
     }
-    _pos = p;
-    // Tail: the last elements, where a 64-bit load would overrun the buffer.
-    // Also the path that reports INCOMPLETE on a short element run.
+    // Tail: the last elements, where a 64-bit load would overrun the buffer —
+    // and the malformed 10-byte varint the run declines to settle. Also the path
+    // that reports INCOMPLETE on a short element run.
     for (; i < count; i++) {
       final raw = _uvarint();
       if (_st != DecodeStatus.complete) {
@@ -1394,7 +1518,7 @@ class _ContiguousDecoder {
         // outside its declared width outrank this truncation (generator#267).
         // Checked HERE rather than in the loops above so the word-wise hot path
         // stays a pure decode: the prefix is walked only when the array fails.
-        if (range != null && _elemOutOfRange(out, i, signed, range)) {
+        if (range != null && _elemOutOfRange(out, 0, i, signed, range)) {
           return _bad(DecodeStatus.invalid);
         }
         return false;
@@ -1410,7 +1534,7 @@ class _ContiguousDecoder {
     // surface disagree with [Decoder.feed], which checks at every element (#38).
     // Still off the hot path in the sense that matters: one pass over an
     // in-cache `Int64List`, and only for a field that declares a narrowed width.
-    if (range != null && _elemOutOfRange(out, count, signed, range)) {
+    if (range != null && _elemOutOfRange(out, 0, count, signed, range)) {
       return _bad(DecodeStatus.invalid);
     }
     if (signed) {
@@ -1419,26 +1543,6 @@ class _ContiguousDecoder {
       vis!.onUnsignedArray(id, out);
     }
     return true;
-  }
-
-  /// Whether any of `out[0..n)` falls outside [range]. See [ElemRange] for why
-  /// the unsigned arm also rejects a negative: Dart has no unsigned compare, and
-  /// a wire value above 2^63 is above every bound that can exist here.
-  static bool _elemOutOfRange(
-    Int64List out,
-    int n,
-    bool signed,
-    ElemRange range,
-  ) {
-    for (var i = 0; i < n; i++) {
-      final v = out[i];
-      if (signed
-          ? (v < range.min || v > range.max)
-          : (v < 0 || v > range.max)) {
-        return true;
-      }
-    }
-    return false;
   }
 
   bool _fixArray(MessageVisitor? vis, int id, bool read) {

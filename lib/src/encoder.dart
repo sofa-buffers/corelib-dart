@@ -515,12 +515,57 @@ class Encoder {
   /// an unpaired surrogate with [SofabError.invalidArgument] — strict UTF-8,
   /// never lossy (CORELIB_PLAN §6.4).
   void writeString(int id, String value) {
-    // Fast path: a pure-ASCII string (each code unit < 0x80 → 1 UTF-8 byte, and
-    // trivially valid UTF-8) is written straight through with no intermediate
-    // transcode buffer. This is the common case for field names, ids, tags, etc.
-    //
-    // `codeUnitAt` is read directly off the string — `value.codeUnits` would
-    // allocate a view object and turn every element read into an interface call.
+    if (_writeStringAscii(id, value)) return;
+    _writeStringSlow(id, value);
+  }
+
+  /// Writes [value] as a `string` field in **one pass** over its code units, or
+  /// returns false having written nothing.
+  ///
+  /// A pure-ASCII string (each code unit < 0x80 → one UTF-8 byte, and trivially
+  /// valid UTF-8) is the common case — field names, ids, tags, keys — and its
+  /// wire length is known before the string is looked at: it is the code-unit
+  /// count. So the header and the `fixlen_word` can go out first and the code
+  /// units be tested and stored in the same pass, instead of one pass to prove
+  /// the string ASCII and a second to copy it. `codeUnitAt` is a real call under
+  /// Dart AOT (`String` is not a single concrete class), and it was being made
+  /// twice per character.
+  ///
+  /// The speculation is free because it is only entered with room for
+  /// everything it could write — any held-back sequence headers (at most five
+  /// bytes each), this header, a maximal `fixlen_word` and every code unit. No
+  /// flush can occur inside that, so a non-ASCII code unit part-way in rewinds
+  /// the cursor *and* the pending-sequence run and leaves no trace at all: the
+  /// bytes, and the state a failed write leaves behind, are exactly what the
+  /// two-pass [_writeStringSlow] would have produced.
+  bool _writeStringAscii(int id, String value) {
+    if (id < 0 || id > idMax) return false; // let the slow path raise it
+    final n = value.length;
+    final buf = _buf;
+    final start = _pos;
+    final pending = _nPendingSeq;
+    if (start + pending * 5 + 20 + n > buf.length) return false;
+    if (pending != 0) _commitPendingSequences();
+    final bd = _bufData;
+    var p = _putVarint(buf, bd, _pos, (id << 3) | WireType.fixlen);
+    p = _putVarint(buf, bd, p, (n << 3) | FixlenType.string);
+    for (var i = 0; i < n; i++) {
+      final c = value.codeUnitAt(i);
+      if (c >= 0x80) {
+        _pos = start; // not ASCII after all: undo, down to the held-back run
+        _nPendingSeq = pending;
+        return false;
+      }
+      buf[p++] = c;
+    }
+    _pos = p;
+    return true;
+  }
+
+  /// The general `string` path: a buffer too small to speculate in (a streaming
+  /// encoder draining through a tiny buffer), and every string that is not pure
+  /// ASCII.
+  void _writeStringSlow(int id, String value) {
     final n = value.length;
     var ascii = true;
     for (var i = 0; i < n; i++) {
@@ -531,17 +576,8 @@ class Encoder {
     }
     if (ascii) {
       _writeHeaderAndVarint(id, WireType.fixlen, (n << 3) | FixlenType.string);
-      final buf = _buf;
-      var p = _pos;
-      if (p + n <= buf.length) {
-        for (var i = 0; i < n; i++) {
-          buf[p++] = value.codeUnitAt(i);
-        }
-        _pos = p;
-      } else {
-        for (var i = 0; i < n; i++) {
-          _writeByte(value.codeUnitAt(i));
-        }
+      for (var i = 0; i < n; i++) {
+        _writeByte(value.codeUnitAt(i));
       }
       return;
     }

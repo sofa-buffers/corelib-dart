@@ -2,6 +2,80 @@
 
 ## Unreleased
 
+### Perf — the streaming decoder stops paying per byte for bytes it already has (§5.2)
+
+`Decoder.feed` walked every chunk one byte at a time through the state machine,
+whatever the chunk held. Decoding a message in one 9 kB chunk therefore cost
+**8.9×** what decoding the same bytes through `Decoder.decode` cost, even though
+both surfaces had the whole message in hand. The per-byte walk is what makes
+suspend-and-resume at any boundary work; it is not what a chunk that already
+carries whole fields needs.
+
+`feed` now takes whatever a chunk holds whole, and only falls back to the
+per-byte reader for a field that genuinely straddles a boundary:
+
+* a **whole varint** is lifted straight out of the chunk instead of accumulated
+  a byte at a time, so every header, count and scalar costs one read;
+* a **run of integer array elements** is decoded 64 bits at a time by
+  `_varintRun` — the *same* word-wise reader the one-shot path uses, now shared
+  rather than written twice;
+* an **opaque payload** is moved in one copy including its last byte, instead of
+  stopping one byte short so the byte-wise reader could notice the completion;
+  completion moved into one `_payloadComplete` both readers call.
+
+Alongside, on the same paths:
+
+* an `fp32`/`fp64` payload stages in a reusable per-decoder slot — no
+  `Uint8List` and no `ByteData` view per float field (a typed-data view costs
+  ~300 instructions under Dart AOT). Per decoder, not a shared static, so
+  interleaved decoders cannot corrupt each other;
+* an open sequence no longer allocates a frame object: the scope carried nothing
+  but its visitor, so `_Frame` is deleted and the innermost visitor is held
+  directly instead of re-read off the stack for every field;
+* `feed` normalizes a non-`Uint8List` chunk once instead of running a second,
+  duplicated per-byte loop for it;
+* `writeString` writes a pure-ASCII string in **one** pass. Its wire length is
+  the code-unit count, so the header can go out first and the code units be
+  tested and stored together, instead of one pass to prove the string ASCII and
+  a second to copy it — `codeUnitAt` is a real call under Dart AOT and was being
+  made twice per character. The speculation is entered only with room for
+  everything it could write, so a string that turns out not to be ASCII rewinds
+  the cursor *and* the held-back sequence run and leaves no trace.
+
+Measured with `bench/run_callgrind.sh` (Callgrind Ir/op, deterministic), plus
+the two extra `dec_*_stream` workloads `bench/callgrind_target.dart` now
+accepts:
+
+| workload | before | after | |
+|---|---:|---:|---|
+| decode `u64 array (1000)`, streaming | 923 059 | 102 625 | **−88.9 %** (9.0×) |
+| decode `typical`, streaming | 5 806 | 5 122 | −11.8 % |
+| decode `u64 array (1000)`, one-shot | 105 525 | 102 064 | −3.3 % |
+| decode `typical`, one-shot | 2 099 | 2 128 | +1.4 % |
+| encode `typical` | 1 046 | 1 011 | −3.3 % |
+| encode `u64 array (1000)` | 95 220 | 95 214 | — |
+
+The one +1.4 % is code layout, not a new branch on that path: the 37-byte
+one-shot `typical` decode gained no work, and the same reader change that costs
+it those 29 instructions saves 3 461 on the 9 kB one-shot array.
+
+No API, behaviour or wire-format change: both decode surfaces still produce the
+same visitor calls and the same `DecodeStatus`, and no spec-mandated check was
+weakened to get here — the fast paths *decline* anything they cannot settle
+(a varint that does not terminate in the chunk, a malformed 10-byte varint) and
+hand those bytes back to the byte-wise reader, which owns the
+INCOMPLETE/INVALID verdict as before.
+
+* Tests: `test/chunk_fast_path_test.dart` runs each of 14 messages — 1000-element
+  arrays of 9- and 10-byte varints, scalars of every varint length, payloads
+  longer than a chunk, malformed and truncated arrays, invalid UTF-8 — through
+  `feed` at 13 chunk sizes and asserts the events *and* the status match the
+  one-shot decode exactly, so no chunking can take a different route to a
+  different answer. Added with it: a declared element width violated anywhere
+  inside a bulk run, two decoders interleaving a split float payload, a
+  non-`Uint8List` chunk, and (in `invalid_utf8_test.dart`) the encoder rollback
+  that keeps a rejected string from committing a held-back sequence frame.
+
 ### CI — the release (AOT) configuration is now built and run (§12.1)
 
 `ci.yml` ran `dart pub get`, `dart format`, `dart analyze`, `dart test` and a
