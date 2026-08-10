@@ -154,7 +154,7 @@ the concatenated output is identical to the one-shot encoding.
 
 ```dart
 final out = BytesBuilder();
-final enc = sofab.Encoder(out.add, bufferSize: 8); // 8-byte buffer!
+final enc = sofab.Encoder(out.add, buffer: Uint8List(8)); // 8-byte buffer!
 for (var i = 0; i < 1000; i++) {
   enc.writeUnsigned(i, i); // flushes repeatedly as it fills
 }
@@ -233,7 +233,7 @@ write, etc.
 
 ```dart
 final file = File('out.sofab').openWrite();
-final enc = sofab.Encoder((chunk) => file.add(chunk), bufferSize: 4096);
+final enc = sofab.Encoder((chunk) => file.add(chunk), buffer: Uint8List(4096));
 enc.writeString(0, 'streamed to disk');
 enc.flush();
 await file.close();
@@ -280,10 +280,21 @@ Only two buffers matter, and both are caller-visible.
 
 | Buffer | Owner | Lifetime |
 |--------|-------|----------|
-| Output buffer (encode) | Caller (or the encoder allocates a default) | Reused after every flush; caller may swap it mid-stream. The flush view is valid only during the callback — copy to keep. |
+| Output buffer (encode) | Caller — always | Reused after every flush; caller may swap it mid-stream. The flush view is valid only during the callback — copy to keep. |
 | Input bytes (decode) | Caller | Must outlive the `feed` call. Decoded `blob` values may reference a freshly-allocated payload buffer; `string` values are fresh Dart strings. |
 
-- **Output buffer (encoding).** You pass a `Uint8List` (or a `bufferSize`); the
+- **The library allocates no output buffer** (CORELIB_PLAN §5.1). Every buffer
+  the encoder writes into is one you handed over: `buffer:` is a **required**
+  argument of the streaming constructor, and the only argument of
+  `Encoder.overBuffer`. There is no size-only form that would allocate one for
+  you — that would be a second ownership model, and §5.1 has just one. The layer
+  that knows how big a message can get is the layer that allocates: normally the
+  generated object, sizing from the schema (`MAX_SIZE` + `overBuffer` when the
+  schema is bounded, a small scratch buffer + a sink when it is not) — see
+  [`example/person.dart`](example/person.dart). `Encoder.encodeToBytes` is that
+  layer in miniature: it allocates its scratch buffer once, explicitly, then
+  drives the encoder like any other caller.
+- **Output buffer (encoding).** You pass a `Uint8List`; the
   library never grows it. When it fills, the `FlushCallback` receives a
   `sublistView` of the written bytes and the encoder continues into the same
   buffer (or a new one you install). A buffer installed from inside the callback

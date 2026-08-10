@@ -95,16 +95,6 @@ void main() {
           ),
         ),
       );
-      expect(
-        () => sofab.Encoder((_) {}, bufferSize: sofab.minOutputBuffer - 1),
-        throwsA(
-          isA<sofab.SofabException>().having(
-            (e) => e.code,
-            'code',
-            sofab.SofabError.invalidArgument,
-          ),
-        ),
-      );
     });
 
     test('the shortfall is measured after the start offset', () {
@@ -142,7 +132,7 @@ void main() {
       // buffer-set" — and the encoder that rejects it must not have written
       // anything into the caller's short buffer first.
       final out = BytesBuilder(copy: true);
-      final enc = sofab.Encoder(out.add, bufferSize: 32);
+      final enc = sofab.Encoder(out.add, buffer: Uint8List(32));
       enc.writeUnsigned(0, 127);
       final short = Uint8List(sofab.minOutputBuffer - 1);
       expect(
@@ -188,7 +178,7 @@ void main() {
       late sofab.Encoder enc;
       enc = sofab.Encoder(
         (_) => enc.installBuffer(Uint8List(sofab.minOutputBuffer - 1)),
-        bufferSize: 4,
+        buffer: Uint8List(4),
       );
       expect(
         () {

@@ -188,7 +188,7 @@ void main() {
     }
 
     final out = BytesBuilder(copy: true);
-    final e = sofab.Encoder(out.add, bufferSize: 3);
+    final e = sofab.Encoder(out.add, buffer: Uint8List(3));
     build(e);
     e.flush();
 
@@ -303,7 +303,7 @@ void main() {
 
   test('reset clears held-back sequence headers', () {
     final out = BytesBuilder(copy: true);
-    final e = sofab.Encoder(out.add, bufferSize: 64);
+    final e = sofab.Encoder(out.add, buffer: Uint8List(64));
     e.beginSequenceLazy(1); // held back, then abandoned
     e.reset();
     e.writeUnsigned(0, 1);

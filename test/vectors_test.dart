@@ -59,7 +59,7 @@ void main() {
       test('$group/$name · chunked-encode', () {
         for (final bufSize in [sofab.minOutputBuffer, 3, 7]) {
           final out = BytesBuilder(copy: true);
-          final enc = sofab.Encoder(out.add, bufferSize: bufSize);
+          final enc = sofab.Encoder(out.add, buffer: Uint8List(bufSize));
           replay(enc, fields);
           enc.flush();
           expect(
