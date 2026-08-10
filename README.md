@@ -62,7 +62,7 @@ import it aliased.
 | Streaming output | `Encoder` writes into a fixed `Uint8List` and invokes a `FlushCallback` when it fills; the buffer can be smaller than the message and swapped mid-stream (`installBuffer`). `Encoder.overBuffer` takes the same caller buffer **without** a sink: it holds the whole message (`written`) or reports `BufferFull`. |
 | Streaming input | `Decoder.feed()` accepts any-size chunks; an explicit byte-state machine resumes across boundaries and returns the three-valued `DecodeStatus` — no finalize step. |
 | Zero unnecessary copies | Flush hands out a `Uint8List.sublistView` of the live buffer; decoded blobs bind the payload buffer directly; string bytes are validated in place before one decode; a streamed `fp32`/`fp64` array is assembled *in* the typed list it is delivered as. |
-| Low / no allocation on the hot path | Header/varint/array writes go straight to the buffer; `Encoder.reset()` reuses buffer + encoder across messages; typed-data (`Int64List`/`Float64List`) for arrays. |
+| Low / no allocation on the hot path | Header/varint/array writes go straight to the buffer; `Encoder.reset()` reuses buffer + encoder across messages; typed-data (`Int64List`/`Float64List`) for arrays; a decoded `fp32`/`fp64` scalar stages in a reusable per-decoder slot, and an open sequence costs no object at all. |
 | Small, predictable footprint | One tiny per-field carry buffer for chunk-straddling payloads; no reflection, no codegen at runtime. |
 | Type safety | Typed `write*` methods and a typed `MessageVisitor`; `SofabException` carries a `SofabError` code, `Decoder` reports `DecodeStatus`. |
 | Cross-language compatibility | Validated against the shared `assets/test_vectors.json` for encode, decode, chunked, skip and roundtrip. |
@@ -244,7 +244,14 @@ await file.close();
 ### IStream (input-stream / push-feed wrapper)
 
 The decoder *is* the istream wrapper: push bytes as they arrive; each `feed`
-returns the outcome so far.
+returns the outcome so far. Suspending at any byte boundary is what the state
+machine guarantees, not what it charges you for: whatever a chunk *does* hold
+whole is taken whole — a varint is lifted out of it rather than accumulated a
+byte at a time, a run of integer array elements is decoded 64 bits at a time by
+the same reader the one-shot path uses, and an opaque payload is moved in one
+copy — so feeding a message in a few large chunks costs close to what decoding
+it in one piece costs, and only a field genuinely straddling a boundary falls
+back to the per-byte path.
 
 ```dart
 final dec = sofab.Decoder(MyVisitor());
@@ -351,10 +358,12 @@ differently, so they get a row each.
   and may reuse or overwrite each one the moment `feed` returns: a payload is
   reassembled into a library-owned carry buffer, so no delivered value ever
   aliases a fed chunk, however the chunk boundaries fall. The hot path allocates
-  nothing for scalars; that small per-field carry buffer — for a `string`,
-  `blob` or float payload that straddles a chunk boundary — is the only
-  library-owned heap. Values are delivered to your visitor at completion; copy
-  them out if you need them past the callback.
+  nothing for scalars — an `fp32`/`fp64` payload stages in a reusable slot the
+  decoder owns for its lifetime — so that per-field carry buffer, for a `string`
+  or `blob`, is the only library-owned heap. Values are delivered to your visitor
+  at completion; copy them out if you need them past the callback. Feeding a
+  plain `List<int>` that is not a `Uint8List` copies the chunk once up front,
+  the same way `Decoder.decode` does.
 - **A streamed array is never staged twice.** An `array<fp32>`/`array<fp64>`
   payload *is* the little-endian byte image of the `Float32List`/`Float64List`
   it decodes into, so a chunked decode has no carry buffer for it at all: the

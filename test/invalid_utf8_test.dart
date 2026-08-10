@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:sofabuffers/sofabuffers.dart' as sofab;
 import 'package:test/test.dart';
@@ -88,6 +89,26 @@ void main() {
       'trailing high surrogate at end',
       String.fromCharCodes([0x41, 0xDBFF]),
     );
+
+    test('a rejected string writes nothing, not even a held-back frame', () {
+      // `writeString` speculates that a string is pure ASCII and writes into the
+      // buffer as it checks — which means committing any held-back sequence
+      // header first. A string that turns out not to be ASCII, and then not to
+      // be valid Unicode either, must leave the encoder exactly as it found it:
+      // the frame is still pending, so closing it still drops it (MESSAGE_SPEC
+      // §2), and the caller that catches the exception sees the same bytes a
+      // two-pass encoder would have left.
+      final out = BytesBuilder();
+      final enc = sofab.Encoder(out.add, buffer: Uint8List(256));
+      enc.beginSequenceLazy(1);
+      expect(
+        () => enc.writeString(0, String.fromCharCode(0xD800)),
+        throwsA(isA<sofab.SofabException>()),
+      );
+      enc.endSequence();
+      enc.flush();
+      expect(out.toBytes(), isEmpty);
+    });
   });
 
   test('utf8Valid primitive rejects overlong / surrogate / >U+10FFFF', () {
