@@ -2,6 +2,52 @@
 
 ## Unreleased
 
+### Benchmarks — the BENCH_SPEC datasets this port was missing, and a clock that can measure them
+
+No library change: `lib/` is untouched. This is the `bench/` half of the spec.
+
+**The clock first, because it invalidated everything else.** `CpuClock` read
+`utime`+`stime` out of `/proc/self/stat`, which counts in `USER_HZ` ticks —
+10 ms. Both tools size their timing batch by growing it until it spans 10 ms, so
+a batch of work lasting a microsecond that happened to straddle a tick boundary
+"measured" a full 10 ms and the batch stopped growing there; the measurement
+loop then spent its second reading `/proc` instead of running the workload.
+Single rows came out wrong by more than an order of magnitude, and differently
+on each run — `decode: typical message` printed 8.58 MB/s on one run of `main`
+and 158 MB/s on the next. It now reads libc's `clock()` through `dart:ffi`:
+process CPU time at microsecond resolution, the clock BENCH_SPEC names and the
+C and C++ ports use. `/proc/self/stat` remains as a fallback, wall-clock behind
+it. `dart:ffi` is used by `bench/` only — the package still has no runtime
+dependency, and `lib/` still imports nothing but `dart:core`/`dart:typed_data`.
+
+**New datasets.** `bench` grows from 4 rows to 10, the full required set:
+
+* **`blob 1MB`** — one unbounded `blob` field, 1,000,000 payload bytes,
+  encoding to 1,000,005. Three rows: `one-shot` (a caller buffer sized by hand
+  to the message, **no sink**), `streaming` (a 4096-byte caller buffer with a
+  flush sink, ~245 flushes, pass-through not granted), and a decode fed in
+  4096-byte chunks. The optional `passthrough` row is omitted rather than
+  stubbed: this port implements no pass-through.
+* **`composite`** — the paths the three flat datasets never reach: a 64-element
+  wrapper array (element ids straddling the one-byte header boundary), 320 UTF-8
+  bytes over all four sequence widths, depth-3 nesting, a field equal to its
+  declared default that the encoder must *not* write, and the suite's only
+  two-byte field header. Rows for encode, decode, and `skip-all` — every field
+  refused at header time, the path a router or filter runs.
+
+`run_callgrind.sh` reports all ten, driving the `blob 1MB` rows at BENCH_SPEC's
+small rep pair (R1 = 1, R2 = 3), since a megabyte per op under Callgrind is slow.
+Row layout is now byte-identical to the reference ports (`%-26s %12.2f`).
+
+**Two tests, because a benchmark that measures the wrong thing fails silently.**
+`test/bench_workloads_test.dart` pins the encoded size of every dataset — 170,
+1,000,005 and 956 are cross-port parity checks, as much a conformance property
+as anything in `test_vectors.json` — and round-trips each through the surface
+its row drives it with. `test/bench_grammar_test.dart` runs the tools and
+matches their output against the harness's own regexes, so a table that has
+drifted out of the comparison fails here rather than quietly disappearing from
+it. `bench --smoke` (one op per row) exists to make that check cost a second.
+
 ### Tests — strict UTF-8 through the streaming decoder, at the boundaries the vectors cannot reach (§6.4)
 
 No behaviour change; this closes a coverage gap in the shared conformance
