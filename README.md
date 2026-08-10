@@ -452,14 +452,35 @@ dart run bench/perf.dart         # per-op cost for the 170-byte perf message
 > **Run the benchmarks AOT-compiled** (`bench/run_bench.sh` uses
 > `dart compile exe`) for representative numbers — it removes JIT warmup and is
 > the fair comparison to the compiled ports (C/C++/Rust/Go), which also run
-> native. On the same machine, AOT is roughly 2× the JIT throughput on the
-> small-message workloads. `run_callgrind.sh` already builds an AOT target.
+> native. Over a one-second steady-state loop the two configurations are closer
+> than that framing suggests — they share an optimizing backend, and the encode
+> rows land within run-to-run noise of each other, with AOT ahead by roughly
+> half again on the decode rows. AOT's real advantage here is that there is no
+> warmup to get wrong. `run_callgrind.sh` already builds an AOT target.
 
 - **`bench`** — practical throughput on *this* machine, in MB/s, for encode and
-  decode of the `u64 array (1000)` and `typical` workloads.
+  decode of BENCH_SPEC's four datasets: `u64 array (1000)`, the small `typical`
+  message, an unbounded 1 MB `blob`, and `composite` (wrapper array, multi-byte
+  UTF-8, depth-3 nesting, an omitted default, a two-byte field header). Two rows
+  need reading with care:
+  - the **`blob 1MB`** rows are bandwidth-bound — five bytes of that message are
+    metadata and a million are payload — so their MB/s is this machine's
+    `memcpy` rather than a statement about the corelib. What they are for is the
+    *gap* between `one-shot` (one contiguous write into a caller buffer, no
+    sink) and `streaming` (the same bytes through ~245 flushes of a 4096-byte
+    buffer): that gap is the divisible-run path, and it is legible as
+    instructions, not as MB/s — read it in `run_callgrind.sh`. There is no
+    `blob 1MB passthrough` row because this port implements no pass-through:
+    every `string`/`blob` run goes through the output buffer.
+  - **`decode: composite skip-all`** refuses every field at header time
+    (`shouldRead` → `false`, `onSequenceStart` → `null`), which is the path a
+    router or filter runs in production. Its distance from `decode: composite`
+    is what not-decoding is worth.
 - **`perf`** — per-op cost of serialize/deserialize. The Dart VM exposes no
   hardware cycle counter, so `cycles/op` is reported as unavailable and CPU
-  time/op (from `/proc/self/stat`) is the machine-neutral-ish signal.
+  time/op is the machine-neutral-ish signal. That time comes from libc's
+  `clock()` through `dart:ffi` — process CPU time at microsecond resolution,
+  the same clock the C and C++ ports use.
 - **`run_callgrind.sh`** — instructions-per-op under Callgrind: deterministic and
   machine-independent, the right signal for a CI performance-regression gate. It
   uses the **two-rep subtraction** method (Dart has no stable per-workload native

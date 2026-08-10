@@ -37,10 +37,15 @@ jobs:
       - name: Run tests (shared vectors + streaming + malformed + truncation)
         run: dart test
 
+      # `bench --smoke` runs every workload exactly once rather than for a
+      # second each: this step proves the entrypoints run on this SDK, `dart
+      # test` above already matches both tools' output against BENCH_SPEC's
+      # grammar, and the measuring loops themselves are exercised for real by
+      # run_bench.sh on the stable leg below.
       - name: Sanity-run the example and benchmarks (debug — JIT)
         run: |
           dart run example/person.dart
-          dart run bench/bench.dart
+          dart run bench/bench.dart --smoke
           dart run bench/perf.dart
 
       # §12.1 step 4 wants *both* configurations built. Everything above runs on
