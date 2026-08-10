@@ -2,6 +2,34 @@
 
 ## Unreleased
 
+### Changed — the generated-object example speaks the closed name set (§6.1.1)
+
+`example/person.dart` is this port's only description of the generated-object
+layer, and the README's *Generator* section quotes it — so its spellings are
+what a Dart user learns. They were outside §6.1.1's closed set, including the
+one it names as forbidden: `serializeTo` beside `serialize` is exactly the
+"second name for either" a port MUST NOT add.
+
+* `encodeInto(Encoder)` → **`serialize(Encoder)`** — the streaming-out half that
+  talks to the corelib.
+* one-shot `serialize()` → **`encode()`**; static `deserialize(bytes)` →
+  **`decode(bytes)`** — the convenience pair, a thin wrapper over the streaming
+  one.
+* `serializeTo(sink, {bufferSize})` is **gone**. Streaming out is the §5.1
+  pattern it was hiding: build an `Encoder` over the buffer you own, hand it your
+  sink, call `person.serialize(enc)`, `enc.flush()`. That also removes the
+  `bufferSize:` shortcut, the last place the example allocated on the caller's
+  behalf.
+* `Person.deserialize()` is new: the per-field hook the corelib's decoder calls
+  (a visitor bound to the instance, §5.2), which `Person.decoder()` packages for
+  the common case.
+
+Example only — the corelib's own API (`feed`, `write*`, `read*`,
+`beginSequenceLazy`, …) is §6 API and keeps its names. `test/generated_surface_test.dart`
+pins both halves: it compiles against the six §6.1.1 names, and it reads
+`example/person.dart` and `README.md` back, rejecting any declared member or
+documented call outside the set. Closes #42.
+
 ### Changed (breaking) — the encoder's output buffer is always caller-supplied (§5.1)
 
 `Encoder`'s streaming constructor allocated a `Uint8List(bufferSize)` whenever
@@ -9,7 +37,8 @@
 corelib "**MUST NOT** allocate an output buffer. Every buffer the encoder writes
 into is caller-supplied. There is one buffer-ownership model rather than two" —
 and the `bufferSize` knob was the second one, kept alive across the constructor,
-`encodeToBytes` and the example's `serializeTo`.
+`encodeToBytes` and the example's chunked helper (since removed — see the
+§6.1.1 entry above).
 
 * `Encoder(sink, {required Uint8List buffer, int offset = 0})` — `buffer` is now
   **required** and `bufferSize` is gone. `Encoder(sink, bufferSize: n)` becomes
@@ -21,9 +50,9 @@ and the `bufferSize` knob was the second one, kept alive across the constructor,
   output-buffer allocation site, and it sits above the corelib's write path —
   the unbounded shape of §5.1's generated-layer rule ("the generated-object
   layer allocates; the corelib does not").
-* `example/person.dart` allocates in `serializeTo` and documents why the
-  allocation belongs there; the README's memory-handling table no longer offers
-  "or the encoder allocates a default".
+* `example/person.dart` allocates in its own streaming-out path and documents
+  why the allocation belongs there; the README's memory-handling table no longer
+  offers "or the encoder allocates a default".
 
 No wire change, and no behaviour change for callers that already supplied a
 buffer. `test/buffer_ownership_test.dart` pins the rule: no encoder constructor

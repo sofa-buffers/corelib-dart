@@ -29,7 +29,7 @@ shared, language-agnostic conformance vectors. What makes it worth reaching for:
 - **Cross-language compatible.** Byte-for-byte identical to `corelib-rs`,
   `corelib-c-cpp`, `corelib-go`, and the rest of the family.
 - **Dead-simple generated objects.** The streaming primitives are enough to build
-  a thin generated-object layer with one-line `serialize()` / `deserialize()`
+  a thin generated-object layer with one-line `encode()` / `decode()`
   helpers that *also* stream — see [`example/person.dart`](example/person.dart).
 - **No runtime dependencies.** Pure Dart, `dart:core` + `dart:typed_data` only.
 
@@ -256,8 +256,13 @@ await for (final chunk in socket) {
 ### Generator (generated objects — the common case)
 
 Generated objects hide ids, varints and buffers entirely, offering one-line
-`serialize()` / `deserialize()` **and** a streaming path. See
-[`example/person.dart`](example/person.dart) for a complete, runnable illustration:
+`encode()` / `decode()` **and** a streaming path. Both spellings come from the
+closed name set of CORELIB_PLAN §6.1.1 — `encode()` / `decode(bytes)` for the
+one-shot convenience, `serialize(ostream)` / `deserialize(istream)` for the
+streaming pair beneath it, `decoder()` for the chunk reader — and the port adds
+no second name for either pair, so the surface reads the same in every language.
+See [`example/person.dart`](example/person.dart) for a complete, runnable
+illustration:
 
 ```dart
 final ada = Person()
@@ -265,10 +270,14 @@ final ada = Person()
   ..age = 36
   ..tags = ['pioneer', 'mathematician'];
 
-final bytes = ada.serialize();              // one-shot
-final back  = Person.deserialize(bytes);
+final bytes = ada.encode();                 // one-shot
+final back  = Person.decode(bytes);
 
-ada.serializeTo(sink, bufferSize: 4);       // streaming out, tiny buffer
+// streaming out: your buffer, your sink, the same `serialize` the one-shot uses
+final enc = sofab.Encoder(sink, buffer: Uint8List(4));
+ada.serialize(enc);
+enc.flush();
+
 final dec = Person.decoder();               // streaming in
 for (final b in bytes) dec.feed([b]);       // one byte at a time
 final person = dec.value;                   // assembled incrementally

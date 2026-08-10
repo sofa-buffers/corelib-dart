@@ -3,8 +3,17 @@
 // A hand-written illustration of the **generated-object layer** (CORELIB_PLAN
 // §6.1). This is what the `generator` would emit from a schema: a plain typed
 // object whose API is dead simple — the user thinks in fields and
-// (de)serialize, never in varints, ids, or buffers — yet which is built entirely
+// encode/decode, never in varints, ids, or buffers — yet which is built entirely
 // on the corelib's streaming primitives and therefore also streams in chunks.
+//
+// Its surface is the closed name set of §6.1.1, cased Dart's way and nothing
+// besides: `encode()` / `decode(bytes)` are the one-shot convenience pair,
+// `serialize(ostream)` / `deserialize(istream)` the streaming pair underneath
+// it, and `decoder()` hands back the chunk reader. A port MUST NOT add a second
+// name for either pair — no `serializeTo` beside `serialize`, no `fromBytes`
+// beside `decode` — so a user who learned the surface in one language already
+// knows it here. Everything the methods call into (`writeString`, `feed`,
+// `beginSequenceLazy`, …) is corelib API (§6) and keeps its own names.
 //
 // Schema (conceptually):
 //   message Person { string name = 0; u32 age = 1; array<string> tags = 2; }
@@ -22,16 +31,17 @@ class Person {
   static const int _idAge = 1;
   static const int _idTags = 2;
 
-  /// Writes this object's fields through [enc] (the streaming path). The
-  /// one-shot [serialize] and the chunked [serializeTo] both funnel through
-  /// here, so there is a single encoding.
+  /// Streaming OUT (§6.1.1 `serialize`): writes this object's fields through
+  /// [enc], whose buffer may be far smaller than the message — it drains
+  /// through the flush callback as it fills. The one-shot [encode] funnels
+  /// through here too, so there is a single encoding and no second name for it.
   ///
   /// **One rule, applied everywhere: emit a field iff its value ≠ its declared
   /// default** (MESSAGE_SPEC §2 — sparse encoding is mandatory and canonical;
   /// there is no dense mode). The schema declares no `default`, so each field's
   /// default is its type's zero value: `''`, `0`, and the empty list. Absence
   /// reconstructs exactly that, which is why omitting is value-preserving.
-  void encodeInto(sofab.Encoder enc) {
+  void serialize(sofab.Encoder enc) {
     // Leaf fields: the plain ≠-default test.
     if (name != '') enc.writeString(_idName, name);
     if (age != 0) enc.writeUnsigned(_idAge, age);
@@ -55,30 +65,35 @@ class Person {
     enc.endSequence();
   }
 
-  /// One-shot convenience (the 90 % case).
-  Uint8List serialize() => sofab.Encoder.encodeToBytes(encodeInto);
-
-  /// Streaming OUT: drive an output sink with a buffer smaller than the object.
+  /// One-shot convenience (the 90 % case) — §6.1.1 `encode`.
   ///
-  /// Note where the allocation lives: **here**, in the generated layer, not in
-  /// the corelib. The encoder writes into a buffer this method supplies, like
-  /// any other caller — CORELIB_PLAN §5.1, "the generated-object layer
-  /// allocates; the corelib does not". `Person` has no schema `MAX_SIZE` bound,
-  /// so this is the unbounded shape: a small scratch buffer plus a sink. A
-  /// bounded schema would instead allocate `MAX_SIZE` once and use
-  /// `sofab.Encoder.overBuffer` with no sink at all.
-  void serializeTo(sofab.FlushCallback sink, {int bufferSize = 64}) {
-    final enc = sofab.Encoder(sink, buffer: Uint8List(bufferSize));
-    encodeInto(enc);
-    enc.flush();
-  }
+  /// Note where the allocation lives: in the generated layer, not in the
+  /// corelib. `encodeToBytes` allocates a scratch buffer and drives an encoder
+  /// over it like any other caller — CORELIB_PLAN §5.1, "the generated-object
+  /// layer allocates; the corelib does not". `Person` has no schema `MAX_SIZE`
+  /// bound, so this is the unbounded shape: scratch buffer plus a sink that
+  /// appends into the growing result. A bounded schema would instead allocate
+  /// `MAX_SIZE` once and use `sofab.Encoder.overBuffer` with no sink at all.
+  ///
+  /// There is no second, chunked entry point beside it: a caller who wants to
+  /// stream into a sink of their own builds the encoder and calls [serialize],
+  /// which is the §5.1 pattern anyway — see `main` below.
+  Uint8List encode() => sofab.Encoder.encodeToBytes(serialize);
 
-  /// One-shot convenience.
-  static Person deserialize(Uint8List bytes) {
+  /// One-shot convenience — §6.1.1 `decode`.
+  static Person decode(Uint8List bytes) {
     final dec = PersonDecoder();
     dec.feed(bytes);
     return dec.value;
   }
+
+  /// Streaming IN (§6.1.1 `deserialize`): the per-field hook the corelib's
+  /// decoder calls, bound to this instance. Dart spells that hook as a visitor
+  /// object (§5.2), so this hands one over: give it to a `sofab.Decoder` and
+  /// every field the decoder reads lands in a field of `this`.
+  ///
+  /// [decoder] is the packaged form of the same thing for the common case.
+  sofab.MessageVisitor deserialize() => _PersonVisitor(this);
 
   /// Streaming IN: a generated reader bound to the corelib decoder.
   static PersonDecoder decoder() => PersonDecoder();
@@ -92,12 +107,10 @@ class Person {
 /// corelib's status verbatim — no finalize step (MESSAGE_SPEC §7).
 class PersonDecoder {
   PersonDecoder() {
-    _visitor = _PersonVisitor(value);
-    _dec = sofab.Decoder(_visitor);
+    _dec = sofab.Decoder(value.deserialize());
   }
 
   final Person value = Person();
-  late final _PersonVisitor _visitor;
   late final sofab.Decoder _dec;
 
   sofab.DecodeStatus feed(List<int> chunk) => _dec.feed(chunk);
@@ -147,14 +160,19 @@ void main() {
     ..tags = ['pioneer', 'mathematician'];
 
   // --- one-shot ---
-  final bytes = ada.serialize();
-  final back = Person.deserialize(bytes);
+  final bytes = ada.encode();
+  final back = Person.decode(bytes);
   print('one-shot : $back  (${bytes.length} bytes)');
   assert(back.name == 'Ada' && back.age == 36 && back.tags.length == 2);
 
   // --- streaming out (tiny buffer) + streaming in (1 byte at a time) ---
+  // No chunked convenience method exists, and none is wanted: build the encoder
+  // over the buffer *you* own — four bytes here, far less than the message —
+  // give it your sink, and call the same `serialize` the one-shot path uses.
   final collected = BytesBuilder(copy: true);
-  ada.serializeTo(collected.add, bufferSize: 4);
+  final enc = sofab.Encoder(collected.add, buffer: Uint8List(4));
+  ada.serialize(enc);
+  enc.flush();
   final streamed = collected.toBytes();
   assert(_hex(streamed) == _hex(bytes)); // identical to one-shot
 
@@ -171,18 +189,18 @@ void main() {
   // Every field at its default → every field omitted → the empty byte string
   // (MESSAGE_SPEC §2). The `tags` sequence is omitted with the rest: its header
   // was never committed, so not even an empty frame reaches the wire.
-  final empty = Person().serialize();
-  print('all-default: ${empty.length} bytes  → ${Person.deserialize(empty)}');
+  final empty = Person().encode();
+  print('all-default: ${empty.length} bytes  → ${Person.decode(empty)}');
   assert(empty.isEmpty);
-  final blank = Person.deserialize(empty);
+  final blank = Person.decode(empty);
   assert(blank.name == '' && blank.age == 0 && blank.tags.isEmpty);
 
   // A default-valued element is omitted too, so it leaves an id gap and a
   // trailing default element collapses: ['x', ''] encodes exactly like ['x'],
   // and round-trips losslessly against a default-initialised destination.
-  final gapped = (Person()..tags = ['', 'b', '']).serialize();
-  assert(_hex(gapped) == _hex((Person()..tags = ['', 'b']).serialize()));
-  assert(Person.deserialize(gapped).tags.join(',') == ',b');
+  final gapped = (Person()..tags = ['', 'b', '']).encode();
+  assert(_hex(gapped) == _hex((Person()..tags = ['', 'b']).encode()));
+  assert(Person.decode(gapped).tags.join(',') == ',b');
   print('OK — one-shot and streaming produce identical bytes and objects.');
 }
 
