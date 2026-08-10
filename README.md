@@ -325,6 +325,32 @@ Only two buffers matter, and both are caller-visible.
   `DecoderLimits(maxArrayCount: …)`, which is enforced at the count word,
   *before* the allocation it prevents (CORELIB_PLAN §6.2.1), and reports
   `limitExceeded`.
+- **`DecoderLimits` is the *unbounded*-field backstop, and only that.** Its three
+  caps are deployment policy, not schema validity: they protect the receiver from
+  a field whose schema declares no `count:`/`maxlen:`, where the *sender* would
+  otherwise dictate the allocation. §6.2.1 keeps them off the fields the schema
+  already bounds — there the schema governs and a breach is `invalid`, never
+  `limitExceeded`. Only the schema knows which fields those are, so a
+  schema-bound (generated) consumer says so:
+
+  ```dart
+  @override
+  int? onArrayCountBound(int id, sofab.ArrayKind kind) =>
+      id == 3 && kind == sofab.ArrayKind.unsigned ? 8 : null;   // count: 8
+  @override
+  int? onFixlenLenBound(int id, int subtype) =>
+      id == 1 && subtype == sofab.FixlenType.blob ? 64 : null;  // maxlen: 64
+  ```
+
+  For a field that answers, the declared bound *replaces* the cap: a wire
+  count/length past it is `invalid` (decided at the count/length word, before the
+  allocation), and one within it decodes however tight the cap is.
+  `kind`/`subtype` are what the **wire** declares — return `null` for one the
+  field does not declare, since that is a MESSAGE_SPEC §7.3 skip and no schema
+  bound covers it. Both hooks are asked at most once per field and only once a
+  cap has actually been exceeded, so a decode with no `DecoderLimits` never calls
+  them. `onFixlenHeader`/`onArrayBegin` fire *before* the cap is weighed either
+  way, so a consumer that enforces its bound there always sees the header.
 
 ## Build & test
 

@@ -165,6 +165,42 @@ abstract class MessageVisitor {
   /// Return a `const` [ElemRange] to keep this allocation-free. Default: none.
   ElemRange? onArrayElemBound(int id, ArrayKind kind) => null;
 
+  /// The element `count` the **schema** declares for the array field [id], or
+  /// `null` when the schema leaves it unbounded (`count:` omitted — MESSAGE_SPEC
+  /// §7.2 — or an id/[kind] this visitor does not declare).
+  ///
+  /// This is how a schema-bound consumer takes the receiver-side cap
+  /// ([DecoderLimits.maxArrayCount]) **off** one of its fields. The two are
+  /// different kinds of statement (CORELIB_PLAN §6.2.1): a cap is deployment
+  /// configuration protecting the receiver from a field the schema leaves
+  /// unbounded, and it "MUST NOT be applied to a field the schema already
+  /// bounds. There the schema bound governs and its violation is `INVALID`"
+  /// (MESSAGE_SPEC §7, §7.1) — §6.3 says the same from the other end:
+  /// `LimitExceeded` is "never raised for a field the schema bounds". Only the
+  /// schema knows which fields those are, so only the consumer can answer.
+  /// Without this the decode of a `count: 10000` array would depend on a
+  /// deployment cap of 1000 that was never meant for it.
+  ///
+  /// Answering is therefore a *swap*, not a waiver: the decoder stops measuring
+  /// the field against the cap and measures it against the returned bound
+  /// instead, and a wire count past that bound is [DecodeStatus.invalid] — the
+  /// outcome §7.1 wants there — decided at the count word, before any element
+  /// is consumed and before the allocation.
+  ///
+  /// [kind] is the kind the WIRE declares. Return `null` for a kind this field
+  /// does not declare: such an array is a skipped field (MESSAGE_SPEC §7.3) and
+  /// was never this field's value, so this field's `count` must not be measured
+  /// against it — and the cap, which covers exactly what no schema bound does,
+  /// still applies to it. Same rule as [onArrayBegin] and [onArrayElemBound].
+  ///
+  /// Asked at most once per array field, and only where the answer can change
+  /// an outcome: the decoder consults it just after a configured cap has been
+  /// exceeded, never on the path where no cap is set or the count fits. A
+  /// decode with no [DecoderLimits] therefore pays nothing for it — there the
+  /// schema bound is the consumer's own [onArrayBegin] check, as before.
+  /// Default: unbounded.
+  int? onArrayCountBound(int id, ArrayKind kind) => null;
+
   /// Called with a fixlen value's declared byte `length` and `subtype`
   /// ([FixlenType]) the instant its length word is read — *before* the payload
   /// and *before* the truncation check. Fires only for a field being read.
@@ -175,6 +211,28 @@ abstract class MessageVisitor {
   /// lets the generator drop the redundant post-decode length guard. Default:
   /// no-op.
   void onFixlenHeader(int id, int subtype, int length) {}
+
+  /// The `maxlen` the **schema** declares for the `string`/`blob` field [id], or
+  /// `null` when the schema leaves it unbounded (`maxlen:` omitted, or an
+  /// id/[subtype] this visitor does not declare).
+  ///
+  /// The fixlen counterpart of [onArrayCountBound], with the same contract:
+  /// answering takes the receiver-side cap ([DecoderLimits.maxStringLen] /
+  /// [DecoderLimits.maxBlobLen]) off the field and puts the schema bound in its
+  /// place, so a length past the bound is [DecodeStatus.invalid] (MESSAGE_SPEC
+  /// §7.1) rather than [DecodeStatus.limitExceeded] — which §6.3 forbids for a
+  /// field the schema bounds. Decided at the length word, before the payload.
+  ///
+  /// [subtype] is the subtype the WIRE declares ([FixlenType.string] /
+  /// [FixlenType.blob]; the fp32/fp64 subtypes have a fixed 4/8-byte length, so
+  /// no cap covers them and this is never asked for one). Return `null` for a
+  /// subtype this field does not declare — that is a MESSAGE_SPEC §7.3 skip and
+  /// this field's `maxlen` does not govern it.
+  ///
+  /// Asked at most once per field, and only just after a configured cap has
+  /// been exceeded, so a decode with no [DecoderLimits] pays nothing for it.
+  /// Default: unbounded.
+  int? onFixlenLenBound(int id, int subtype) => null;
 
   /// A sequence opened. Return a visitor for its children (which follows the
   /// same push/pull contract recursively), or `null` to skip the sub-sequence.
@@ -217,11 +275,69 @@ bool _deliverString(MessageVisitor vis, int id, Uint8List bytes) {
 /// Configured receiver-side technical limits (CORELIB_PLAN §6.2.1). These are a
 /// deployment **policy**, not schema validity: exceeding one yields
 /// [DecodeStatus.limitExceeded], never [DecodeStatus.invalid]. `null` = unbounded.
+///
+/// They are the backstop for the fields the **schema** leaves unbounded, and
+/// only those. §6.2.1: a limit "MUST NOT be applied to a field the schema
+/// already bounds. There the schema bound governs and its violation is
+/// `INVALID`". A schema-bound consumer says which fields those are through
+/// [MessageVisitor.onArrayCountBound] / [MessageVisitor.onFixlenLenBound]; for
+/// a field that answers, the declared bound replaces the limit below and a
+/// breach of it is [DecodeStatus.invalid].
 class DecoderLimits {
   const DecoderLimits({this.maxArrayCount, this.maxStringLen, this.maxBlobLen});
   final int? maxArrayCount;
   final int? maxStringLen;
   final int? maxBlobLen;
+}
+
+/// Weighs an array's wire [count] against the receiver-side cap and, where the
+/// schema bounds the field, against that bound instead (CORELIB_PLAN §6.2.1,
+/// §6.3). Returns the terminal status to fail with, or `null` when the field may
+/// proceed.
+///
+/// Called at the count word — for a fixlen array, at the `fixlen_word` that
+/// settles [kind] — i.e. before the allocation the cap exists to prevent, and
+/// only for a field being materialized: a skipped field allocates nothing.
+/// [MessageVisitor.onArrayCountBound] is asked only once the cap is already
+/// exceeded, which is the only place its answer changes an outcome.
+DecodeStatus? _arrayCountVerdict(
+  MessageVisitor vis,
+  DecoderLimits limits,
+  int id,
+  ArrayKind kind,
+  int count,
+) {
+  final cap = limits.maxArrayCount;
+  if (cap == null || count <= cap) return null;
+  final bound = vis.onArrayCountBound(id, kind);
+  // No schema bound on this field: the cap applies, as a policy rejection.
+  if (bound == null) return DecodeStatus.limitExceeded;
+  // Schema-bounded: the cap is off this field and the declared bound decides.
+  return count > bound ? DecodeStatus.invalid : null;
+}
+
+/// The fixlen counterpart of [_arrayCountVerdict], at the `fixlen_word`. Only
+/// `string`/`blob` carry a configurable cap — an fp32/fp64 length is fixed at
+/// 4/8 bytes by the format and was validated as such above.
+DecodeStatus? _fixlenLenVerdict(
+  MessageVisitor vis,
+  DecoderLimits limits,
+  int id,
+  int subtype,
+  int length,
+) {
+  final int? cap;
+  if (subtype == FixlenType.string) {
+    cap = limits.maxStringLen;
+  } else if (subtype == FixlenType.blob) {
+    cap = limits.maxBlobLen;
+  } else {
+    return null;
+  }
+  if (cap == null || length <= cap) return null;
+  final bound = vis.onFixlenLenBound(id, subtype);
+  if (bound == null) return DecodeStatus.limitExceeded;
+  return length > bound ? DecodeStatus.invalid : null;
 }
 
 // Internal decoder states.
@@ -570,22 +686,25 @@ class Decoder {
     if (subtype == FixlenType.fp64 && length != 8) {
       return _fail(DecodeStatus.invalid);
     }
-    // Receiver-side limits (well-formed bytes → limitExceeded, not INVALID).
-    if (_read) {
-      if (subtype == FixlenType.string &&
-          limits.maxStringLen != null &&
-          length > limits.maxStringLen!) {
-        return _fail(DecodeStatus.limitExceeded);
-      }
-      if (subtype == FixlenType.blob &&
-          limits.maxBlobLen != null &&
-          length > limits.maxBlobLen!) {
-        return _fail(DecodeStatus.limitExceeded);
-      }
-    }
     // Header hand-off before truncation can be surfaced: a schema-invalid length
     // set here (via the override's sticky flag) dominates a short payload (§5.2).
-    if (_read) _topVisitor!.onFixlenHeader(_fieldId, subtype, length);
+    // It also comes BEFORE the receiver-side limit below, so a schema-bound
+    // consumer learns of a breach the limit would otherwise short-circuit — the
+    // limit is a statement about the receiver's capacity, never about the
+    // field's validity (§6.2.1).
+    if (_read) {
+      _topVisitor!.onFixlenHeader(_fieldId, subtype, length);
+      // Receiver-side limit (well-formed bytes → limitExceeded, not INVALID) —
+      // unless the schema bounds this field, where the schema bound decides.
+      final verdict = _fixlenLenVerdict(
+        _topVisitor!,
+        limits,
+        _fieldId,
+        subtype,
+        length,
+      );
+      if (verdict != null) return _fail(verdict);
+    }
     _fixSubtype = subtype;
     _payloadTotal = length;
     _payloadPos = 0;
@@ -659,20 +778,24 @@ class Decoder {
     // int here, so `> arrayMax` alone would let it through. Rejected before any
     // allocation, any `count * length` and any cursor move (§7.2 item 5).
     if (count < 0 || count > arrayMax) return _fail(DecodeStatus.invalid);
-    if (_read &&
-        limits.maxArrayCount != null &&
-        count > limits.maxArrayCount!) {
-      return _fail(DecodeStatus.limitExceeded);
-    }
     // Header hand-off before any element (and thus before truncation) — an
     // over-count set INVALID here dominates a short element tail (§5.2). An
     // integer array carries no second word, so this is already the point at
-    // which the element kind is fully known (§4.8).
+    // which the element kind is fully known (§4.8). It also precedes the
+    // receiver-side limit, which must not short-circuit a schema bound (§6.2.1).
     if (_read) {
       final kind = _arrType == WireType.arraySigned
           ? ArrayKind.signed
           : ArrayKind.unsigned;
       _topVisitor!.onArrayBegin(_fieldId, kind, count);
+      final verdict = _arrayCountVerdict(
+        _topVisitor!,
+        limits,
+        _fieldId,
+        kind,
+        count,
+      );
+      if (verdict != null) return _fail(verdict);
       // Asked once, here, for the same reason onArrayBegin fires here: this is
       // where the field is fully identified and no element has been consumed.
       _arrElemRange = _topVisitor!.onArrayElemBound(_fieldId, kind);
@@ -735,16 +858,14 @@ class Decoder {
     // Unsigned ceiling — see [_stepArrCount]. This one also guards the
     // `_arrCount * length` below, which a bit-63 count would wrap.
     if (count < 0 || count > arrayMax) return _fail(DecodeStatus.invalid);
-    if (_read &&
-        limits.maxArrayCount != null &&
-        count > limits.maxArrayCount!) {
-      return _fail(DecodeStatus.limitExceeded);
-    }
     // NO header hand-off here: for a fixlen array the element subtype lives in
     // the *next* word, and §4.8 requires it to be decided before the field is
     // offered (see [MessageVisitor.onArrayBegin]). The hook fires in
-    // [_stepArrFixWord]. The format ceiling and the receiver policy limit above
-    // stay on the count word — they are not schema bounds.
+    // [_stepArrFixWord], and so does the receiver-side count limit — deciding
+    // whether the SCHEMA bounds this count needs the element kind, for the
+    // reason the hook does (a mismatched subtype is another field's shape,
+    // §7.3). Only the format ceiling above belongs to the bare count word; the
+    // limit still lands before the payload allocation it prevents (§6.2.1).
     _arrCount = count;
     _arrIndex = 0;
     _state = _sArrFixWord;
@@ -772,11 +893,16 @@ class Decoder {
     // fires before the payload (thus before truncation), so an over-count set
     // INVALID here dominates a short tail (§5.2). It also fires for count == 0.
     if (_read) {
-      _topVisitor!.onArrayBegin(
+      final kind = subtype == FixlenType.fp32 ? ArrayKind.fp32 : ArrayKind.fp64;
+      _topVisitor!.onArrayBegin(_fieldId, kind, _arrCount);
+      final verdict = _arrayCountVerdict(
+        _topVisitor!,
+        limits,
         _fieldId,
-        subtype == FixlenType.fp32 ? ArrayKind.fp32 : ArrayKind.fp64,
+        kind,
         _arrCount,
       );
+      if (verdict != null) return _fail(verdict);
     }
     _arrFixSubtype = subtype;
     _payloadTotal = _arrCount * length;
@@ -1012,21 +1138,15 @@ class _ContiguousDecoder {
     if (subtype == FixlenType.fp64 && length != 8) {
       return _bad(DecodeStatus.invalid);
     }
-    if (read) {
-      if (subtype == FixlenType.string &&
-          _limits.maxStringLen != null &&
-          length > _limits.maxStringLen!) {
-        return _bad(DecodeStatus.limitExceeded);
-      }
-      if (subtype == FixlenType.blob &&
-          _limits.maxBlobLen != null &&
-          length > _limits.maxBlobLen!) {
-        return _bad(DecodeStatus.limitExceeded);
-      }
-    }
     // Header hand-off before the truncation check, so a schema-invalid length
-    // (flagged in the override) dominates a short payload (§5.2).
-    if (read) vis!.onFixlenHeader(id, subtype, length);
+    // (flagged in the override) dominates a short payload (§5.2) — and before
+    // the receiver-side limit, which must not short-circuit it (§6.2.1). See
+    // [_fixlenLenVerdict] for the limit-vs-schema-bound split.
+    if (read) {
+      vis!.onFixlenHeader(id, subtype, length);
+      final verdict = _fixlenLenVerdict(vis, _limits, id, subtype, length);
+      if (verdict != null) return _bad(verdict);
+    }
     if (_pos + length > _len) return _bad(DecodeStatus.incomplete);
     final start = _pos;
     _pos += length;
@@ -1090,19 +1210,18 @@ class _ContiguousDecoder {
     // element loop would then either allocate an impossible `Int64List` or, on
     // the skip path, run zero times and accept a bogus empty array (§6.2, §4.8).
     if (count < 0 || count > arrayMax) return _bad(DecodeStatus.invalid);
-    if (read &&
-        _limits.maxArrayCount != null &&
-        count > _limits.maxArrayCount!) {
-      return _bad(DecodeStatus.limitExceeded);
-    }
     final signed = type == WireType.arraySigned;
     // Header hand-off before the element loop (before truncation) — over-count
     // flagged here dominates a short tail (§5.2). An integer array carries no
-    // second word, so the element kind is already fully known here (§4.8).
+    // second word, so the element kind is already fully known here (§4.8). The
+    // receiver-side limit comes after the hook and yields to a schema bound
+    // (§6.2.1) — see [_arrayCountVerdict].
     ElemRange? range;
     if (read) {
       final kind = signed ? ArrayKind.signed : ArrayKind.unsigned;
       vis!.onArrayBegin(id, kind, count);
+      final verdict = _arrayCountVerdict(vis, _limits, id, kind, count);
+      if (verdict != null) return _bad(verdict);
       range = vis.onArrayElemBound(id, kind);
     }
     if (!read) {
@@ -1245,14 +1364,12 @@ class _ContiguousDecoder {
     // Unsigned ceiling — see [_intArray]. It also keeps `count * length` below
     // from wrapping, which would move `_pos` backwards.
     if (count < 0 || count > arrayMax) return _bad(DecodeStatus.invalid);
-    if (read &&
-        _limits.maxArrayCount != null &&
-        count > _limits.maxArrayCount!) {
-      return _bad(DecodeStatus.limitExceeded);
-    }
     // NO header hand-off here: §4.8 has the element subtype decided first, so the
     // hook waits for the word below (see [MessageVisitor.onArrayBegin]). EOF
-    // between the two words is therefore INCOMPLETE, not INVALID.
+    // between the two words is therefore INCOMPLETE, not INVALID. The
+    // receiver-side count limit waits with it — whether the SCHEMA bounds this
+    // count is a question about the element kind (§7.3) — and still lands before
+    // the payload allocation it prevents.
     final word = _uvarint();
     if (_st != DecodeStatus.complete) return false;
     final length = word >>> 3;
@@ -1268,11 +1385,10 @@ class _ContiguousDecoder {
     // kind, still before the payload (thus before truncation) — over-count
     // flagged here dominates a short tail (§5.2). Fires for count == 0 too.
     if (read) {
-      vis!.onArrayBegin(
-        id,
-        subtype == FixlenType.fp32 ? ArrayKind.fp32 : ArrayKind.fp64,
-        count,
-      );
+      final kind = subtype == FixlenType.fp32 ? ArrayKind.fp32 : ArrayKind.fp64;
+      vis!.onArrayBegin(id, kind, count);
+      final verdict = _arrayCountVerdict(vis, _limits, id, kind, count);
+      if (verdict != null) return _bad(verdict);
     }
     final total = count * length;
     if (_pos + total > _len) return _bad(DecodeStatus.incomplete);
