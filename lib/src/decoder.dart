@@ -340,17 +340,24 @@ DecodeStatus? _fixlenLenVerdict(
   return length > bound ? DecodeStatus.invalid : null;
 }
 
-// Internal decoder states.
+// Internal decoder states. The two *payload* states are deliberately last and
+// adjacent: they are the only ones whose bytes are opaque — no varint to
+// accumulate, nothing to decide per byte — so [Decoder.feed] takes them in bulk,
+// and `_state >= _sFixPayload` is the one compare per byte that spots them.
 const int _sHeader = 0;
 const int _sUValue = 1; // unsigned value varint
 const int _sSValue = 2; // signed value varint
 const int _sFixWord = 3;
-const int _sFixPayload = 4;
-const int _sArrCount = 5; // count for int arrays (u/s)
-const int _sArrElem = 6; // per-element varint for int arrays
-const int _sArrFixCount = 7;
-const int _sArrFixWord = 8;
-const int _sArrFixPayload = 9;
+const int _sArrCount = 4; // count for int arrays (u/s)
+const int _sArrElem = 5; // per-element varint for int arrays
+const int _sArrFixCount = 6;
+const int _sArrFixWord = 7;
+const int _sFixPayload = 8; // opaque payload — bulk-copied
+const int _sArrFixPayload = 9; // opaque payload — bulk-copied
+
+/// Shortest run of payload bytes worth moving in bulk (see
+/// [Decoder._bulkPayload]).
+const int _bulkPayloadMin = 4;
 
 class _Frame {
   _Frame(this.visitor);
@@ -410,6 +417,13 @@ int _termByte(int m) {
   return idx;
 }
 
+/// Whether the host stores typed-data elements in wire (little-endian) order —
+/// true on every platform Dart targets. Where it holds, a fixlen array's wire
+/// payload *is* the byte image of the `Float32List`/`Float64List` it decodes
+/// into, which is what lets the readers below copy in bulk and lets the
+/// streaming decoder stage the payload in the result list itself.
+final bool _hostIsLittleEndian = Endian.host == Endian.little;
+
 /// Fills [dst] with [count] fp32 elements from little-endian wire bytes in [src]
 /// starting at [srcStart], preserving each element's raw 32-bit pattern
 /// (CORELIB_PLAN §4.6 — a signaling NaN must not be quieted). On a little-endian
@@ -418,12 +432,26 @@ int _termByte(int m) {
 /// endian-swapping element reads — which cannot preserve an sNaN, but no such
 /// host exists in practice.
 void _readFp32Array(Float32List dst, Uint8List src, int srcStart, int count) {
-  if (Endian.host == Endian.little) {
+  if (_hostIsLittleEndian) {
     Uint8List.sublistView(dst).setRange(0, count * 4, src, srcStart);
   } else {
     final bd = ByteData.sublistView(src, srcStart, srcStart + count * 4);
     for (var i = 0; i < count; i++) {
       dst[i] = bd.getFloat32(i * 4, Endian.little);
+    }
+  }
+}
+
+/// The fp64 twin of [_readFp32Array]: [count] 8-byte little-endian elements out
+/// of [src] at [srcStart] into [dst], in bulk where the host layout already
+/// matches the wire.
+void _readFp64Array(Float64List dst, Uint8List src, int srcStart, int count) {
+  if (_hostIsLittleEndian) {
+    Uint8List.sublistView(dst).setRange(0, count * 8, src, srcStart);
+  } else {
+    final bd = ByteData.sublistView(src, srcStart, srcStart + count * 8);
+    for (var i = 0; i < count; i++) {
+      dst[i] = bd.getFloat64(i * 8, Endian.little);
     }
   }
 }
@@ -492,21 +520,54 @@ class Decoder {
     // `Uint8List` case lets AOT compile the read down to a load. The elements
     // are already 0..255 there, so the mask is a no-op and is dropped.
     if (data is Uint8List) {
-      for (var i = 0; i < n; i++) {
+      var i = 0;
+      while (i < n) {
+        if (_state >= _sFixPayload && n - i >= _bulkPayloadMin) {
+          i += _bulkPayload(data, i, n);
+          if (i == n) break;
+        }
         if (!_step(data[i])) {
           _terminal = true;
           return _terminalStatus;
         }
+        i++;
       }
       return _boundaryStatus();
     }
-    for (var i = 0; i < n; i++) {
+    var i = 0;
+    while (i < n) {
+      if (_state >= _sFixPayload && n - i >= _bulkPayloadMin) {
+        i += _bulkPayload(data, i, n);
+        if (i == n) break;
+      }
       if (!_step(data[i] & 0xFF)) {
         _terminal = true;
         return _terminalStatus;
       }
+      i++;
     }
     return _boundaryStatus();
+  }
+
+  /// Takes the run of opaque payload bytes this chunk holds — a `string`,
+  /// `blob`, `fp32`/`fp64` value or a fixlen array's elements — in **one move**
+  /// instead of one state-machine dispatch per byte, and returns how many it
+  /// took (0 if there is nothing to take in bulk).
+  ///
+  /// It stops one byte short of the payload's end on purpose: the last byte
+  /// goes through [_stepFixPayload]/[_stepArrFixPayload], which own the
+  /// completion — delivering the value to the visitor is decided in exactly one
+  /// place whether the payload arrived byte-by-byte or in a single chunk.
+  int _bulkPayload(List<int> data, int from, int end) {
+    final want = _payloadTotal - _payloadPos - 1;
+    final have = end - from;
+    final take = want < have ? want : have;
+    if (take <= 0) return 0;
+    if (_read) {
+      _payloadBuf!.setRange(_payloadPos, _payloadPos + take, data, from);
+    }
+    _payloadPos += take;
+    return take;
   }
 
   DecodeStatus _boundaryStatus() {
@@ -908,9 +969,29 @@ class Decoder {
     _payloadTotal = _arrCount * length;
     _payloadPos = 0;
     if (_read) {
-      _payloadBuf = _payloadTotal > 0 ? Uint8List(_payloadTotal) : Uint8List(0);
-      _arrF32 = subtype == FixlenType.fp32 ? Float32List(_arrCount) : null;
-      _arrF64 = subtype == FixlenType.fp64 ? Float64List(_arrCount) : null;
+      // ONE allocation for the payload, not two: the result list is allocated
+      // here and the arriving wire bytes are staged directly in *its* storage,
+      // because a fixlen array's payload already is that list's little-endian
+      // byte image. Peak memory is therefore the array itself, and
+      // [_emitFixArray] has nothing left to copy or convert — the streaming
+      // path costs what the one-shot path costs. A (hypothetical) big-endian
+      // host cannot alias the two and keeps a separate staging buffer plus the
+      // element-wise conversion in [_readFp32Array]/[_readFp64Array].
+      final TypedData out;
+      if (subtype == FixlenType.fp32) {
+        final list = Float32List(_arrCount);
+        _arrF32 = list;
+        _arrF64 = null;
+        out = list;
+      } else {
+        final list = Float64List(_arrCount);
+        _arrF64 = list;
+        _arrF32 = null;
+        out = list;
+      }
+      _payloadBuf = _hostIsLittleEndian
+          ? Uint8List.sublistView(out)
+          : Uint8List(_payloadTotal);
     }
     if (_payloadTotal == 0) {
       if (_read) _emitFixArray();
@@ -931,16 +1012,16 @@ class Decoder {
   }
 
   void _emitFixArray() {
+    // Where the payload was staged in the result list's own bytes (the rule —
+    // see [_stepArrFixWord]) the elements are already there, bit-exact; only a
+    // big-endian host still has a staging buffer to convert out of.
     if (_arrFixSubtype == FixlenType.fp32) {
       final out = _arrF32!;
-      _readFp32Array(out, _payloadBuf!, 0, _arrCount);
+      if (!_hostIsLittleEndian) _readFp32Array(out, _payloadBuf!, 0, _arrCount);
       _topVisitor!.onFp32Array(_fieldId, out);
     } else {
-      final bd = ByteData.sublistView(_payloadBuf!);
       final out = _arrF64!;
-      for (var i = 0; i < _arrCount; i++) {
-        out[i] = bd.getFloat64(i * 8, Endian.little);
-      }
+      if (!_hostIsLittleEndian) _readFp64Array(out, _payloadBuf!, 0, _arrCount);
       _topVisitor!.onFp64Array(_fieldId, out);
     }
   }
@@ -1400,11 +1481,8 @@ class _ContiguousDecoder {
         _readFp32Array(o, _buf, start, count);
         vis!.onFp32Array(id, o);
       } else {
-        final bd = _bd;
         final o = Float64List(count);
-        for (var i = 0; i < count; i++) {
-          o[i] = bd.getFloat64(start + i * 8, Endian.little);
-        }
+        _readFp64Array(o, _buf, start, count);
         vis!.onFp64Array(id, o);
       }
     }
