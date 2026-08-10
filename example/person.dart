@@ -59,8 +59,16 @@ class Person {
   Uint8List serialize() => sofab.Encoder.encodeToBytes(encodeInto);
 
   /// Streaming OUT: drive an output sink with a buffer smaller than the object.
+  ///
+  /// Note where the allocation lives: **here**, in the generated layer, not in
+  /// the corelib. The encoder writes into a buffer this method supplies, like
+  /// any other caller — CORELIB_PLAN §5.1, "the generated-object layer
+  /// allocates; the corelib does not". `Person` has no schema `MAX_SIZE` bound,
+  /// so this is the unbounded shape: a small scratch buffer plus a sink. A
+  /// bounded schema would instead allocate `MAX_SIZE` once and use
+  /// `sofab.Encoder.overBuffer` with no sink at all.
   void serializeTo(sofab.FlushCallback sink, {int bufferSize = 64}) {
-    final enc = sofab.Encoder(sink, bufferSize: bufferSize);
+    final enc = sofab.Encoder(sink, buffer: Uint8List(bufferSize));
     encodeInto(enc);
     enc.flush();
   }

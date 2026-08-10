@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### Changed (breaking) — the encoder's output buffer is always caller-supplied (§5.1)
+
+`Encoder`'s streaming constructor allocated a `Uint8List(bufferSize)` whenever
+`buffer:` was omitted, which was its default shape. §5.1 is explicit that a
+corelib "**MUST NOT** allocate an output buffer. Every buffer the encoder writes
+into is caller-supplied. There is one buffer-ownership model rather than two" —
+and the `bufferSize` knob was the second one, kept alive across the constructor,
+`encodeToBytes` and the example's `serializeTo`.
+
+* `Encoder(sink, {required Uint8List buffer, int offset = 0})` — `buffer` is now
+  **required** and `bufferSize` is gone. `Encoder(sink, bufferSize: n)` becomes
+  `Encoder(sink, buffer: Uint8List(n))`: the same allocation, in the layer §5.1
+  puts it in. `Encoder.overBuffer` is unchanged.
+* `Encoder.encodeToBytes` keeps its `bufferSize:` and stays the §6.1 one-shot
+  convenience, but it is now the caller: it allocates its scratch buffer once,
+  visibly, then drives an ordinary encoder over it. That is the package's only
+  output-buffer allocation site, and it sits above the corelib's write path —
+  the unbounded shape of §5.1's generated-layer rule ("the generated-object
+  layer allocates; the corelib does not").
+* `example/person.dart` allocates in `serializeTo` and documents why the
+  allocation belongs there; the README's memory-handling table no longer offers
+  "or the encoder allocates a default".
+
+No wire change, and no behaviour change for callers that already supplied a
+buffer. `test/buffer_ownership_test.dart` pins the rule: no encoder constructor
+takes a size to allocate from, one cannot be constructed without handing a
+buffer over, and every flushed chunk is a window onto the caller's storage —
+never grown, never replaced. Closes #41.
+
 ### Fixed — a receiver limit no longer overrides a schema bound (§6.2.1, §6.3)
 
 `DecoderLimits` was applied to **every** materialized field, and applied

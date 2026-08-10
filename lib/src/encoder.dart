@@ -94,6 +94,14 @@ typedef FlushCallback = void Function(Uint8List chunk);
 /// message. Supports a start [offset] (leave room for a framing header) and a
 /// mid-stream buffer swap via [installBuffer].
 ///
+/// **Every buffer the encoder writes into is caller-supplied**, so `buffer` is
+/// required: the corelib allocates no output buffer and never grows or replaces
+/// one it was handed. There is one buffer-ownership model, not two — the layer
+/// that knows how big a message can get is the one that allocates (CORELIB_PLAN
+/// §5.1, "the generated-object layer allocates; the corelib does not"). The
+/// one-shot [encodeToBytes] is that layer in miniature: it allocates once,
+/// visibly, then drives this encoder like any other caller.
+///
 /// The hot path performs no heap allocation: scalars, headers and array elements
 /// are written straight into the caller-owned buffer. The one exception is the
 /// held-back-sequence run below, which is allocated on the first
@@ -114,16 +122,22 @@ typedef FlushCallback = void Function(Uint8List chunk);
 /// generated `MAX_SIZE` wants, and it stays exact: a two-byte message encodes
 /// into a two-byte buffer (CORELIB_PLAN §5.1).
 class Encoder {
+  /// Encodes into the caller-supplied [buffer], draining it through the flush
+  /// sink whenever it fills (CORELIB_PLAN §5.1).
+  ///
+  /// [buffer] is required — a size to allocate from would be a second ownership
+  /// model, and §5.1 has only one. [offset] leaves room at the front for a
+  /// framing header. A sink-installed buffer must leave at least
+  /// [minOutputBuffer] bytes after the offset.
   Encoder(
     FlushCallback this._flush, {
-    Uint8List? buffer,
-    int bufferSize = 4096,
+    required Uint8List buffer,
     int offset = 0,
-  }) : _buf = buffer ?? Uint8List(bufferSize),
+  }) : _buf = buffer,
        _pos = offset,
        _flushStart = offset {
-    _checkHandover(_buf.length, offset, streaming: true);
-    _bufData = ByteData.sublistView(_buf);
+    _checkHandover(buffer.length, offset, streaming: true);
+    _bufData = ByteData.sublistView(buffer);
   }
 
   /// Encodes into a caller-supplied [buffer] with **no flush sink** — the first
@@ -817,13 +831,25 @@ class Encoder {
   /// Encodes a whole message to a fresh [Uint8List] (the 90 %-case convenience,
   /// CORELIB_PLAN §6.1). Internally this is just the streaming path with a
   /// collecting sink, proving the one-shot helper is a thin wrapper.
+  ///
+  /// This is the **one** place the package allocates output storage, and it does
+  /// so as a *caller* would: it allocates a scratch buffer of [bufferSize] bytes
+  /// here, explicitly, and hands it to the encoder like any other caller
+  /// (CORELIB_PLAN §5.1, "the generated-object layer allocates; the corelib does
+  /// not" — the unbounded shape, a scratch buffer plus an appending sink). The
+  /// encoder itself allocates nothing: a caller that owns its storage uses the
+  /// streaming constructor or [Encoder.overBuffer] and never comes through here.
   static Uint8List encodeToBytes(
     void Function(Encoder enc) build, {
     int bufferSize = 4096,
     int offset = 0,
   }) {
     final builder = BytesBuilder(copy: true);
-    final enc = Encoder(builder.add, bufferSize: bufferSize, offset: offset);
+    final enc = Encoder(
+      builder.add,
+      buffer: Uint8List(bufferSize),
+      offset: offset,
+    );
     build(enc);
     enc.flush();
     return builder.toBytes();
