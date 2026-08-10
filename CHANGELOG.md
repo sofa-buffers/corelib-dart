@@ -2,6 +2,29 @@
 
 ## Unreleased
 
+### Docs — `## Memory handling` states what one-shot decode does with your bytes (§9.6)
+
+The section described the streaming surface only, and got the one-shot surface
+backwards by omission: the table row said a decoded `blob` "may reference a
+freshly-allocated payload buffer", while `Decoder.decode` hands `onBlob` and
+`onStringBytes` a `Uint8List` **view** onto the caller's input buffer. A caller
+who retained such a value and then reused its own buffer saw the retained bytes
+change under it. CORELIB_PLAN §9.6 requires exactly this statement, per surface.
+
+* The owner/lifetime table now carries a row per decode surface, and two bullets
+  replace the single mixed one: `Decoder.decode` **borrows** — views valid only
+  while the buffer is alive and unmodified, `Uint8List.fromList` to retain,
+  `onString` always a fresh copy, a non-`Uint8List` `List<int>` copied once up
+  front and therefore never aliased; `Decoder.feed` **copies out** — a fed chunk
+  is reusable the moment `feed` returns, whatever the chunking (§6).
+* `MessageVisitor.onBlob` gained the borrowed-value note `onStringBytes` already
+  carried.
+* No behaviour, API or wire-format change.
+* Tests: `test/decode_ownership_test.dart` pins both surfaces by mutating the
+  caller's bytes after delivery — aliased on the one-shot path, never on the
+  streamed one — and reads the README section back, failing if it stops stating
+  either rule. Closes #44.
+
 ### Performance — a streamed fixlen array is allocated once, and filled in bulk
 
 Streaming decode of an `array<fp32>` / `array<fp64>` allocated the payload

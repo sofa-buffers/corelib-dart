@@ -100,6 +100,8 @@ abstract class MessageVisitor {
   // schema-bound consumer carries its own sticky INVALID flag.
   bool _stringRejected = false;
 
+  /// [value] is only valid for the duration of the call — the one-shot decoder
+  /// hands out a view onto the input buffer. Copy it to retain it.
   void onBlob(int id, Uint8List value) {}
   void onUnsignedArray(int id, Int64List values) {}
   void onSignedArray(int id, Int64List values) {}
