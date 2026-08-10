@@ -408,6 +408,7 @@ dart pub get
 dart analyze --fatal-infos      # build: no errors
 dart test                       # runs the shared vectors + streaming/malformed/truncation
 dart run example/person.dart    # the generated-object demo
+bash bench/run_bench.sh         # release build: `dart compile exe` (AOT) + run
 ```
 
 The test suite reads the shared conformance vectors from
@@ -417,6 +418,14 @@ chunked-decode, skip-ids, roundtrip, malformed-input, truncation and invalid-UTF
 checks. CI enforces the >90% line-coverage bar (CORELIB_PLAN §7.3); the rendered
 coverage badge is generated from the lcov report and published to GitHub Pages by
 the docs workflow.
+
+Both configurations are built (CORELIB_PLAN §12.1). For Dart, `dart run` and
+`dart test` *are* the debug (JIT) configuration; the release configuration is
+AOT, i.e. `dart compile exe`. Every matrix leg runs the JIT steps above, and the
+`stable` leg additionally runs `bench/run_bench.sh` and `bench/run_callgrind.sh`
+— between them they AOT-compile every entrypoint this repository ships and run
+the result, so an AOT-only failure cannot ship unnoticed. Compiled output lands
+in `build/`, which is git-ignored and must never be committed.
 
 ## Benchmarks
 
