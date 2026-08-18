@@ -27,12 +27,14 @@ void main() {
 
   const chunkings = [1, 2, 3, 5, 32];
 
-  test('one-shot: reports invalid and delivers nothing behind the rejection',
-      () {
-    final v = _Rejecting(rejectId: 1);
-    expect(sofab.Decoder.decode(bytes, v), sofab.DecodeStatus.invalid);
-    expect(v.seen, [0]); // id 2 never arrived
-  });
+  test(
+    'one-shot: reports invalid and delivers nothing behind the rejection',
+    () {
+      final v = _Rejecting(rejectId: 1);
+      expect(sofab.Decoder.decode(bytes, v), sofab.DecodeStatus.invalid);
+      expect(v.seen, [0]); // id 2 never arrived
+    },
+  );
 
   for (final size in chunkings) {
     test('streaming at $size-byte chunks: same verdict, same deliveries', () {
@@ -54,25 +56,28 @@ void main() {
     final dec = sofab.Decoder(v);
     expect(dec.feed(bytes), sofab.DecodeStatus.invalid);
     // A perfectly good continuation must not resurrect the decode (§5.2).
-    expect(dec.feed(Uint8List.fromList([0x18, 0x01])),
-        sofab.DecodeStatus.invalid);
+    expect(
+      dec.feed(Uint8List.fromList([0x18, 0x01])),
+      sofab.DecodeStatus.invalid,
+    );
     expect(v.seen, [0]);
   });
 
-  test('the control decodes clean, so the reject is a verdict and not a blanket',
-      () {
-    final v = _Rejecting(rejectId: 99);
-    expect(sofab.Decoder.decode(bytes, v), sofab.DecodeStatus.complete);
-    expect(v.seen, [0, 1, 2]);
-  });
+  test(
+    'the control decodes clean, so the reject is a verdict and not a blanket',
+    () {
+      final v = _Rejecting(rejectId: 99);
+      expect(sofab.Decoder.decode(bytes, v), sofab.DecodeStatus.complete);
+      expect(v.seen, [0, 1, 2]);
+    },
+  );
 
   test('works from inside a nested scope, and stops the outer one too', () {
     // 0e        id 1, sequence start
     // 00 63     id 0, unsigned = 99   <- the CHILD rejects
     // 07        sequence end
     // 10 2a     id 2, unsigned = 42   <- must never be delivered
-    final nested =
-        Uint8List.fromList([0x0e, 0x00, 0x63, 0x07, 0x10, 0x2a]);
+    final nested = Uint8List.fromList([0x0e, 0x00, 0x63, 0x07, 0x10, 0x2a]);
     final root = _Nesting();
     expect(sofab.Decoder.decode(nested, root), sofab.DecodeStatus.invalid);
     expect(root.seen, isEmpty);
