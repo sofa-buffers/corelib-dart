@@ -292,6 +292,44 @@ for (final b in bytes) dec.feed([b]);       // one byte at a time
 final person = dec.value;                   // assembled incrementally
 ```
 
+#### What generated code builds on
+
+Four pieces of that layer live here rather than in every generated file,
+because none of them knows a schema: what varies per message arrives as an
+argument or a type parameter.
+
+| symbol | what it is for |
+|---|---|
+| `sofab.VisitorBase` | the visitor base a generated scope extends: an id the scope does not declare is *skipped*, not inspected, for strings (`onStringBytes`) and sub-sequences (`onSequenceStart`) alike |
+| `sofab.decodeUtf8Strict` | materializes a `string` payload, or `null` if it is not valid UTF-8 — one scan with an ASCII fast path, the decode-side twin of `encodeUtf8Strict` |
+| `sofab.utf8Length` | the exact UTF-8 byte length of a `String`, without allocating the transcode buffer |
+| `sofab.elementsEqual` | pairwise list comparison, which is how a generated encoder asks whether a list field still equals its declared default (`==` on two Dart `List`s is identity) |
+
+```dart
+// A generated scope: one string destination at id 1, everything else skipped.
+class _Scope extends sofab.VisitorBase {
+  String? name;
+  bool invalid = false;
+
+  @override
+  void onStringBytes(int id, Uint8List bytes) {
+    if (id != 1) return;                    // falls through to the base's skip
+    final s = sofab.decodeUtf8Strict(bytes);
+    if (s == null) {
+      invalid = true;                       // the consumer's sticky INVALID
+      return;
+    }
+    name = s;
+  }
+}
+```
+
+`MessageVisitor`'s own defaults are the opposite — read everything, descend
+every sequence — because a *hand-written* visitor wants to see the whole
+message. A schema-bound one binds only what its schema declares, and a payload
+it does not bind is a skipped field (MESSAGE_SPEC §7.3), so it is never
+UTF-8-validated (CORELIB_PLAN §6.4).
+
 ## Memory handling
 
 Only two buffers matter — the one you encode into and the one you decode from —

@@ -1,4 +1,3 @@
-import 'dart:convert' show utf8;
 import 'dart:typed_data';
 
 import 'utf8.dart';
@@ -57,14 +56,15 @@ abstract class MessageVisitor {
   /// wire type/subtype contradicts the schema.
   ///
   /// **Schema-bound (generated) consumers override this**, resolve the
-  /// destination for `id` *first*, and call `utf8Valid` + `utf8.decode` only
-  /// inside a matched destination arm — an unmatched id must return without
-  /// validating and without flagging INVALID. A Dart `String` cannot carry
-  /// invalid bytes without the lossy U+FFFD substitution §6.4 forbids, so
-  /// delivering the raw bytes is the only way a push consumer can honour the
-  /// materialize-only rule. Such an override reports a rejected payload through
-  /// its own sticky INVALID flag, exactly as it already does for a schema
-  /// `maxlen` breach seen in [onFixlenHeader].
+  /// destination for `id` *first*, and call [decodeUtf8Strict] only inside a
+  /// matched destination arm — an unmatched id must return without validating
+  /// and without flagging INVALID, which is what `VisitorBase` is for: extend
+  /// it and every id the scope does not declare already skips. A Dart `String`
+  /// cannot carry invalid bytes without the lossy U+FFFD substitution §6.4
+  /// forbids, so delivering the raw bytes is the only way a push consumer can
+  /// honour the materialize-only rule. Such an override reports a rejected
+  /// payload through its own sticky INVALID flag, exactly as it already does
+  /// for a schema `maxlen` breach seen in [onFixlenHeader].
   ///
   /// The default implementation preserves the always-strict behaviour of this
   /// port for hand-written visitors: invalid UTF-8 at a materialized position
@@ -74,25 +74,14 @@ abstract class MessageVisitor {
   /// [bytes] is only valid for the duration of the call — the one-shot decoder
   /// hands out a view onto the input buffer. Copy it to retain it.
   void onStringBytes(int id, Uint8List bytes) {
-    // ASCII fast path: a byte < 0x80 is a complete, trivially valid UTF-8
-    // sequence, so one scan settles validity *and* the transcode —
-    // `String.fromCharCodes` builds the one-byte string directly, skipping both
-    // the general validator and the UTF-8 decoder. Field names, ids, tags and
-    // most identifiers hit this.
-    final n = bytes.length;
-    var i = 0;
-    while (i < n && bytes[i] < 0x80) {
-      i++;
-    }
-    if (i == n) {
-      onString(id, String.fromCharCodes(bytes));
-      return;
-    }
-    if (!utf8Valid(bytes, i)) {
+    // One scan, ASCII fast path included — see [decodeUtf8Strict], which is the
+    // same call a generated override makes inside a matched arm.
+    final value = decodeUtf8Strict(bytes);
+    if (value == null) {
       _stringRejected = true;
       return;
     }
-    onString(id, utf8.decode(bytes));
+    onString(id, value);
   }
 
   // Set by the default [onStringBytes] when the payload is not valid UTF-8, and
@@ -238,7 +227,10 @@ abstract class MessageVisitor {
 
   /// A sequence opened. Return a visitor for its children (which follows the
   /// same push/pull contract recursively), or `null` to skip the sub-sequence.
-  /// Default: descend, reusing this visitor.
+  /// Default: descend, reusing this visitor — the right default for a
+  /// hand-written visitor, and the wrong one for a schema-bound consumer, which
+  /// binds only the sequences its schema declares and therefore starts from
+  /// `VisitorBase` instead.
   MessageVisitor? onSequenceStart(int id) => this;
 
   /// The sequence whose children this visitor received has closed.
