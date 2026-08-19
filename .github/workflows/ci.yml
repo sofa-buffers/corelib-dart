@@ -22,6 +22,12 @@ jobs:
       - uses: dart-lang/setup-dart@v1
         with:
           sdk: stable
+      # `dart format` reads the package's language version out of
+      # .dart_tool/package_config.json, and formats to a DIFFERENT default
+      # without it — 9 files here. It also needs the resolution to follow the
+      # `package:lints` include in analysis_options.yaml. So the gate resolves
+      # first, exactly as the matrix job below does.
+      - run: dart pub get
       - run: dart format --output=none --set-exit-if-changed .
 
   build-test:
