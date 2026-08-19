@@ -7,6 +7,23 @@ on:
     branches: [main]
 
 jobs:
+  # `dart format` is not stable across SDK versions -- its line splitting
+  # changes -- so running this inside the matrix below asked the repository to
+  # be formatted five ways at once, which no file can be. It ran there until
+  # 3.13 became stable and re-wrapped a test, at which point the `stable` leg
+  # failed on every PR and formatting for it would have failed the other four.
+  # One SDK, one answer: `stable`, because that is what a contributor's local
+  # `dart format` is. When the formatter changes again this is one job to
+  # re-run and one reformat commit, instead of an unsatisfiable matrix.
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+      - run: dart format --output=none --set-exit-if-changed .
+
   build-test:
     runs-on: ubuntu-latest
     strategy:
@@ -27,9 +44,6 @@ jobs:
 
       - name: Install dependencies
         run: dart pub get
-
-      - name: Verify formatting
-        run: dart format --output=none --set-exit-if-changed .
 
       - name: Analyze (build — no errors allowed)
         run: dart analyze --fatal-infos
