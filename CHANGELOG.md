@@ -2,6 +2,64 @@
 
 ## Unreleased
 
+### The generated layer's schema-free half, moved here (VisitorBase, decodeUtf8Strict, utf8Length, elementsEqual)
+
+Purely additive: nothing existing changed name or behaviour, and generated code
+in the wild — which carries its own copies of all four — keeps compiling.
+
+Every file `sofabgen` emits for Dart opens with ~96 lines that have no schema in
+them: a visitor base, a UTF-8 materializer, a UTF-8 byte-length counter, a list
+comparison. Their code is the same for every message; only the arguments differ.
+That makes them corelib code by the rule the generator adopted in its
+ARCHITECTURE §8 (sofa-buffers/generator#345) — a helper whose schema dependence
+is carried entirely by arguments and type parameters belongs where the concept
+already lives, written once, instead of being re-emitted into every user's
+source tree along with the comment explaining it.
+
+* **`VisitorBase`** — a `MessageVisitor` whose `onStringBytes` and
+  `onSequenceStart` defaults are the ones a schema-bound consumer needs: an id
+  the scope does not declare is *skipped*, not inspected, and a sub-sequence it
+  does not bind is skipped whole, children included. `MessageVisitor`'s own
+  defaults (validate the string, descend the sequence) are right for a
+  hand-written visitor and wrong for a generated one — MESSAGE_SPEC §7.3 makes
+  an undeclared id a skipped field, and CORELIB_PLAN §6.4 never validates those.
+  This class is what `MessageVisitor.onStringBytes`' documentation has been
+  prescribing in prose since strict UTF-8 landed; now it can be extended.
+* **`decodeUtf8Strict(Uint8List) → String?`** — the decode-side twin of
+  `encodeUtf8Strict`: valid UTF-8 in, `String` out, `null` for anything
+  malformed, never a U+FFFD substitution. It replaces the `utf8Valid(bytes)` +
+  `utf8.decode(bytes)` pair the docs used to prescribe, which walks the payload
+  twice; this validates from the **first non-ASCII byte** only, and settles an
+  all-ASCII payload in a single scan through `String.fromCharCodes`. The default
+  `onStringBytes` now calls it rather than keeping a second copy of the same
+  scan, so both string paths are one implementation.
+* **`utf8Length(String) → int`** — the exact UTF-8 byte length that sizes a
+  `fixlen_word`, without allocating the transcode buffer to find it out. Walks
+  code units rather than runes, so a surrogate pair costs no `RuneIterator`.
+* **`elementsEqual<T>(List<T>, List<T>) → bool`** — pairwise list comparison,
+  which is how a generated encoder decides whether a list field still equals its
+  declared default (MESSAGE_SPEC §5.1). Dart's `==` on two `List`s is identity,
+  so a freshly built list never equals its default without it.
+
+The collectors of the same block (`_StrSeq` / `_BlobSeq`) are deliberately not
+here yet: they report a rejected element through a sticky INVALID flag they take
+in their constructor, and the visitor callbacks return `void`, so moving them
+needs an INVALID channel on `MessageVisitor` first (#64).
+
+**Tests.** `test/generated_support_test.dart`, 19 cases. None of this is
+wire-visible — a port could validate a skipped string, or omit a field holding a
+`NaN`, and still emit byte-identical output — so the shared vectors cannot reach
+any of it and CORELIB_PLAN §7 makes unit tests the only cover. Pinned: an
+invalid-UTF-8 string at an undeclared id decodes to COMPLETE under `VisitorBase`
+and to INVALID under a plain `MessageVisitor` (the exact boundary the generated
+original guarded); an override that binds one id falls through to the skip for
+the rest; a skipped sequence takes its grandchildren with it; `decodeUtf8Strict`
+agrees with `utf8Valid` on every malformed shape, including one hidden behind an
+ASCII prefix; `utf8Length` equals `encodeUtf8Strict(s).length` across the 1/2/3/4-byte
+boundaries and measures an unpaired surrogate the encoder refuses; and
+`elementsEqual` on the two IEEE-754 cases that decide whether a field is written
+(`NaN` never equal, `-0.0 == 0.0`).
+
 ### Benchmarks — the BENCH_SPEC datasets this port was missing, and a clock that can measure them
 
 No library change: `lib/` is untouched. This is the `bench/` half of the spec.

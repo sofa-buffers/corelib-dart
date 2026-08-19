@@ -1,3 +1,4 @@
+import 'dart:convert' show utf8;
 import 'dart:typed_data';
 
 // Strict UTF-8 primitives (CORELIB_PLAN §6.4). Dart's `String` is a Unicode
@@ -107,4 +108,75 @@ Uint8List? encodeUtf8Strict(String s) {
     }
   }
   return Uint8List.sublistView(out, 0, o);
+}
+
+/// Strictly decodes UTF-8 [bytes] to a Dart [String], returning `null` if they
+/// are not well-formed UTF-8 per RFC 3629 — the decode-side twin of
+/// [encodeUtf8Strict], and never lossy: no U+FFFD substitution, no dropped
+/// byte (CORELIB_PLAN §6.4).
+///
+/// This is the materialization step a **schema-bound (generated) consumer**
+/// runs inside a matched destination arm of `MessageVisitor.onStringBytes`, and
+/// it is the same code the default `onStringBytes` runs — validate once, then
+/// build the string — rather than a separate [utf8Valid] scan of the whole
+/// payload followed by an independent transcode of it from byte zero.
+///
+/// The ASCII fast path is why: a byte below `0x80` is a complete, trivially
+/// valid UTF-8 sequence, so one scan settles validity *and* the transcode for
+/// an all-ASCII payload — `String.fromCharCodes` builds the one-byte string
+/// directly, touching neither the general validator nor the UTF-8 decoder.
+/// Field names, ids, tags and most identifiers are exactly that. A payload that
+/// does turn multi-byte is validated only from its **first non-ASCII byte**,
+/// which is a legal resync point precisely because every byte before it stands
+/// alone.
+String? decodeUtf8Strict(Uint8List bytes) {
+  final n = bytes.length;
+  var i = 0;
+  while (i < n && bytes[i] < 0x80) {
+    i++;
+  }
+  if (i == n) return String.fromCharCodes(bytes);
+  if (!utf8Valid(bytes, i)) return null;
+  return utf8.decode(bytes);
+}
+
+/// The exact number of UTF-8 bytes [s] encodes to, without allocating the
+/// transcode buffer [encodeUtf8Strict] would.
+///
+/// This is what sizes a `fixlen_word` (and any buffer reservation) ahead of a
+/// string payload: the wire `length` of a `string` field is its UTF-8 byte
+/// length, not its Dart `String` length, and the two differ for anything above
+/// U+007F.
+///
+/// The walk is over code **units**, not runes: a surrogate pair is recognized
+/// and counted as the 4 bytes its code point encodes to, and no `RuneIterator`
+/// is allocated to find that out. An *unpaired* surrogate — the one thing a
+/// Dart `String` can hold that is not encodable at all, and for which
+/// [encodeUtf8Strict] returns `null` — is counted as 3 bytes here rather than
+/// reported: this answers "how large", and whether the string can be encoded is
+/// the encoder's answer to give.
+int utf8Length(String s) {
+  final units = s.codeUnits;
+  final n = units.length;
+  var len = 0;
+  var i = 0;
+  while (i < n) {
+    final c = units[i++];
+    if (c < 0x80) {
+      len += 1;
+    } else if (c < 0x800) {
+      len += 2;
+    } else if (c >= 0xD800 && c <= 0xDBFF && i < n) {
+      final c2 = units[i];
+      if (c2 >= 0xDC00 && c2 <= 0xDFFF) {
+        i++;
+        len += 4; // surrogate pair: one code point above U+FFFF
+      } else {
+        len += 3; // unpaired high surrogate
+      }
+    } else {
+      len += 3;
+    }
+  }
+  return len;
 }

@@ -42,7 +42,10 @@ export 'src/wire.dart'
         DecodeStatus,
         SofabError,
         SofabException;
-export 'src/utf8.dart' show utf8Valid, encodeUtf8Strict;
+export 'src/utf8.dart'
+    show utf8Valid, encodeUtf8Strict, decodeUtf8Strict, utf8Length;
 export 'src/encoder.dart' show Encoder, FlushCallback;
 export 'src/decoder.dart'
     show Decoder, MessageVisitor, DecoderLimits, ElemRange;
+export 'src/visitor_base.dart' show VisitorBase;
+export 'src/lists.dart' show elementsEqual;
