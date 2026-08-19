@@ -49,3 +49,13 @@ export 'src/decoder.dart'
     show Decoder, MessageVisitor, DecoderLimits, ElemRange;
 export 'src/visitor_base.dart' show VisitorBase;
 export 'src/lists.dart' show elementsEqual;
+export 'src/seq.dart'
+    show
+        BlobSeq,
+        BoolMatrixSeq,
+        DoubleMatrixSeq,
+        IntMatrixSeq,
+        MessageSeq,
+        NestedSeq,
+        StringSeq,
+        copyFp32;
