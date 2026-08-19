@@ -32,6 +32,9 @@ jobs:
 
   build-test:
     runs-on: ubuntu-latest
+    # A hung step must fail fast and name itself: the account's Actions
+    # concurrency is 20, and one wedged job is a slot everyone else waits on.
+    timeout-minutes: 20
     strategy:
       # Dart is a single-vendor, stable toolchain, but scripting-style
       # version drift can still bite, so we test every currently-common minor
@@ -70,22 +73,26 @@ jobs:
 
       # §12.1 step 4 wants *both* configurations built. Everything above runs on
       # the JIT VM, which for Dart is the debug configuration; the release
-      # configuration is AOT (`dart compile exe`). Running the two benchmark
-      # scripts is what builds it: they are the README's recommended way to
-      # measure, and between them they AOT-compile every entrypoint this repo
-      # ships (bench, perf, callgrind_target) and then run it — so an AOT-only
-      # break, or a break in either script, fails here instead of in someone's
-      # hands. One SDK is enough: the matrix exists for language-version drift,
-      # not for the AOT toolchain. Output lands in build/, which is git-ignored.
-      - name: Build release (AOT) and run the benchmark scripts
+      # configuration is AOT (`dart compile exe`). This step builds it.
+      #
+      # It used to get there by running bench/run_bench.sh and
+      # bench/run_callgrind.sh, which also MEASURE — and the measuring is what
+      # wedged: 77 seconds when the leg was last green, then 45+ minutes with no
+      # output, on every PR, holding a runner the whole time (#70). Installing
+      # valgrind over apt with no timeout was the other unbounded half.
+      #
+      # So the BUILD stays and the MEASUREMENT goes. Compiling every entrypoint
+      # is what catches an AOT-only break, which is what §12.1 asks for here;
+      # the numbers are not a per-PR gate, and bench/run_bench.sh remains the
+      # README's way to get them. Output lands in build/, which is git-ignored.
+      - name: Build release (AOT)
         if: matrix.sdk == 'stable'
+        timeout-minutes: 10
         run: |
-          command -v valgrind >/dev/null 2>&1 || {
-            sudo apt-get update -qq
-            sudo apt-get install -y --no-install-recommends valgrind
-          }
-          bench/run_bench.sh
-          bench/run_callgrind.sh
+          mkdir -p build
+          for entry in bench/bench.dart bench/perf.dart bench/callgrind_target.dart; do
+            dart compile exe "$entry" -o "build/$(basename "$entry" .dart)"
+          done
 
   coverage:
     runs-on: ubuntu-latest
