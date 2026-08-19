@@ -60,16 +60,14 @@ jobs:
       - name: Run tests (shared vectors + streaming + malformed + truncation)
         run: dart test
 
-      # `bench --smoke` runs every workload exactly once rather than for a
-      # second each: this step proves the entrypoints run on this SDK, `dart
-      # test` above already matches both tools' output against BENCH_SPEC's
-      # grammar, and the measuring loops themselves are exercised for real by
-      # run_bench.sh on the stable leg below.
-      - name: Sanity-run the example and benchmarks (debug — JIT)
-        run: |
-          dart run example/person.dart
-          dart run bench/bench.dart --smoke
-          dart run bench/perf.dart
+      # The README's entry point, on every SDK in the matrix: it exercises the
+      # generated-object layer end to end (§6.1) and is the one executable this
+      # repo ships that is not a benchmark tool. The benchmark tools are not
+      # run here -- `dart test` above already runs them itself
+      # (bench_grammar_test.dart) and matches their output against BENCH_SPEC's
+      # grammar, so a second run proved nothing the suite had not.
+      - name: Sanity-run the example (debug — JIT)
+        run: dart run example/person.dart
 
       # §12.1 step 4 wants *both* configurations built. Everything above runs on
       # the JIT VM, which for Dart is the debug configuration; the release
@@ -79,20 +77,26 @@ jobs:
       # bench/run_callgrind.sh, which also MEASURE — and the measuring is what
       # wedged: 77 seconds when the leg was last green, then 45+ minutes with no
       # output, on every PR, holding a runner the whole time (#70). Installing
-      # valgrind over apt with no timeout was the other unbounded half.
+      # valgrind over apt with no timeout was the other unbounded half. #72
+      # dropped the measuring and kept an AOT compile of the three benchmark
+      # entrypoints.
       #
-      # So the BUILD stays and the MEASUREMENT goes. Compiling every entrypoint
-      # is what catches an AOT-only break, which is what §12.1 asks for here;
-      # the numbers are not a per-PR gate, and bench/run_bench.sh remains the
-      # README's way to get them. Output lands in build/, which is git-ignored.
+      # Those entrypoints are gone from here too: compiling them checks the
+      # benchmark tooling, not the library, and CORELIB_PLAN asks for no
+      # benchmark work in CI at all (§12.1's required steps list none; §13
+      # wants the tools present and runnable, a property of the repo rather
+      # than of a workflow run). What §12.1 step 4 does require is that the
+      # release configuration is built, so the example is compiled and run
+      # ahead-of-time instead — the same AOT toolchain, on the code the
+      # library's users actually run. Output lands in build/, which is
+      # git-ignored.
       - name: Build release (AOT)
         if: matrix.sdk == 'stable'
         timeout-minutes: 10
         run: |
           mkdir -p build
-          for entry in bench/bench.dart bench/perf.dart bench/callgrind_target.dart; do
-            dart compile exe "$entry" -o "build/$(basename "$entry" .dart)"
-          done
+          dart compile exe example/person.dart -o build/person
+          build/person
 
   coverage:
     runs-on: ubuntu-latest
