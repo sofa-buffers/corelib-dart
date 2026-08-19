@@ -58,10 +58,10 @@ jobs:
         run: dart test
 
       # `bench --smoke` runs every workload exactly once rather than for a
-      # second each: this step proves the entrypoints run on this SDK, `dart
-      # test` above already matches both tools' output against BENCH_SPEC's
-      # grammar, and the measuring loops themselves are exercised for real by
-      # run_bench.sh on the stable leg below.
+      # second each: this step proves the entrypoints run on this SDK, and
+      # `dart test` above already matches both tools' output against
+      # BENCH_SPEC's grammar. Nothing is measured here -- CI does not run the
+      # benchmarks, which are produced by hand on a quiet machine (BENCH_SPEC).
       - name: Sanity-run the example and benchmarks (debug — JIT)
         run: |
           dart run example/person.dart
@@ -70,22 +70,16 @@ jobs:
 
       # §12.1 step 4 wants *both* configurations built. Everything above runs on
       # the JIT VM, which for Dart is the debug configuration; the release
-      # configuration is AOT (`dart compile exe`). Running the two benchmark
-      # scripts is what builds it: they are the README's recommended way to
-      # measure, and between them they AOT-compile every entrypoint this repo
-      # ships (bench, perf, callgrind_target) and then run it — so an AOT-only
-      # break, or a break in either script, fails here instead of in someone's
-      # hands. One SDK is enough: the matrix exists for language-version drift,
-      # not for the AOT toolchain. Output lands in build/, which is git-ignored.
-      - name: Build release (AOT) and run the benchmark scripts
+      # configuration is AOT (`dart compile exe`), so it is built and run here —
+      # an AOT-only break fails here instead of in someone's hands. One SDK is
+      # enough: the matrix exists for language-version drift, not for the AOT
+      # toolchain. Output lands in build/, which is git-ignored.
+      - name: Build release (AOT)
         if: matrix.sdk == 'stable'
         run: |
-          command -v valgrind >/dev/null 2>&1 || {
-            sudo apt-get update -qq
-            sudo apt-get install -y --no-install-recommends valgrind
-          }
-          bench/run_bench.sh
-          bench/run_callgrind.sh
+          mkdir -p build
+          dart compile exe example/person.dart -o build/person
+          build/person
 
   coverage:
     runs-on: ubuntu-latest
