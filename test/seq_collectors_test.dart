@@ -212,6 +212,161 @@ void main() {
       expect(sofab.copyFp32(src, 1).length, 3);
     });
   });
+
+  group('MessageSeq', () {
+    test('fills an element in place at its id, so a re-opened id merges', () {
+      final out = <_Point>[];
+      final st = run(
+        (e) {
+          e.beginSequenceLazy(0); // element 0
+          e.writeSigned(0, 3);
+          e.endSequence();
+          e.beginSequenceLazy(0); // the SAME element, re-opened (§7.4)
+          e.writeSigned(1, 4);
+          e.endSequence();
+        },
+        sofab.MessageSeq<_Point>(out, -1, _Point.new, (p) => _PointVisitor(p)),
+      );
+      expect(st, sofab.DecodeStatus.complete);
+      expect(out.length, 1);
+      expect([out[0].x, out[0].y], [3, 4]); // merged, not appended twice
+    });
+
+    test('gap-fills with fresh elements and bounds the id', () {
+      final out = <_Point>[];
+      final st = run(
+        (e) {
+          e.beginSequenceLazy(2); // ids 0 and 1 omitted
+          e.writeSigned(0, 9);
+          e.endSequence();
+        },
+        sofab.MessageSeq<_Point>(out, -1, _Point.new, (p) => _PointVisitor(p)),
+      );
+      expect(st, sofab.DecodeStatus.complete);
+      expect(out.length, 3);
+      expect([out[0].x, out[1].x, out[2].x], [0, 0, 9]);
+
+      final past = <_Point>[];
+      expect(
+        run(
+          (e) {
+            // Content matters: lazy framing drops a CONTENTLESS sequence entirely
+            // (§2), so an empty element would never reach the collector at all.
+            e.beginSequenceLazy(2);
+            e.writeSigned(0, 1);
+            e.endSequence();
+          },
+          sofab.MessageSeq<_Point>(
+            past,
+            2,
+            _Point.new,
+            (p) => _PointVisitor(p),
+          ),
+        ),
+        sofab.DecodeStatus.invalid,
+      );
+      expect(past, isEmpty);
+    });
+  });
+
+  group('NestedSeq', () {
+    test('collects a row of rows, each row through its own collector', () {
+      final out = <List<String>>[];
+      final st = run(
+        (e) {
+          e.beginSequenceLazy(0);
+          e.writeString(0, 'a');
+          e.writeString(1, 'b');
+          e.endSequence();
+          e.beginSequenceLazy(1);
+          e.writeString(0, 'c');
+          e.endSequence();
+        },
+        sofab.NestedSeq<String>(out, -1, (row) => sofab.StringSeq(row, -1, -1)),
+      );
+      expect(st, sofab.DecodeStatus.complete);
+      expect(out, [
+        ['a', 'b'],
+        ['c'],
+      ]);
+    });
+
+    test('a row id past the outer capacity is INVALID', () {
+      final out = <List<String>>[];
+      final st = run(
+        (e) {
+          e.beginSequenceLazy(3);
+          e.writeString(0, 'x');
+          e.endSequence();
+        },
+        sofab.NestedSeq<String>(out, 3, (row) => sofab.StringSeq(row, -1, -1)),
+      );
+      expect(st, sofab.DecodeStatus.invalid);
+      expect(out, isEmpty);
+    });
+  });
+
+  group('DoubleMatrixSeq, fp64 rows', () {
+    test(
+      'collects them, and an fp32 row is not this array\'s element (§7.3)',
+      () {
+        final out = <List<double>>[];
+        final st = run(
+          (e) => e.writeFp64Array(1, Float64List.fromList([1.5, 2.5])),
+          sofab.DoubleMatrixSeq(out, -1, true),
+        );
+        expect(st, sofab.DecodeStatus.complete);
+        expect(out.length, 2);
+        expect(out[0], isEmpty); // the gap at id 0
+        expect(out[1], [1.5, 2.5]);
+
+        final other = <List<double>>[];
+        expect(
+          run(
+            (e) => e.writeFp32Array(0, Float32List.fromList([1.5])),
+            sofab.DoubleMatrixSeq(other, -1, true),
+          ),
+          sofab.DecodeStatus.complete,
+        );
+        expect(other, isEmpty);
+      },
+    );
+  });
+
+  group('the payload-side bound', () {
+    test(
+      'an over-maxlen element is rejected even when the header word is not',
+      () {
+        // Reaches the guard in onStringBytes/onBlob rather than the one in
+        // onFixlenHeader: the header carries the WIRE length, and for a string
+        // they agree — so this drives the payload path with a collector whose
+        // emax the header check cannot have applied, i.e. a re-opened element.
+        final out = <String>[];
+        final st = run((e) {
+          e.writeString(0, 'abcdef');
+        }, sofab.StringSeq(out, -1, 3));
+        expect(st, sofab.DecodeStatus.invalid);
+        expect(out, isEmpty);
+      },
+    );
+  });
+}
+
+/// A minimal generated-object stand-in for MessageSeq.
+class _Point {
+  int x = 0;
+  int y = 0;
+}
+
+class _PointVisitor extends sofab.VisitorBase {
+  _PointVisitor(this.o);
+  final _Point o;
+
+  @override
+  void onSigned(int id, int value) {
+    if (id == 0) o.x = value;
+    if (id == 1) o.y = value;
+  }
 }
 
 /// Routes the one sequence field to the collector under test.

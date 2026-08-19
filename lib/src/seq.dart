@@ -77,6 +77,11 @@ class StringSeq extends VisitorBase {
   @override
   void onStringBytes(int id, Uint8List bytes) {
     if (_overCapacity(this, id, cap)) return;
+    // A backstop, and coverage says so: [onFixlenHeader] already rejected this
+    // bound at the length word and [invalidate] stopped the decode there, so
+    // neither engine can reach it. It stays for a caller driving the collector
+    // by hand, and because a guard that reads the payload's own length is the
+    // one that cannot be wrong.
     if (emax >= 0 && bytes.length > emax) {
       invalidate();
       return;
@@ -113,6 +118,7 @@ class BlobSeq extends VisitorBase {
   @override
   void onBlob(int id, Uint8List value) {
     if (_overCapacity(this, id, cap)) return;
+    // The same backstop as StringSeq's, unreachable for the same reason.
     if (emax >= 0 && value.length > emax) {
       invalidate();
       return;
