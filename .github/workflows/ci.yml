@@ -17,6 +17,9 @@ jobs:
   # re-run and one reformat commit, instead of an unsatisfiable matrix.
   format:
     runs-on: ubuntu-latest
+    # A hung step must fail fast and name itself: the account's Actions
+    # concurrency is 20, and one wedged job is a slot everyone else waits on.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: dart-lang/setup-dart@v1
@@ -29,9 +32,20 @@ jobs:
       # first, exactly as the matrix job below does.
       - run: dart pub get
       - run: dart format --output=none --set-exit-if-changed .
+      # Dart has no compile step short of AOT, so `dart analyze` is this
+      # repository's build gate. It used to run inside the matrix below, where
+      # an analysis error — which is SDK-independent for the versions we
+      # support — was reported five times for one cause, and each of the five
+      # legs had already paid for a checkout and a resolve to say it. It runs
+      # once here instead, and `build-test` waits on this job, so a repository
+      # that does not analyse never reaches the test matrix at all.
+      - run: dart analyze --fatal-infos
 
   build-test:
     runs-on: ubuntu-latest
+    # Format and analysis are SDK-independent and cheap; gating on them keeps
+    # five SDK legs from burning runners on a tree that does not analyse.
+    needs: [format]
     # A hung step must fail fast and name itself: the account's Actions
     # concurrency is 20, and one wedged job is a slot everyone else waits on.
     timeout-minutes: 20
@@ -53,9 +67,6 @@ jobs:
 
       - name: Install dependencies
         run: dart pub get
-
-      - name: Analyze (build — no errors allowed)
-        run: dart analyze --fatal-infos
 
       - name: Run tests (shared vectors + streaming + malformed + truncation)
         run: dart test
@@ -101,6 +112,9 @@ jobs:
   coverage:
     runs-on: ubuntu-latest
     needs: build-test
+    # A hung step must fail fast and name itself: the account's Actions
+    # concurrency is 20, and one wedged job is a slot everyone else waits on.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: dart-lang/setup-dart@v1
