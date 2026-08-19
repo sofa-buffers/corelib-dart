@@ -16,9 +16,38 @@ import 'wire.dart';
 /// Booleans arrive via [onUnsigned] (`0`/`1`) — booleans have no wire type
 /// (CORELIB_PLAN §4.4); the consumer interprets them. Integer array element width
 /// is an API concern, so arrays arrive as 64-bit values.
+/// Raised by [MessageVisitor.invalidate] and caught by whichever decode engine
+/// is running, which then reports `INVALID` and stops.
+///
+/// Private on purpose: it is a control signal, not an error a caller handles.
+/// It is also the reason a visitor callback must not swallow exceptions
+/// indiscriminately — a bare `catch` around a store would eat the verdict.
+class _Invalidated implements Exception {
+  const _Invalidated();
+}
+
 abstract class MessageVisitor {
   /// Whether to read (materialize) the leaf field, or skip it. Default: read.
   bool shouldRead(int id, int type) => true;
+
+  /// Reject the running decode as `INVALID` from inside a callback.
+  ///
+  /// The wire layer judges what the format can decide on its own; a **schema**
+  /// bound — an array index past the declared capacity, a string past its
+  /// `maxlen`, a value outside its declared width — is knowable only to the
+  /// consumer, and MESSAGE_SPEC §7.1 makes it INVALID all the same. Callbacks
+  /// return `void`, so without this a consumer had nowhere to put that verdict
+  /// and had to carry a flag of its own, converted after the decode returned.
+  ///
+  /// Calling this stops the decode where it stands: no further field is
+  /// delivered, and [Decoder.feed] / [Decoder.decode] report
+  /// [DecodeStatus.invalid], which is terminal (CORELIB_PLAN §5.2). That is the
+  /// difference from a flag read afterwards — the verdict was already right,
+  /// but the bytes behind it were still being parsed and delivered.
+  ///
+  /// Safe from any depth, including inside a nested collector. It never
+  /// returns normally.
+  void invalidate() => throw const _Invalidated();
 
   void onUnsigned(int id, int value) {}
   void onSigned(int id, int value) {}
@@ -630,6 +659,18 @@ class Decoder {
   /// far (CORELIB_PLAN §5.2).
   DecodeStatus feed(List<int> data) {
     if (_terminal) return _terminalStatus;
+    try {
+      return _feed(data);
+    } on _Invalidated {
+      _terminal = true;
+      return _terminalStatus = DecodeStatus.invalid;
+    }
+  }
+
+  /// The byte loop itself. Split out so it keeps a frame of its own: the
+  /// `try` above must not sit around the loop the decoder's throughput is
+  /// measured on.
+  DecodeStatus _feed(List<int> data) {
     // Everything below reads bytes through a `Uint8List`: on that type AOT
     // compiles an element read down to a load, where `List<int>` indexing is an
     // interface call per byte, and only there can the bulk moves below reach
@@ -1244,7 +1285,11 @@ class _ContiguousDecoder {
   DecodeStatus _st = DecodeStatus.complete;
 
   DecodeStatus run(MessageVisitor root) {
-    _walk(root, 0);
+    try {
+      _walk(root, 0);
+    } on _Invalidated {
+      return DecodeStatus.invalid;
+    }
     return _st;
   }
 
