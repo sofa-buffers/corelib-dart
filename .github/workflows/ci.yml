@@ -57,16 +57,11 @@ jobs:
       - name: Run tests (shared vectors + streaming + malformed + truncation)
         run: dart test
 
-      # `bench --smoke` runs every workload exactly once rather than for a
-      # second each: this step proves the entrypoints run on this SDK, and
-      # `dart test` above already matches both tools' output against
-      # BENCH_SPEC's grammar. Nothing is measured here -- CI does not run the
-      # benchmarks, which are produced by hand on a quiet machine (BENCH_SPEC).
-      - name: Sanity-run the example and benchmarks (debug — JIT)
-        run: |
-          dart run example/person.dart
-          dart run bench/bench.dart --smoke
-          dart run bench/perf.dart
+      # The README's entry point, run on every SDK in the matrix: it exercises
+      # the generated-object layer end to end (§6.1) and is the one executable
+      # this repo ships that is not a benchmark tool.
+      - name: Sanity-run the example (debug — JIT)
+        run: dart run example/person.dart
 
       # §12.1 step 4 wants *both* configurations built. Everything above runs on
       # the JIT VM, which for Dart is the debug configuration; the release
