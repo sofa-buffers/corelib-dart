@@ -25,31 +25,27 @@ import 'package:test/test.dart';
 /// slots, bit-exactly, across arbitrary chunk boundaries — is asserted directly.
 void main() {
   group('#43 — a streamed fixlen array is allocated once', () {
-    test(
-      '24 MiB of fp64 elements decode under a $_capMiB MiB heap cap',
-      () {
-        final script = File(_supportScript);
-        expect(
-          script.existsSync(),
-          isTrue,
-          reason: 'run `dart test` from the package root ($_supportScript)',
-        );
-        final r = Process.runSync(Platform.resolvedExecutable, [
-          '--old_gen_heap_size=$_capMiB',
-          'run',
-          _supportScript,
-        ]);
-        expect(
-          r.exitCode,
-          0,
-          reason:
-              'the payload was staged twice — heap cap $_capMiB MiB, payload '
-              '24 MiB\nstdout: ${r.stdout}\nstderr: ${r.stderr}',
-        );
-        expect((r.stdout as String).trim(), 'ok');
-      },
-      timeout: const Timeout(Duration(minutes: 2)),
-    );
+    test('24 MiB of fp64 elements decode under a $_capMiB MiB heap cap', () {
+      final script = File(_supportScript);
+      expect(
+        script.existsSync(),
+        isTrue,
+        reason: 'run `dart test` from the package root ($_supportScript)',
+      );
+      final r = Process.runSync(Platform.resolvedExecutable, [
+        '--old_gen_heap_size=$_capMiB',
+        'run',
+        _supportScript,
+      ]);
+      expect(
+        r.exitCode,
+        0,
+        reason:
+            'the payload was staged twice — heap cap $_capMiB MiB, payload '
+            '24 MiB\nstdout: ${r.stdout}\nstderr: ${r.stderr}',
+      );
+      expect((r.stdout as String).trim(), 'ok');
+    }, timeout: const Timeout(Duration(minutes: 2)));
 
     // The one-shot path is the reference: same bytes, same elements, whatever
     // the chunking. Staging in the result list must not change a single bit —
