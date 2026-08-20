@@ -1,0 +1,40 @@
+name: "Version consistency"
+
+# The git tag is the source of truth for the version: the package manifest must
+# match it. Dart has exactly one manifest, pubspec.yaml, and pub.dev refuses a
+# publish whose version is already taken — so a tag that disagrees with the
+# manifest is caught here rather than at publish time.
+#
+# Tags only: the comparison is only meaningful when there is a tag to compare
+# against. Between releases pubspec.yaml may legitimately sit ahead of the
+# newest tag, so running this on every push and pull request would produce
+# noise, not signal — and cost a runner slot per run.
+on:
+  push:
+    tags: [ 'v*' ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check-versions:
+    runs-on: ubuntu-latest
+    # A hung step must fail fast and name itself: the account's Actions
+    # concurrency is 20, and one wedged job is a slot everyone else waits on.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check pubspec.yaml against the tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref_version=${GITHUB_REF_NAME#v}
+          # `version:` at column 0 — the only top-level key of that name; the
+          # SDK constraint under `environment:` is indented and cannot match.
+          version=$(grep -oP '^version:\s*\K\S+' pubspec.yaml | head -1)
+          [[ -n "$version" ]] || { echo "::error::pubspec.yaml: no top-level version found"; exit 1; }
+          [[ "$version" == "$ref_version" ]] \
+            || { echo "::error::pubspec.yaml version: '$version' != tag '$ref_version'"; exit 1; }
+          echo "pubspec.yaml version $version matches tag ${GITHUB_REF_NAME}"

@@ -17,6 +17,9 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # A hung step must fail fast and name itself: the account's Actions
+    # concurrency is 20, and one wedged job is a slot everyone else waits on.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: dart-lang/setup-dart@v1
@@ -45,6 +48,9 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    # A hung step must fail fast and name itself: the account's Actions
+    # concurrency is 20, and one wedged job is a slot everyone else waits on.
+    timeout-minutes: 10
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
