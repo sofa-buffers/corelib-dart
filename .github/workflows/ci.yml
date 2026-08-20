@@ -33,12 +33,10 @@ jobs:
       - run: dart pub get
       - run: dart format --output=none --set-exit-if-changed .
       # Dart has no compile step short of AOT, so `dart analyze` is this
-      # repository's build gate. It used to run inside the matrix below, where
-      # an analysis error — which is SDK-independent for the versions we
-      # support — was reported five times for one cause, and each of the five
-      # legs had already paid for a checkout and a resolve to say it. It runs
-      # once here instead, and `build-test` waits on this job, so a repository
-      # that does not analyse never reaches the test matrix at all.
+      # repository's build gate: one analyse on stable in front of five SDK
+      # legs, so a tree that does not analyse never burns the matrix. It is a
+      # gate copy, not the only run -- the matrix analyses per SDK as well,
+      # because the analyser ships with the SDK and its diagnostics differ.
       - run: dart analyze --fatal-infos
 
   build-test:
@@ -67,6 +65,15 @@ jobs:
 
       - name: Install dependencies
         run: dart pub get
+
+      # `dart analyze` runs per SDK, not once in the gate: the analyser ships
+      # with the SDK and its diagnostics differ between versions, and
+      # --fatal-infos makes every info fatal. Running it on stable alone would
+      # let code through that the 3.8 analyser rejects. The format job keeps a
+      # copy on stable as a cheap gate, so a tree that does not analyse still
+      # never reaches these five legs.
+      - name: Analyze (build — no errors allowed)
+        run: dart analyze --fatal-infos
 
       - name: Run tests (shared vectors + streaming + malformed + truncation)
         run: dart test
