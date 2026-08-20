@@ -118,7 +118,14 @@ jobs:
 
   coverage:
     runs-on: ubuntu-latest
-    needs: build-test
+    # Deliberately NOT `needs: build-test`. This job answers a different
+    # question -- how much of the library the suite reaches -- and runs its own
+    # `dart test --coverage` to answer it, so it needs nothing the matrix
+    # produces. Waiting for five SDK legs cost about 78 seconds of wall clock on
+    # every green push, to skip a 75-second job on the ~3% that are red.
+    # It still waits for `format`, like everything else: a tree that does not
+    # analyse is not worth measuring.
+    needs: [format]
     # A hung step must fail fast and name itself: the account's Actions
     # concurrency is 20, and one wedged job is a slot everyone else waits on.
     timeout-minutes: 10
