@@ -15,41 +15,37 @@
 
 `corelib-dart` is the high-speed Dart implementation of SofaBuffers. It encodes and
 decodes the exact same bytes as every other port and is validated against the
-shared, language-agnostic conformance vectors. What makes it worth reaching for:
+shared, language-agnostic conformance vectors.
 
 - **Truly streaming, both directions.** Encode into a buffer far smaller than the
   message (a flush callback drains it) and decode by feeding **arbitrarily small
   chunks** — one byte at a time if you like. The decoder's state machine suspends
-  and resumes at any byte boundary, so an object larger than memory still
-  assembles field-by-field.
+  and resumes at any byte boundary.
 - **Fast, allocation-light hot path.** Scalars, headers and array elements are
   written straight into a caller-owned `Uint8List`; the encoder can be reset and
   reused across messages with zero per-message allocation. Integers use
-  variable-length varints so common small values cost a single byte.
+  variable-length varints, so common small values cost a single byte.
 - **Cross-language compatible.** Byte-for-byte identical to `corelib-rs`,
   `corelib-c-cpp`, `corelib-go`, and the rest of the family.
-- **Dead-simple generated objects.** The streaming primitives are enough to build
-  a thin generated-object layer with one-line `encode()` / `decode()`
-  helpers that *also* stream — see [`example/person.dart`](example/person.dart).
+- **Dead-simple generated objects.** A thin layer with one-line `encode()` /
+  `decode()` helpers that *also* stream — see
+  [`example/person.dart`](example/person.dart).
 - **No runtime dependencies.** Pure Dart, `dart:core` + `dart:typed_data` only.
 
-The public surface lives under the fixed `sofab` namespace (CORELIB_PLAN §6);
-import it aliased.
+The public surface lives under the fixed `sofab` namespace; import it aliased.
 
 ### Requirements
 
 - **Dart SDK ≥ 3.8.0** — the floor `pubspec.yaml` enforces
-  (`environment: sdk: ^3.8.0`) and the lowest leg of the CI matrix, so it is
-  also the oldest SDK this port is proven on.
+  (`environment: sdk: ^3.8.0`) and the lowest leg of the CI matrix.
 - Install:
 
   ```console
   dart pub add sofabuffers
   ```
 
-  > The package is `SofaBuffers` conceptually, but pub.dev requires
-  > lowercase-with-underscores names, so the published name is **`sofabuffers`**.
-  > You install `sofabuffers` and import it as `sofab`.
+  > pub.dev requires lowercase-with-underscores names, so the published
+  > package is **`sofabuffers`**; you import it as `sofab`.
 
 ### Dependencies
 
@@ -101,20 +97,23 @@ final status = sofab.Decoder.decode(bytes, MyVisitor());
 assert(status == sofab.DecodeStatus.complete);
 ```
 
+Dart's only floating type is `double`, so an `fp32` **NaN** arrives as raw bits:
+`onFp32Bits(id, bits)` carries the 32-bit IEEE-754 pattern, and its default
+widens to `onFp32`. Re-emit those bits with `Encoder.writeFp32Bits` — widening
+quiets a signaling NaN, and the wire bytes must round-trip unchanged
+(CORELIB_PLAN §6.5). An `fp32` **array** needs nothing extra: it is delivered as
+a `Float32List` and `writeFp32Array` re-emits that list's bytes verbatim.
+
 ### Sequences: lazy framing
 
 A sequence-typed **field** whose value equals its declared default is *omitted*,
-not written as an empty `begin`/`end` frame (MESSAGE_SPEC §2). Whether that is
-the case depends on what the children turn out to be, while the header has to go
-out before them — so `beginSequenceLazy` **holds the header back** and the first
-field write commits it. Nothing is ever buffered: the held-back ids are encoder
-state, so a tiny output buffer still produces the one-shot bytes.
+not written as an empty `begin`/`end` frame (MESSAGE_SPEC §2). `beginSequenceLazy`
+**holds the header back** and the first field write commits it. Nothing is ever
+buffered — the held-back ids are encoder state, so a tiny output buffer still
+produces the one-shot bytes.
 
-The hold-back is **unbounded** — it reaches the format's full `MAX_DEPTH` of 255,
-growing on demand and allocating nothing until the first sequence is opened — so
-this port's output is canonical at *every* nesting level. (A fixed window with
-eager framing beyond it is an allowance for heap-free profiles only;
-CORELIB_PLAN §6, "How deep the hold-back reaches".)
+The hold-back is **unbounded**: it reaches the format's full `MAX_DEPTH` of 255,
+growing on demand and allocating nothing until the first sequence is opened.
 
 ```dart
 sofab.Encoder.encodeToBytes((e) {
@@ -146,8 +145,7 @@ value:
 
 `endSequenceKeep` is the safe default when in doubt: using it where
 `endSequence` would do costs one non-canonical empty frame that every decoder
-normalizes away, while the reverse silently changes a decoded array's **length**
-(element presence is what carries it — MESSAGE_SPEC §5.1).
+normalizes away, while the reverse silently changes a decoded array's **length**.
 
 ### Streaming a message larger than the buffer
 
@@ -164,23 +162,21 @@ enc.flush();
 ```
 
 `sofab.minOutputBuffer` is how small "smaller" may get: this port's
-`MIN_OUTPUT_BUFFER` (CORELIB_PLAN §5.1) is **1**, because the encoder splits
-every atomic unit across a flush and reserves nothing contiguously. A buffer
-handed over **with a sink** must leave at least that much room — `buffer.length -
-offset >= sofab.minOutputBuffer` — and one byte less is rejected right where it
-is handed over, with `SofabException(invalidArgument, …)`, by the constructor or
-by `installBuffer`. See [Memory handling](#memory-handling).
+`MIN_OUTPUT_BUFFER` is **1**. A buffer handed over **with a sink** must leave at
+least that much room — `buffer.length - offset >= sofab.minOutputBuffer` — and
+one byte less is rejected right where it is handed over, with
+`SofabException(invalidArgument, …)`, by the constructor or by `installBuffer`.
+See [Memory handling](#memory-handling).
 
 #### Copying vs. taking sinks, and where the cursor resumes
 
 What the callback does before it returns says which of the two handover shapes
-is in effect (CORELIB_PLAN §5.1):
+is in effect:
 
 - **Returning without installing anything** means the sink **copied** the bytes.
   The active buffer stays active and the encoder refills it from offset **0**.
 - A sink that **takes** the buffer — queues it for an async write, hands it to a
-  transport — **must** call `installBuffer` before returning, or the encoder
-  would keep writing into storage the transport now owns.
+  transport — **must** call `installBuffer` before returning.
 
 The start offset belongs to the *installation*, not to the buffer. Each
 `installBuffer(buf, offset: n)` starts writing at byte `n` of `buf`, and that
@@ -206,12 +202,9 @@ re-armed per packet.
 
 ### A caller-supplied buffer with no sink
 
-The other half of the §5.1 contract: hand over a buffer and *no* flush
-callback. Nothing can be flushed, so the buffer either holds the whole message
-— `written` gives it back as a view, no copy — or the write that runs out of
-room throws `BufferFull`. This is the shape for a caller that sized its buffer
-from a schema's `MAX_SIZE`, and for anyone who wants "here is my buffer, tell me
-if it is too small" rather than a sink.
+Hand over a buffer and *no* flush callback. Nothing can be flushed, so the
+buffer either holds the whole message — `written` gives it back as a view, no
+copy — or the write that runs out of room throws `BufferFull`.
 
 ```dart
 final buf = Uint8List(64);                        // sized from the schema
@@ -221,10 +214,9 @@ enc.flush();                                      // no sink: a no-op
 socket.add(enc.written);                          // exactly the message bytes
 ```
 
-No minimum applies to a sink-less buffer — a minimum is a *streaming*
-precondition and nothing streams here — so a two-byte message encodes into a
+No minimum applies to a sink-less buffer: a two-byte message encodes into a
 two-byte buffer, and one byte less reports `BufferFull` instead of silently
-dropping the tail. `installBuffer` works in this mode too: take the bytes out of
+dropping the tail. `installBuffer` works in this mode too — take the bytes out of
 the buffer you own, then install the next one.
 
 ### OStream (output-stream / writer sink)
@@ -244,14 +236,11 @@ await file.close();
 ### IStream (input-stream / push-feed wrapper)
 
 The decoder *is* the istream wrapper: push bytes as they arrive; each `feed`
-returns the outcome so far. Suspending at any byte boundary is what the state
-machine guarantees, not what it charges you for: whatever a chunk *does* hold
-whole is taken whole — a varint is lifted out of it rather than accumulated a
-byte at a time, a run of integer array elements is decoded 64 bits at a time by
-the same reader the one-shot path uses, and an opaque payload is moved in one
-copy — so feeding a message in a few large chunks costs close to what decoding
-it in one piece costs, and only a field genuinely straddling a boundary falls
-back to the per-byte path.
+returns the outcome so far. Whatever a chunk holds whole is taken whole — a
+varint is lifted out of it rather than accumulated a byte at a time, a run of
+integer array elements is decoded 64 bits at a time by the same reader the
+one-shot path uses, and an opaque payload is moved in one copy. Only a field
+genuinely straddling a boundary falls back to the per-byte path.
 
 ```dart
 final dec = sofab.Decoder(MyVisitor());
@@ -264,14 +253,11 @@ await for (final chunk in socket) {
 
 ### Generator (generated objects — the common case)
 
-Generated objects hide ids, varints and buffers entirely, offering one-line
-`encode()` / `decode()` **and** a streaming path. Both spellings come from the
-closed name set of CORELIB_PLAN §6.1.1 — `encode()` / `decode(bytes)` for the
-one-shot convenience, `serialize(ostream)` / `deserialize(istream)` for the
-streaming pair beneath it, `decoder()` for the chunk reader — and the port adds
-no second name for either pair, so the surface reads the same in every language.
-See [`example/person.dart`](example/person.dart) for a complete, runnable
-illustration:
+Generated objects hide ids, varints and buffers entirely: `encode()` /
+`decode(bytes)` for the one-shot convenience, `serialize(ostream)` /
+`deserialize(istream)` for the streaming pair beneath it, and `decoder()` for
+the chunk reader. See [`example/person.dart`](example/person.dart) for a
+complete, runnable illustration:
 
 ```dart
 final ada = Person()
@@ -294,9 +280,8 @@ final person = dec.value;                   // assembled incrementally
 
 #### What generated code builds on
 
-Four pieces of that layer live here rather than in every generated file,
-because none of them knows a schema: what varies per message arrives as an
-argument or a type parameter.
+Four pieces of that layer live here rather than in every generated file — none
+of them knows a schema.
 
 | symbol | what it is for |
 |---|---|
@@ -325,10 +310,8 @@ class _Scope extends sofab.VisitorBase {
 ```
 
 `MessageVisitor`'s own defaults are the opposite — read everything, descend
-every sequence — because a *hand-written* visitor wants to see the whole
-message. A schema-bound one binds only what its schema declares, and a payload
-it does not bind is a skipped field (MESSAGE_SPEC §7.3), so it is never
-UTF-8-validated (CORELIB_PLAN §6.4).
+every sequence. A payload a visitor does not bind is a skipped field, and a
+skipped field is never UTF-8-validated.
 
 ## Memory handling
 
@@ -342,51 +325,42 @@ differently, so they get a row each.
 | Input buffer, one-shot decode (`Decoder.decode`) | Caller | Must outlive the call **and every value kept from it**: delivered `blob` / `onStringBytes` values are zero-copy views into your buffer. Copy to retain. |
 | Input chunk, streaming decode (`Decoder.feed`) | Caller | Reusable the moment `feed` returns. Nothing delivered aliases the chunk. |
 
-- **The library allocates no output buffer** (CORELIB_PLAN §5.1). Every buffer
-  the encoder writes into is one you handed over: `buffer:` is a **required**
-  argument of the streaming constructor, and the only argument of
-  `Encoder.overBuffer`. There is no size-only form that would allocate one for
-  you — that would be a second ownership model, and §5.1 has just one. The layer
-  that knows how big a message can get is the layer that allocates: normally the
-  generated object, sizing from the schema (`MAX_SIZE` + `overBuffer` when the
-  schema is bounded, a small scratch buffer + a sink when it is not) — see
-  [`example/person.dart`](example/person.dart). `Encoder.encodeToBytes` is that
-  layer in miniature: it allocates its scratch buffer once, explicitly, then
-  drives the encoder like any other caller.
-- **Output buffer (encoding).** You pass a `Uint8List`; the
-  library never grows it. When it fills, the `FlushCallback` receives a
-  `sublistView` of the written bytes and the encoder continues into the same
-  buffer (or a new one you install). A buffer installed from inside the callback
-  wins over the default rewind, so its `offset` — the framing-header room — is
-  honoured on every installation, not just the first. If the buffer fills with no
-  room after a flush, `writeX` throws `BufferFull` rather than overflowing.
+- **The library allocates no output buffer.** Every buffer the encoder writes
+  into is one you handed over: `buffer:` is a **required** argument of the
+  streaming constructor, and the only argument of `Encoder.overBuffer`. There is
+  no size-only form that allocates one for you. The layer that knows how big a
+  message can get is the layer that allocates — normally the generated object,
+  sizing from the schema (`MAX_SIZE` + `overBuffer` when the schema is bounded,
+  a small scratch buffer + a sink when it is not); see
+  [`example/person.dart`](example/person.dart).
+- **Output buffer (encoding).** You pass a `Uint8List`; the library never grows
+  it. When it fills, the `FlushCallback` receives a `sublistView` of the written
+  bytes and the encoder continues into the same buffer (or a new one you
+  install). A buffer installed from inside the callback wins over the default
+  rewind, so its `offset` — the framing-header room — is honoured on every
+  installation, not just the first. If the buffer fills with no room after a
+  flush, `writeX` throws `BufferFull` rather than overflowing.
   `Encoder.reset()` rewinds it for the next message.
-- **`MIN_OUTPUT_BUFFER` = `sofab.minOutputBuffer` = 1.** The smallest buffer this
-  port accepts for *streaming* (CORELIB_PLAN §5.1). It is 1 because the encoder
-  splits every atomic unit — a field header, a `fixlen_word`, an
-  `element_count`, a scalar or array-element varint, an `fp32`/`fp64` element —
-  across a flush, so it never needs a contiguous reservation; a one-byte
-  streaming buffer produces byte-identical output to the one-shot path. It binds
-  a buffer installed **with a flush sink**, and only such a buffer: at
-  construction and at every mid-stream `installBuffer`, `buffer.length - offset`
-  must be at least `minOutputBuffer`, and a shortfall is rejected there with
-  `SofabException(invalidArgument, …)` — the same mechanism as an out-of-range
-  `offset`, never partway through a message. A buffer installed **without** a
-  sink is subject to no minimum (next bullet).
+- **`MIN_OUTPUT_BUFFER` = `sofab.minOutputBuffer` = 1.** The smallest buffer
+  this port accepts for *streaming*, and a one-byte streaming buffer produces
+  byte-identical output to the one-shot path. It binds a buffer installed **with
+  a flush sink**, and only such a buffer: at construction and at every
+  mid-stream `installBuffer`, `buffer.length - offset` must be at least
+  `minOutputBuffer`, and a shortfall is rejected there with
+  `SofabException(invalidArgument, …)`, never partway through a message. A
+  buffer installed **without** a sink is subject to no minimum.
 - **Output buffer with no sink (`Encoder.overBuffer`).** The buffer is the only
   room there is: no flush can occur, nothing is handed downstream and nothing is
-  ever dropped. A write that does not fit throws `BufferFull` — the encoder
-  never reports partial output as complete — and `flush()` is a no-op that
-  leaves the bytes where they are. `written` is a zero-copy view of the message
-  inside your buffer, starting at the installation's `offset`, valid until the
-  next write.
-- **Input buffer, one-shot decode — zero-copy** (CORELIB_PLAN §9.6). You own the
-  buffer you pass to `Decoder.decode`, and the decoder borrows it: `onBlob` and
-  `onStringBytes` receive a `Uint8List` **view** onto your bytes, not a copy. The
-  view is valid exactly as long as the buffer is alive and unmodified — a value
-  kept past the visitor call moves with any later write into that buffer, so
-  copy it (`Uint8List.fromList(value)`) to retain it. `onString` is the
-  exception in the other direction: transcoding to a Dart `String` always
+  ever dropped. A write that does not fit throws `BufferFull`, and `flush()` is
+  a no-op that leaves the bytes where they are. `written` is a zero-copy view of
+  the message inside your buffer, starting at the installation's `offset`, valid
+  until the next write.
+- **Input buffer, one-shot decode — zero-copy.** You own the buffer you pass to
+  `Decoder.decode`, and the decoder borrows it: `onBlob` and `onStringBytes`
+  receive a `Uint8List` **view** onto your bytes, not a copy. The view is valid
+  exactly as long as the buffer is alive and unmodified, so copy it
+  (`Uint8List.fromList(value)`) to keep it past the visitor call. `onString` is
+  the exception in the other direction: transcoding to a Dart `String` always
   copies, so that value is yours unconditionally. Passing a plain `List<int>`
   that is not a `Uint8List` copies it into one up front — the views then point
   into that private copy, and your list is untouched. Only `blob` and
@@ -395,39 +369,35 @@ differently, so they get a row each.
 - **Input chunk, streaming decode — copied out.** You own the chunks you feed
   and may reuse or overwrite each one the moment `feed` returns: a payload is
   reassembled into a library-owned carry buffer, so no delivered value ever
-  aliases a fed chunk, however the chunk boundaries fall. The hot path allocates
-  nothing for scalars — an `fp32`/`fp64` payload stages in a reusable slot the
-  decoder owns for its lifetime — so that per-field carry buffer, for a `string`
-  or `blob`, is the only library-owned heap. Values are delivered to your visitor
-  at completion; copy them out if you need them past the callback. Feeding a
-  plain `List<int>` that is not a `Uint8List` copies the chunk once up front,
-  the same way `Decoder.decode` does.
+  aliases a fed chunk. The hot path allocates nothing for scalars — an
+  `fp32`/`fp64` payload stages in a reusable slot the decoder owns for its
+  lifetime — so that per-field carry buffer, for a `string` or `blob`, is the
+  only library-owned heap. Values are delivered to your visitor at completion;
+  copy them out if you need them past the callback. Feeding a plain `List<int>`
+  that is not a `Uint8List` copies the chunk once up front, the same way
+  `Decoder.decode` does.
 - **A streamed array is never staged twice.** An `array<fp32>`/`array<fp64>`
   payload *is* the little-endian byte image of the `Float32List`/`Float64List`
   it decodes into, so a chunked decode has no carry buffer for it at all: the
-  arriving bytes are written straight into the list that will be delivered.
-  Peak memory is one array, whatever the chunking, and the elements are never
-  copied or converted a second time — the streamed decode costs what the
-  one-shot decode costs. Payload bytes (this and `string`/`blob` alike) are
-  moved a chunk-run at a time rather than byte by byte, so a large payload
-  arriving in reasonable chunks is a bulk copy, not a per-byte loop.
+  arriving bytes are written straight into the list that will be delivered. Peak
+  memory is one array, whatever the chunking. Payload bytes (this and
+  `string`/`blob` alike) are moved a chunk-run at a time rather than byte by
+  byte.
 - **Array counts are never trusted for sizing.** On the one-shot surface
   (`Decoder.decode`) the whole message is in hand, so an `element_count` larger
-  than the bytes that remain is already refuted by the input: the result is
-  sized from what those bytes can actually hold, and the decode reports
-  `incomplete`. A short message claiming `ARRAY_MAX` elements therefore costs an
-  allocation on the order of the message, not of the count. When the input
-  arrives in chunks the count cannot be refuted that way — there set
+  than the bytes that remain is refuted by the input: the result is sized from
+  what those bytes can actually hold, and the decode reports `incomplete`. A
+  short message claiming `ARRAY_MAX` elements therefore costs an allocation on
+  the order of the message, not of the count. When the input arrives in chunks
+  the count cannot be refuted that way — there set
   `DecoderLimits(maxArrayCount: …)`, which is enforced at the count word,
-  *before* the allocation it prevents (CORELIB_PLAN §6.2.1), and reports
-  `limitExceeded`.
-- **`DecoderLimits` is the *unbounded*-field backstop, and only that.** Its three
-  caps are deployment policy, not schema validity: they protect the receiver from
-  a field whose schema declares no `count:`/`maxlen:`, where the *sender* would
-  otherwise dictate the allocation. §6.2.1 keeps them off the fields the schema
-  already bounds — there the schema governs and a breach is `invalid`, never
-  `limitExceeded`. Only the schema knows which fields those are, so a
-  schema-bound (generated) consumer says so:
+  *before* the allocation it prevents, and reports `limitExceeded`.
+- **`DecoderLimits` is the *unbounded*-field backstop, and only that.** Its
+  three caps are deployment policy, not schema validity: they apply to a field
+  whose schema declares no `count:`/`maxlen:`, and never to a field the schema
+  already bounds — there a breach is `invalid`, never `limitExceeded`. Only the
+  schema knows which fields those are, so a schema-bound (generated) consumer
+  says so:
 
   ```dart
   @override
@@ -439,14 +409,14 @@ differently, so they get a row each.
   ```
 
   For a field that answers, the declared bound *replaces* the cap: a wire
-  count/length past it is `invalid` (decided at the count/length word, before the
-  allocation), and one within it decodes however tight the cap is.
+  count/length past it is `invalid` (decided at the count/length word, before
+  the allocation), and one within it decodes however tight the cap is.
   `kind`/`subtype` are what the **wire** declares — return `null` for one the
-  field does not declare, since that is a MESSAGE_SPEC §7.3 skip and no schema
-  bound covers it. Both hooks are asked at most once per field and only once a
-  cap has actually been exceeded, so a decode with no `DecoderLimits` never calls
-  them. `onFixlenHeader`/`onArrayBegin` fire *before* the cap is weighed either
-  way, so a consumer that enforces its bound there always sees the header.
+  field does not declare, since that is a skipped field and no schema bound
+  covers it. Both hooks are asked at most once per field and only once a cap has
+  actually been exceeded, so a decode with no `DecoderLimits` never calls them.
+  `onFixlenHeader`/`onArrayBegin` fire *before* the cap is weighed either way,
+  so a consumer that enforces its bound there always sees the header.
 
 ## Build & test
 
@@ -459,20 +429,15 @@ bash bench/run_bench.sh         # release build: `dart compile exe` (AOT) + run
 ```
 
 The test suite reads the shared conformance vectors from
-[`assets/test_vectors.json`](assets/test_vectors.json) (generated by, and copied
-verbatim from, `corelib-c-cpp`) and runs encode, decode, chunked-encode,
-chunked-decode, skip-ids, roundtrip, malformed-input, truncation and invalid-UTF-8
-checks. CI enforces the >90% line-coverage bar (CORELIB_PLAN §7.3); the rendered
-coverage badge is generated from the lcov report and published to GitHub Pages by
-the docs workflow.
+[`assets/test_vectors.json`](assets/test_vectors.json) (copied verbatim from
+`corelib-c-cpp`) and runs encode, decode, chunked-encode, chunked-decode,
+skip-ids, roundtrip, malformed-input, truncation and invalid-UTF-8 checks. CI
+enforces a >90% line-coverage bar.
 
-Both configurations are built (CORELIB_PLAN §12.1). For Dart, `dart run` and
-`dart test` *are* the debug (JIT) configuration; the release configuration is
-AOT, i.e. `dart compile exe`. Every matrix leg runs the JIT steps above, and the
-`stable` leg additionally runs `bench/run_bench.sh` and `bench/run_callgrind.sh`
-— between them they AOT-compile every entrypoint this repository ships and run
-the result, so an AOT-only failure cannot ship unnoticed. Compiled output lands
-in `build/`, which is git-ignored and must never be committed.
+Both configurations are built: `dart run` / `dart test` are the debug (JIT)
+configuration, and the release configuration is AOT — `dart compile exe`, which
+CI runs on `example/person.dart`. Compiled output lands in `build/`, which is
+git-ignored.
 
 ## Benchmarks
 
@@ -488,13 +453,9 @@ dart run bench/perf.dart         # per-op cost for the 170-byte perf message
 ```
 
 > **Run the benchmarks AOT-compiled** (`bench/run_bench.sh` uses
-> `dart compile exe`) for representative numbers — it removes JIT warmup and is
+> `dart compile exe`) for representative numbers: it removes JIT warmup and is
 > the fair comparison to the compiled ports (C/C++/Rust/Go), which also run
-> native. Over a one-second steady-state loop the two configurations are closer
-> than that framing suggests — they share an optimizing backend, and the encode
-> rows land within run-to-run noise of each other, with AOT ahead by roughly
-> half again on the decode rows. AOT's real advantage here is that there is no
-> warmup to get wrong. `run_callgrind.sh` already builds an AOT target.
+> native. `run_callgrind.sh` already builds an AOT target.
 
 - **`bench`** — practical throughput on *this* machine, in MB/s, for encode and
   decode of BENCH_SPEC's four datasets: `u64 array (1000)`, the small `typical`
@@ -503,24 +464,21 @@ dart run bench/perf.dart         # per-op cost for the 170-byte perf message
   need reading with care:
   - the **`blob 1MB`** rows are bandwidth-bound — five bytes of that message are
     metadata and a million are payload — so their MB/s is this machine's
-    `memcpy` rather than a statement about the corelib. What they are for is the
-    *gap* between `one-shot` (one contiguous write into a caller buffer, no
-    sink) and `streaming` (the same bytes through ~245 flushes of a 4096-byte
-    buffer): that gap is the divisible-run path, and it is legible as
+    `memcpy`. What they are for is the *gap* between `one-shot` (one contiguous
+    write into a caller buffer, no sink) and `streaming` (the same bytes through
+    ~245 flushes of a 4096-byte buffer), and that gap is legible as
     instructions, not as MB/s — read it in `run_callgrind.sh`. There is no
-    `blob 1MB passthrough` row because this port implements no pass-through:
-    every `string`/`blob` run goes through the output buffer.
+    `blob 1MB passthrough` row: this port implements no pass-through, so every
+    `string`/`blob` run goes through the output buffer.
   - **`decode: composite skip-all`** refuses every field at header time
-    (`shouldRead` → `false`, `onSequenceStart` → `null`), which is the path a
-    router or filter runs in production. Its distance from `decode: composite`
-    is what not-decoding is worth.
+    (`shouldRead` → `false`, `onSequenceStart` → `null`). Its distance from
+    `decode: composite` is what not-decoding is worth.
 - **`perf`** — per-op cost of serialize/deserialize. The Dart VM exposes no
   hardware cycle counter, so `cycles/op` is reported as unavailable and CPU
-  time/op is the machine-neutral-ish signal. That time comes from libc's
-  `clock()` through `dart:ffi` — process CPU time at microsecond resolution,
-  the same clock the C and C++ ports use.
-- **`run_callgrind.sh`** — instructions-per-op under Callgrind: deterministic and
-  machine-independent, the right signal for a CI performance-regression gate. It
-  uses the **two-rep subtraction** method (Dart has no stable per-workload native
-  symbol to toggle), running an AOT-compiled target at two rep counts and
-  subtracting to cancel startup and setup cost.
+  time/op is the machine-neutral signal. That time comes from libc's `clock()`
+  through `dart:ffi` — process CPU time at microsecond resolution, the same
+  clock the C and C++ ports use.
+- **`run_callgrind.sh`** — instructions-per-op under Callgrind: deterministic
+  and machine-independent. It uses the **two-rep subtraction** method (Dart has
+  no stable per-workload native symbol to toggle), running an AOT-compiled
+  target at two rep counts and subtracting to cancel startup and setup cost.
