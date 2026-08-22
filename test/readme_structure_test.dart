@@ -27,7 +27,11 @@
 //            fp32 sNaN quiets it, and the plan makes the raw-wire-bytes
 //            channel mandatory for such a port. A reader who never learns the
 //            channel exists writes a bit-inexact round trip.
-//   8. §6.1.1 no spelling outside the closed generated-object name set.
+//   8. §6.1.1 no spelling outside the closed generated-object name set. This
+//            widens `generated_surface_test.dart`, which already rejects the
+//            forbidden spellings in a `.name` or `` `name` `` position and
+//            checks that the README advertises the one-shot pair by its §6.1.1
+//            names; here any occurrence at all is rejected.
 //   9.       every in-document link resolves to a heading.
 //
 // **§6.4 is deliberately NOT checked here.** The strict-UTF-8 knob
