@@ -101,6 +101,13 @@ final status = sofab.Decoder.decode(bytes, MyVisitor());
 assert(status == sofab.DecodeStatus.complete);
 ```
 
+Dart's only floating type is `double`, so an `fp32` **NaN** arrives as raw bits:
+`onFp32Bits(id, bits)` carries the 32-bit IEEE-754 pattern, and its default
+widens to `onFp32`. Re-emit those bits with `Encoder.writeFp32Bits` — widening
+quiets a signaling NaN, and the wire bytes must round-trip unchanged
+(CORELIB_PLAN §6.5). An `fp32` **array** needs nothing extra: it is delivered as
+a `Float32List` and `writeFp32Array` re-emits that list's bytes verbatim.
+
 ### Sequences: lazy framing
 
 A sequence-typed **field** whose value equals its declared default is *omitted*,
