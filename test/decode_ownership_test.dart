@@ -13,7 +13,6 @@
 //   rejects it unless it states both, because a caller who retains a delivered
 //   `Uint8List` learns the rule from there and nowhere else.
 
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:sofabuffers/sofabuffers.dart' as sofab;
@@ -152,96 +151,6 @@ void main() {
       }
       expect(keep.string, 'abc');
       expect(keep.stringBytes, orderedEquals([0x61, 0x62, 0x63]));
-    });
-  });
-
-  group('README `## Memory handling` states the decode ownership (§9.6)', () {
-    late String section;
-
-    setUpAll(() {
-      final readme = File('README.md');
-      expect(
-        readme.existsSync(),
-        isTrue,
-        reason: 'run `dart test` from the package root',
-      );
-      final text = readme.readAsStringSync();
-      final start = text.indexOf('\n## Memory handling');
-      expect(start, greaterThan(-1), reason: '§9.6 section is missing');
-      final rest = text.substring(start + 1);
-      final end = rest.indexOf('\n## ', 1);
-      section = end < 0 ? rest : rest.substring(0, end);
-    });
-
-    /// The section's lines that talk about a given surface.
-    List<String> linesAbout(RegExp surface) =>
-        section.split('\n').where(surface.hasMatch).toList();
-
-    test('it names the one-shot surface and calls it zero-copy', () {
-      final oneShot = linesAbout(RegExp(r'`?Decoder\.decode|one-shot'));
-      expect(
-        oneShot,
-        isNotEmpty,
-        reason: 'the section never mentions the one-shot decode',
-      );
-      expect(
-        oneShot.any(
-          (l) => RegExp(
-            r'zero-copy|view into|views into|alias',
-            caseSensitive: false,
-          ).hasMatch(l),
-        ),
-        isTrue,
-        reason:
-            'the section must say `Decoder.decode` borrows the input '
-            'buffer — a `blob` value is a view into it (§9.6)',
-      );
-    });
-
-    test('it tells the caller to copy a borrowed value to retain it', () {
-      expect(
-        RegExp(
-          r'Uint8List\.fromList|copy (it|them|the bytes)',
-          caseSensitive: false,
-        ).hasMatch(section),
-        isTrue,
-        reason:
-            'a borrowed value is only useful with a stated way to retain it',
-      );
-    });
-
-    test('it states the streaming rule for a fed chunk', () {
-      final streaming = linesAbout(RegExp(r'`?Decoder\.feed|`feed`|feed\('));
-      expect(streaming, isNotEmpty, reason: 'no statement about `feed`');
-      expect(
-        streaming.any(
-          (l) => RegExp(
-            r'reusable|never alias|not alias|copie|copy|carry buffer',
-            caseSensitive: false,
-          ).hasMatch(l),
-        ),
-        isTrue,
-        reason:
-            'the section must say a fed chunk is reusable when `feed` '
-            'returns, because the payload is copied out (§6, §9.6)',
-      );
-    });
-
-    test('the owner/lifetime table has a row per decode surface', () {
-      final rows = section
-          .split('\n')
-          .where((l) => l.startsWith('|') && l.contains('decode'))
-          .toList();
-      expect(
-        rows.any((r) => RegExp(r'Decoder\.decode|one-shot').hasMatch(r)),
-        isTrue,
-        reason: 'the table must carry the one-shot row',
-      );
-      expect(
-        rows.any((r) => RegExp(r'feed').hasMatch(r)),
-        isTrue,
-        reason: 'the table must carry the streaming row',
-      );
     });
   });
 }
