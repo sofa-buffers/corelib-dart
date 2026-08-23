@@ -10,9 +10,19 @@ permissions:
   pages: write
   id-token: write
 
+# One Pages deployment at a time -- `group: pages` is a fixed string, not keyed
+# on the ref, because there is one site per repository. Never cancel: this
+# workflow runs on main only, so every run it starts is one whose result is
+# wanted, and it publishes the coverage badge as well as the API docs. The
+# Renovate burst of 2026-07-22 cancelled four runs here; each died a few
+# seconds in, inside `build`, before it had uploaded anything -- which is the
+# timing being lucky, not a guarantee, since the build takes 90-180 s and the
+# `deploy` job sits at the end of it. With `false` GitHub still keeps at most
+# one running and one pending run, so rapid pushes discard the pending one
+# instead of queueing a backlog of deployments.
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
