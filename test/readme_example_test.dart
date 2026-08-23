@@ -73,10 +73,15 @@ void main() {
 
     test('every call it shows exists in example/person.dart', () {
       final readme = File('README.md');
-      expect(readme.existsSync(), isTrue,
-          reason: 'run `dart test` from the package root');
-      final block =
-          _dartBlock(readme.readAsStringSync(), '### Generator (generated objects');
+      expect(
+        readme.existsSync(),
+        isTrue,
+        reason: 'run `dart test` from the package root',
+      );
+      final block = _dartBlock(
+        readme.readAsStringSync(),
+        '### Generator (generated objects',
+      );
       final example = File('example/person.dart').readAsStringSync();
 
       // The member names the snippet reaches for; each must be declared by the
@@ -90,11 +95,18 @@ void main() {
         'value',
       ];
       for (final m in members) {
-        expect(block.contains(m), isTrue,
-            reason: 'the README snippet no longer shows `$m`');
-        expect(example.contains(m), isTrue,
-            reason: 'example/person.dart does not implement `$m`, '
-                'which the README snippet calls');
+        expect(
+          block.contains(m),
+          isTrue,
+          reason: 'the README snippet no longer shows `$m`',
+        );
+        expect(
+          example.contains(m),
+          isTrue,
+          reason:
+              'example/person.dart does not implement `$m`, '
+              'which the README snippet calls',
+        );
       }
     });
   });
