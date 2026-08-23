@@ -6,6 +6,19 @@ on:
   pull_request:
     branches: [main]
 
+# One in-flight run per ref. Without a group, a superseded run is never
+# released: run 32227375208 was superseded twenty minutes after it started and
+# still had to be cancelled by hand 5h40m later, holding a slot against the
+# account's 20 the whole time. (What wedged it was a missing job timeout, fixed
+# since; the group is what frees the slot the moment a run goes stale.)
+# Cancelling is off on main. Nothing in this file is main-only today -- the
+# coverage badge is built one workflow over, in docs.yml -- so that half guards
+# nothing yet; it is here so a badge or coverage job added later inherits it
+# instead of depending on someone remembering to flip this line.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   # `dart format` is not stable across SDK versions -- its line splitting
   # changes -- so running this inside the matrix below asked the repository to
