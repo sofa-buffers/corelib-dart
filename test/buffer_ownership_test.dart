@@ -4,7 +4,7 @@ library;
 import 'dart:mirrors';
 import 'dart:typed_data';
 
-import 'package:sofabuffers/sofabuffers.dart' as sofab;
+import 'package:sofa_buffers_corelib/sofa_buffers_corelib.dart' as sofab;
 import 'package:test/test.dart';
 
 import 'vector_support.dart';

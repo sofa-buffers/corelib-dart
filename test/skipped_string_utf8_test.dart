@@ -1,7 +1,7 @@
 import 'dart:convert' show utf8;
 import 'dart:typed_data';
 
-import 'package:sofabuffers/sofabuffers.dart' as sofab;
+import 'package:sofa_buffers_corelib/sofa_buffers_corelib.dart' as sofab;
 import 'package:test/test.dart';
 
 /// Regression suite for Crucible finding **F-0038** (corelib-dart#22): strict

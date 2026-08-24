@@ -12,7 +12,7 @@
 // contributes nothing to the peak — what the cap measures is decoder state.
 import 'dart:typed_data';
 
-import 'package:sofabuffers/sofabuffers.dart' as sofab;
+import 'package:sofa_buffers_corelib/sofa_buffers_corelib.dart' as sofab;
 
 /// Elements in the streamed array — 3_000_000 × 8 B = 24 MiB of payload.
 const int elemCount = 3000000;

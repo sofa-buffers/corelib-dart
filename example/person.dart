@@ -20,7 +20,7 @@
 
 import 'dart:typed_data';
 
-import 'package:sofabuffers/sofabuffers.dart' as sofab;
+import 'package:sofa_buffers_corelib/sofa_buffers_corelib.dart' as sofab;
 
 class Person {
   String name = '';

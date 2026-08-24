@@ -9,7 +9,7 @@
 /// it aliased:
 ///
 /// ```dart
-/// import 'package:sofabuffers/sofabuffers.dart' as sofab;
+/// import 'package:sofa_buffers_corelib/sofa_buffers_corelib.dart' as sofab;
 ///
 /// // Encode
 /// final bytes = sofab.Encoder.encodeToBytes((e) {
