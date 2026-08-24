@@ -1,6 +1,6 @@
 import 'dart:typed_data';
 
-import 'package:sofabuffers/sofabuffers.dart' as sofab;
+import 'package:sofa_buffers_corelib/sofa_buffers_corelib.dart' as sofab;
 import 'package:test/test.dart';
 
 /// [sofab.MessageVisitor.invalidate] — the consumer's channel for a verdict the

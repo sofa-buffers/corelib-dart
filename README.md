@@ -41,11 +41,13 @@ The public surface lives under the fixed `sofab` namespace; import it aliased.
 - Install:
 
   ```console
-  dart pub add sofabuffers
+  dart pub add sofa_buffers_corelib
   ```
 
-  > pub.dev requires lowercase-with-underscores names, so the published
-  > package is **`sofabuffers`**; you import it as `sofab`.
+  > The published name is **`sofa_buffers_corelib`** — the organization slug
+  > `sofa-buffers` plus `corelib`, in pub.dev's required
+  > lowercase-with-underscores form. You install `sofa_buffers_corelib` and
+  > import it as `sofab`.
 
 ### Dependencies
 
@@ -68,7 +70,7 @@ The public surface lives under the fixed `sofab` namespace; import it aliased.
 Import aliased to the `sofab` namespace:
 
 ```dart
-import 'package:sofabuffers/sofabuffers.dart' as sofab;
+import 'package:sofa_buffers_corelib/sofa_buffers_corelib.dart' as sofab;
 ```
 
 ### Simple encode

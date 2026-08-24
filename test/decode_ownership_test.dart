@@ -15,7 +15,7 @@
 
 import 'dart:typed_data';
 
-import 'package:sofabuffers/sofabuffers.dart' as sofab;
+import 'package:sofa_buffers_corelib/sofa_buffers_corelib.dart' as sofab;
 import 'package:test/test.dart';
 
 /// `blob` field id 1, payload 'abc': header `(1<<3)|2`, `fixlen_word` `(3<<3)|3`.

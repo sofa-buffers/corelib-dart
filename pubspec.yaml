@@ -1,8 +1,10 @@
-# The package is registered as `SofaBuffers` conceptually (CORELIB_PLAN §6), but
-# pub.dev / Dart require lowercase-with-underscores package names, so the pub name
-# is `sofabuffers`. Users import it and alias the public surface to the fixed
-# `sofab` namespace:  import 'package:sofabuffers/sofabuffers.dart' as sofab;
-name: sofabuffers
+# The pub name is the organization slug `sofa-buffers` plus `corelib`,
+# transliterated into pub.dev's required lowercase_with_underscores form — the
+# same derivation every other port satisfies, and byte-identical to corelib-zig's
+# `sofa_buffers_corelib`. Users import it and alias the public surface to the
+# fixed `sofab` namespace:
+#   import 'package:sofa_buffers_corelib/sofa_buffers_corelib.dart' as sofab;
+name: sofa_buffers_corelib
 description: >-
   SofaBuffers — a compact, self-describing, fully streamable binary
   serialization format. High-speed Dart core library (corelib-dart).
