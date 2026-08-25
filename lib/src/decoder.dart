@@ -1577,13 +1577,21 @@ class Decoder {
   /// produces byte-identical visitor calls and the same [DecodeStatus] as
   /// feeding the same bytes through [feed]; use a streaming [Decoder] + [feed]
   /// when the input arrives in chunks.
+  ///
+  /// A `List<int>` that is not a `Uint8List` takes the streaming engine
+  /// instead: the contiguous walker needs the concrete type for its bulk moves,
+  /// and copying the input to get it would be a copy the *wire* sizes, which
+  /// §6.6 forbids the codec. Same visitor calls, same outcome — one engine is
+  /// simply faster on the type it can index directly.
   static DecodeStatus decode(
     List<int> bytes,
     MessageVisitor visitor, {
     DecoderLimits limits = const DecoderLimits(),
   }) {
-    final buf = bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
-    return _ContiguousDecoder(buf, limits).run(visitor);
+    if (bytes is Uint8List) {
+      return _ContiguousDecoder(bytes, limits).run(visitor);
+    }
+    return Decoder(visitor, limits: limits).feed(bytes);
   }
 }
 

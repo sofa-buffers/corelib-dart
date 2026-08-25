@@ -117,7 +117,10 @@ void main() {
       expect(keep2.fp64, orderedEquals([1.5, 2.5]));
     });
 
-    test('a non-Uint8List input is not aliased either', () {
+    test('a non-Uint8List input is not aliased, and not copied either', () {
+      // The contiguous walker needs a `Uint8List`, so this input takes the
+      // streaming engine rather than a copy of itself: §6.6 forbids the codec a
+      // copy the wire sizes, whichever engine wanted it.
       final input = <int>[0x0a, 0x1b, 0x61, 0x62, 0x63];
       final keep = _Keeper();
       expect(sofab.Decoder.decode(input, keep), sofab.DecodeStatus.complete);
