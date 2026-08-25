@@ -574,24 +574,19 @@ class Encoder {
   /// encoder draining through a tiny buffer), and every string that is not pure
   /// ASCII.
   void _writeStringSlow(int id, String value) {
-    final n = value.length;
-    var ascii = true;
-    for (var i = 0; i < n; i++) {
-      if (value.codeUnitAt(i) >= 0x80) {
-        ascii = false;
-        break;
-      }
-    }
-    if (ascii) {
-      _writeHeaderAndVarint(id, WireType.fixlen, (n << 3) | FixlenType.string);
-      for (var i = 0; i < n; i++) {
-        _writeByte(value.codeUnitAt(i));
-      }
-      return;
-    }
-    // Non-ASCII: strict transcode (allocates), rejecting unpaired surrogates.
-    final bytes = encodeUtf8Strict(value);
-    if (bytes == null) {
+    // One `codeUnits` view, used by whichever path runs. It is a fixed-size
+    // handle over the caller's own `String` (CORELIB_PLAN §6.6.2): it carries
+    // no message bytes, and it costs the same for a ten-character string as for
+    // a ten-thousand-character one, so the wire cannot size it.
+    final units = value.codeUnits;
+    if (_writeStringInline(id, units)) return;
+    // The buffer cannot hold the whole payload — a streaming encoder draining
+    // through a small buffer. Size the field first (one pass), then write the
+    // payload byte by byte, flushing as it fills: a `string` is a divisible run
+    // and may be split at any byte (§5.1.3). There is still no transcode
+    // buffer; what is paid instead is a second pass over the code units.
+    final nbytes = utf8LengthStrictUnits(units);
+    if (nbytes < 0) {
       throw const SofabException(
         SofabError.invalidArgument,
         'string is not valid UTF-8 (unpaired surrogate)',
@@ -600,9 +595,124 @@ class Encoder {
     _writeHeaderAndVarint(
       id,
       WireType.fixlen,
-      (bytes.length << 3) | FixlenType.string,
+      (nbytes << 3) | FixlenType.string,
     );
-    _writeRaw(bytes, 0, bytes.length);
+    _writeUtf8(units);
+  }
+
+  /// Writes the whole `string` field in **one pass** over [units], straight into
+  /// the output buffer, or returns false having written nothing.
+  ///
+  /// The wire length of a non-ASCII string is not known until it has been
+  /// transcoded, and the `fixlen_word` carrying it goes out *before* the
+  /// payload. The two ways out of that are a transcode buffer — storage the
+  /// codec would size from the value, which §6.6 forbids — and this one: leave
+  /// the widest a `fixlen_word` can be (5 bytes) unwritten, transcode into the
+  /// buffer behind it, then write the now-known word and slide the payload back
+  /// against it. The slide is a `memmove` of bytes already in cache, against a
+  /// second pass of code-unit reads, which measured dearer.
+  ///
+  /// Entered only with room for everything it could write — any held-back
+  /// sequence headers (at most five bytes each), this header, a maximal
+  /// `fixlen_word`, and three bytes per code unit, which covers every case (a
+  /// surrogate pair is two units and four bytes). No flush can occur inside
+  /// that, so an unpaired surrogate part-way in rewinds the cursor *and* the
+  /// pending-sequence run and leaves no trace at all.
+  bool _writeStringInline(int id, List<int> units) {
+    if (id < 0 || id > idMax) return false; // let the slow path raise it
+    final n = units.length;
+    final buf = _buf;
+    final start = _pos;
+    final pending = _nPendingSeq;
+    if (start + pending * 5 + 25 + 3 * n > buf.length) return false;
+    if (pending != 0) _commitPendingSequences();
+    final bd = _bufData;
+    final wordAt = _putVarint(buf, bd, _pos, (id << 3) | WireType.fixlen);
+    final from = wordAt + 5; // the widest fixlen_word, left unwritten for now
+    var o = from;
+    for (var i = 0; i < n; i++) {
+      final c = units[i];
+      if (c < 0x80) {
+        buf[o++] = c;
+      } else if (c < 0x800) {
+        buf[o++] = 0xC0 | (c >> 6);
+        buf[o++] = 0x80 | (c & 0x3F);
+      } else if (c >= 0xD800 && c <= 0xDBFF) {
+        final c2 = i + 1 < n ? units[i + 1] : 0;
+        if (c2 < 0xDC00 || c2 > 0xDFFF) {
+          _pos = start; // unpaired high surrogate: undo, held-back run included
+          _nPendingSeq = pending;
+          throw const SofabException(
+            SofabError.invalidArgument,
+            'string is not valid UTF-8 (unpaired surrogate)',
+          );
+        }
+        i++;
+        final cp = 0x10000 + (((c - 0xD800) << 10) | (c2 - 0xDC00));
+        buf[o++] = 0xF0 | (cp >> 18);
+        buf[o++] = 0x80 | ((cp >> 12) & 0x3F);
+        buf[o++] = 0x80 | ((cp >> 6) & 0x3F);
+        buf[o++] = 0x80 | (cp & 0x3F);
+      } else if (c >= 0xDC00 && c <= 0xDFFF) {
+        _pos = start; // lone low surrogate
+        _nPendingSeq = pending;
+        throw const SofabException(
+          SofabError.invalidArgument,
+          'string is not valid UTF-8 (unpaired surrogate)',
+        );
+      } else {
+        buf[o++] = 0xE0 | (c >> 12);
+        buf[o++] = 0x80 | ((c >> 6) & 0x3F);
+        buf[o++] = 0x80 | (c & 0x3F);
+      }
+    }
+    final nbytes = o - from;
+    final word = (nbytes << 3) | FixlenType.string;
+    final w = _varintLen(word);
+    // Slide the payload back against the word. `setRange` on one typed list is
+    // a `memmove`, so the overlap at w == 4 is safe.
+    if (w != 5 && nbytes != 0) {
+      buf.setRange(wordAt + w, wordAt + w + nbytes, buf, from);
+    }
+    // Written byte by byte on purpose: [_putVarint] stores eight bytes
+    // unconditionally, which here would land on the payload just moved into
+    // place. At most five iterations.
+    var q = wordAt;
+    var x = word;
+    while (x >= 0x80) {
+      buf[q++] = (x & 0x7F) | 0x80;
+      x >>>= 7;
+    }
+    buf[q++] = x;
+    _pos = wordAt + w + nbytes;
+    return true;
+  }
+
+  /// Transcodes [units] into the output buffer one byte at a time, flushing as
+  /// it fills — the small-buffer path, where [_writeStringInline] could not
+  /// speculate. Every unit here is known encodable ([utf8LengthStrictUnits] ran
+  /// first), so there is no surrogate check left to make.
+  void _writeUtf8(List<int> units) {
+    final n = units.length;
+    for (var i = 0; i < n; i++) {
+      final c = units[i];
+      if (c < 0x80) {
+        _writeByte(c);
+      } else if (c < 0x800) {
+        _writeByte(0xC0 | (c >> 6));
+        _writeByte(0x80 | (c & 0x3F));
+      } else if (c >= 0xD800 && c <= 0xDBFF) {
+        final cp = 0x10000 + (((c - 0xD800) << 10) | (units[++i] - 0xDC00));
+        _writeByte(0xF0 | (cp >> 18));
+        _writeByte(0x80 | ((cp >> 12) & 0x3F));
+        _writeByte(0x80 | ((cp >> 6) & 0x3F));
+        _writeByte(0x80 | (cp & 0x3F));
+      } else {
+        _writeByte(0xE0 | (c >> 12));
+        _writeByte(0x80 | ((c >> 6) & 0x3F));
+        _writeByte(0x80 | (c & 0x3F));
+      }
+    }
   }
 
   /// Writes an opaque blob (fixlen subtype blob, CORELIB_PLAN §4.6).

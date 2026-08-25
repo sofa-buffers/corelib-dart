@@ -232,6 +232,55 @@ void main() {
     });
   });
 
+  group('utf8LengthStrict', () {
+    test('it agrees with utf8Length on every encodable string', () {
+      const strings = <String>[
+        '',
+        'sofab',
+        'a\u0000b',
+        'é',
+        '€',
+        '\u{1F600}',
+        'aé€\u{1F600}z',
+        '\u007f\u07ff\u0800\uffff',
+      ];
+      for (final s in strings) {
+        expect(sofab.utf8LengthStrict(s), sofab.utf8Length(s));
+        expect(sofab.utf8LengthStrict(s), sofab.encodeUtf8Strict(s)!.length);
+      }
+    });
+
+    test('an unpaired surrogate is −1, where utf8Length measures it', () {
+      // This is the difference between the two: the encoder needs one answer
+      // for "how many bytes" and "can this be written at all", because it
+      // writes the payload straight into the output buffer and cannot discover
+      // half-way through that the string was never encodable.
+      expect(sofab.utf8LengthStrict('\ud800'), -1);
+      expect(sofab.utf8LengthStrict('\udc00'), -1);
+      expect(sofab.utf8LengthStrict('a\ud800b'), -1);
+      expect(
+        sofab.utf8LengthStrict('\ud800'),
+        isNot(sofab.utf8Length('\ud800')),
+      );
+    });
+
+    test('a non-ASCII string streams byte-identically through any buffer', () {
+      // The transcode writes into the caller's output buffer, so the buffer's
+      // size is the only thing that changes — never the bytes (§5.1).
+      const value = 'aä€\u{1d11e} — sofab';
+      final oneShot = sofab.Encoder.encodeToBytes(
+        (e) => e.writeString(7, value),
+      );
+      for (final size in const [1, 2, 3, 5, 8, 64]) {
+        final out = BytesBuilder(copy: true);
+        final enc = sofab.Encoder(out.add, buffer: Uint8List(size));
+        enc.writeString(7, value);
+        enc.flush();
+        expect(out.takeBytes(), orderedEquals(oneShot), reason: 'buffer $size');
+      }
+    });
+  });
+
   group('elementsEqual', () {
     test('length, order and identity', () {
       expect(sofab.elementsEqual<int>(const [], const []), isTrue);

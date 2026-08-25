@@ -180,3 +180,49 @@ int utf8Length(String s) {
   }
   return len;
 }
+
+/// The exact number of UTF-8 bytes [s] encodes to, or **−1** when it holds an
+/// unpaired surrogate and therefore cannot be encoded at all.
+///
+/// The strict twin of [utf8Length], and what the encoder sizes a `fixlen_word`
+/// with: it settles both questions — *how many bytes* and *is this encodable* —
+/// in one pass over the code units, so a `string` field can be written straight
+/// into the caller's output buffer with no transcode buffer in between
+/// (CORELIB_PLAN §6.6: the codec allocates no payload storage). [utf8Length]
+/// keeps its lenient answer for callers that only want a size.
+///
+/// It reads through [String.codeUnitAt] rather than `codeUnits`, which would
+/// allocate a view object per call.
+int utf8LengthStrict(String s) => utf8LengthStrictUnits(s.codeUnits);
+
+/// [utf8LengthStrict] over a code-unit list the caller already holds.
+///
+/// The encoder takes this door: it needs the units twice — once to size the
+/// `fixlen_word` and once to write the payload — and `String.codeUnitAt` is a
+/// real call under Dart AOT, so walking the list is measurably cheaper than
+/// walking the `String` twice.
+int utf8LengthStrictUnits(List<int> units) {
+  final n = units.length;
+  var len = 0;
+  var i = 0;
+  while (i < n) {
+    final c = units[i++];
+    if (c < 0x80) {
+      len += 1;
+    } else if (c < 0x800) {
+      len += 2;
+    } else if (c >= 0xD800 && c <= 0xDBFF) {
+      // High surrogate: only a following low surrogate makes it a code point.
+      if (i >= n) return -1;
+      final c2 = units[i];
+      if (c2 < 0xDC00 || c2 > 0xDFFF) return -1;
+      i++;
+      len += 4;
+    } else if (c >= 0xDC00 && c <= 0xDFFF) {
+      return -1; // lone low surrogate
+    } else {
+      len += 3;
+    }
+  }
+  return len;
+}
