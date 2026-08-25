@@ -426,37 +426,59 @@ and both are caller-owned. The library owns neither, on either decode surface.
   *n* costs O(*n*) amortised rather than O(*n*²) — **untested**: Dart offers no
   in-process allocation counter fine enough to assert a growth geometry, so this
   is stated here rather than reported as a covered case.
-- **`DecoderLimits` is the *unbounded*-field backstop, and only that.** Its
-  three caps are deployment policy, not schema validity: they apply to a field
-  whose schema declares no `count:`/`maxlen:`, and never to a field the schema
-  already bounds — there a breach is `invalid`, never `limitExceeded`. All three
-  are finite and there is no way to say "unlimited": an unconfigured `Decoder`
-  carries `sofab.defaultMaxDynArrayCount` (2²⁰ elements),
-  `sofab.defaultMaxDynStringLen` (16 MiB) and `sofab.defaultMaxDynBlobLen`
-  (64 MiB). A wrapper array's element **index** is bounded the same way, by the
-  collectors' `rcap`, because the index is what the array's length is.
+- **The receiver's own limits are the *consumer's*, and this library holds
+  none.** CORELIB_PLAN §6.2.1 makes three caps mandatory on every receiver —
+  `max_dyn_array_count`, `max_dyn_string_len`, `max_dyn_blob_len`, with *"no
+  unset state and no unlimited mode"* — and in the same breath says whose they
+  are: *"The numbers and the allocation are not the codec's. The limits come
+  from generated code, which knows the schema and the target."* So there is no
+  `DecoderLimits` and no `max_dyn_*` default constant here to fall back on. What
+  the decoder guarantees is that you are told **in time**: the count or length
+  reaches you at the header, before a destination is asked for.
 
-  Only the schema knows which fields the caps must stay off, so a schema-bound
-  (generated) consumer says so:
+  A cap and a schema bound are different statements — capacity vs. validity — and
+  §6.2.1 forbids a cap on a field the schema already bounds. Stating both in one
+  hook, the cap as the *else* of the bound, is what makes "never both"
+  structural:
 
   ```dart
   @override
-  int? onArrayCountBound(int id, sofab.ArrayKind kind) =>
-      id == 3 && kind == sofab.ArrayKind.unsigned ? 8 : null;   // count: 8
+  void onArrayBegin(int id, sofab.ArrayKind kind, int count) {
+    if (id == 3 && kind == sofab.ArrayKind.unsigned) {
+      if (count > 8) invalidate();               // schema count: 8 → INVALID
+    } else if (id == 9 && kind == sofab.ArrayKind.unsigned) {
+      if (count > maxDynArrayCount) limitExceeded();  // unbounded → policy
+    }
+  }
+
   @override
-  int? onFixlenLenBound(int id, int subtype) =>
-      id == 1 && subtype == sofab.FixlenType.blob ? 64 : null;  // maxlen: 64
+  void onFixlenHeader(int id, int subtype, int length) {
+    if (id == 1 && subtype == sofab.FixlenType.blob) {
+      if (length > 64) invalidate();             // schema maxlen: 64
+    } else if (id == 9 && subtype == sofab.FixlenType.blob) {
+      if (length > maxDynBlobLen) limitExceeded();
+    }
+  }
   ```
 
-  For a field that answers, the declared bound *replaces* the cap: a wire
-  count/length past it is `invalid` (decided at the count/length word, before
-  the payload), and one within it decodes however tight the cap is.
-  `kind`/`subtype` are what the **wire** declares — return `null` for one the
-  field does not declare, since that is a skipped field and no schema bound
-  covers it. Both hooks are asked at most once per field and only once a cap has
-  actually been exceeded. `onFixlenHeader`/`onArrayBegin` fire *before* the cap
-  is weighed either way, so a consumer that enforces its bound there always sees
-  the header.
+  `kind`/`subtype` are what the **wire** declares — an arm gated on the declared
+  one is what keeps a MESSAGE_SPEC §7.3 mismatch out of both statements, since
+  such a field is skipped and *"a skipped field is never capped"* (§6.2.1). A
+  field with no arm at all is bounded more tightly still: return `null` from
+  [`onArrayDest`]/[`onBytesDest`] and nothing is allocated for it whatsoever.
+
+  A wrapper array has no count header — its length is *highest present id + 1* —
+  so there the index **is** the length, and the collectors take both numbers as
+  arguments: `rcap` beside the schema `cap` for the element index, `relemMax`
+  beside `emax` for an element's byte length, and `rowCap` beside `rowCount` for
+  a matrix row's element count. Each is consulted only where its schema sibling
+  is absent, and each is **required**, because this library has no number of its
+  own to offer:
+
+  ```dart
+  sofab.StringSeq(out, /*cap*/ -1, /*emax*/ -1,
+      rcap: maxDynArrayCount, relemMax: maxDynStringLen);
+  ```
 
 ## Build & test
 

@@ -110,6 +110,22 @@ class _OwnDest extends sofab.MessageVisitor {
   final Float64List _f64;
   final Float32List _f32;
 
+  /// This consumer's receiver caps (CORELIB_PLAN §6.2.1). The decoder holds
+  /// none — *"the codec never invents a limit of its own"* — so a hostile count
+  /// or length is refused **here**, at the header the codec reports it on,
+  /// before any destination is asked for. This consumer's number is simply the
+  /// storage it owns: it cannot take more than it allocated once, at
+  /// construction, so its capacity IS its cap.
+  @override
+  void onArrayBegin(int id, sofab.ArrayKind kind, int count) {
+    if (count > _f64.length) limitExceeded();
+  }
+
+  @override
+  void onFixlenHeader(int id, int subtype, int length) {
+    if (length > _bytes.length) limitExceeded();
+  }
+
   /// Folded so nothing measured can be optimised away.
   int seen = 0;
 
@@ -225,7 +241,8 @@ void _worker(SendPort out) {
   }
 
   // The hostile row §6.6.4 asks for: seven bytes announcing ARRAY_MAX fp64
-  // elements. It must cost what any other rejected header costs.
+  // elements. It must cost what any other rejected header costs — the visitor
+  // refuses the count at [_OwnDest.onArrayBegin], before anything is sized.
   // A control that touches no SofaBuffers code at all: one `setRange` of the
   // large payload, which allocates nothing by construction. Whatever it reads
   // is what this measurement charges a row for *moving* that many bytes, and

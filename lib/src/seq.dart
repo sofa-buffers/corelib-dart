@@ -8,20 +8,47 @@ import 'wire.dart';
 // The element collectors a schema-bound (generated) consumer needs for a
 // WRAPPER array — an array whose elements are strings, blobs, messages, or
 // further arrays, and which therefore travels as a sequence rather than as one
-// of the compact array wire types (MESSAGE_SPEC §4.9).
+// of the compact array wire types (MESSAGE_SPEC §4.9) — plus the matrix
+// collectors, whose elements are compact arrays.
 //
 // None of them carries schema knowledge: the destination, the declared
-// capacity, the declared element `maxlen` and, where an element is itself an
-// object, the factory that makes one all arrive as constructor arguments. The
-// code is the same shape for every schema, so it is written once here rather
-// than emitted into every generated module.
+// capacity, the declared element `maxlen`, the declared row `count`, the
+// receiver's own caps and, where an element is itself an object, the factory
+// that makes one all arrive as constructor arguments. The code is the same
+// shape for every schema, so it is written once here rather than emitted into
+// every generated module.
 //
-// What made that possible only recently is the verdict channel: an element past
-// the declared capacity is INVALID (§5.1/§7.1) and a collector has to be able to
-// say so. It calls [MessageVisitor.invalidate], which stops the decode where it
-// stands. Before that channel existed these collectors had to take a flag from
-// the generated layer, and a corelib type must not take a generated one as a
-// parameter — which is why they stayed emitted until now.
+// **These are not the codec** (CORELIB_PLAN §6.6.1). They ship in this
+// repository so the generator need not emit them, but they are the *generated
+// layer's* code: the codec never calls one directly — it calls the visitor, and
+// the visitor is one of these. That is why they may allocate the container a
+// wrapper array grows into, while the codec beside them allocates no payload
+// storage at all (§6.6).
+//
+// **Every bound they apply is a number the caller passed in** (§6.2.1: *"The
+// numbers and the allocation are not the codec's. The limits come from
+// generated code, which knows the schema and the target"*). Two kinds of number
+// sit side by side, and they are never both in play for one field:
+//
+// * a **schema** bound — `cap` (the declared `count:`), `emax` (the declared
+//   element `maxlen:`), `rowCount` (a matrix row's declared `count:`). Negative
+//   means the schema declared none. A breach is `INVALID` (MESSAGE_SPEC §7.1),
+//   reported through [MessageVisitor.invalidate].
+// * a **receiver** cap — `rcap`, `relemMax`, `rowCap` — consulted *only* where
+//   its schema sibling is negative. A breach is a policy rejection:
+//   `LimitExceeded`, never `INVALID` (§6.2.1, §6.3), reported through
+//   [MessageVisitor.limitExceeded].
+//
+// The receiver caps are **required constructor arguments**: §6.2.1 admits
+// *"no unset state and no unlimited mode"*, and the number is a per-deployment
+// judgement this library is in no position to make. A negative one is read as
+// the **format ceiling** ([arrayMax] / [fixlenMax]) rather than as "unlimited"
+// — the ceiling is a fact of the format, not a number invented here.
+//
+// Each rule has exactly ONE implementation, [_overCapacity] for an index and
+// [_overLength] for a count or a byte length, however many places state it
+// (§6.2.1: *"The rule that applies it MUST have one implementation whichever
+// way it was stated"*).
 
 /// Whether `id` is past the bound that governs this array, rejecting the decode
 /// if so — **before** the container it indexes into is extended.
@@ -60,6 +87,36 @@ bool _overCapacity(VisitorBase v, int id, int cap, int rcap) {
   return false;
 }
 
+/// The length twin of [_overCapacity]: whether `n` — a payload's byte length or
+/// a matrix row's element count — is past the bound that governs it.
+///
+/// Same split, same exclusivity, same categories. `max` is the schema's number
+/// (negative: the schema declared none) and `rmax` the receiver's, consulted
+/// only where the schema declared nothing. Checked at the length/count
+/// **header**, before the payload the number sizes (§6.2.1).
+bool _overLength(VisitorBase v, int n, int max, int rmax) {
+  if (max >= 0) {
+    if (n > max) {
+      v.invalidate();
+      return true;
+    }
+    return false;
+  }
+  if (n > rmax) {
+    v.limitExceeded();
+    return true;
+  }
+  return false;
+}
+
+/// A receiver cap as the collectors hold it: finite, always.
+///
+/// §6.2.1 admits no unlimited mode, so a negative argument is read as the
+/// **format ceiling** — a fact of the wire format (§6.2), not a number this
+/// library chose. Normalising once in the constructor keeps the per-element
+/// guards a single compare.
+int _finite(int rcap, int ceiling) => rcap < 0 ? ceiling : rcap;
+
 /// Grows `out` so that index `id` exists, filling the gap with `fill()`.
 ///
 /// Gaps are ordinary: a conformant encoder omits an interior element equal to
@@ -80,8 +137,10 @@ void _reserve<T>(List<T> out, int id, T Function() fill) {
 /// Collects the elements of a `string` wrapper array into `out`.
 ///
 /// `cap` is the schema `count` (or -1 when the array is unbounded) and `emax`
-/// the declared element `maxlen` (or -1). Both bounds are checked at the fixlen
-/// header, before the payload arrives, so a message truncated right behind an
+/// the declared element `maxlen` (or -1); `rcap` and `relemMax` are the
+/// receiver's caps on the same two numbers, used only where the schema declared
+/// none. All four are checked at the fixlen header, before the payload arrives
+/// and before the destination is sized, so a message truncated right behind an
 /// out-of-bound element is still INVALID rather than INCOMPLETE (§5.2).
 ///
 /// The payload's UTF-8 is validated here because here is where the element is
@@ -91,40 +150,48 @@ class StringSeq extends VisitorBase {
     this.out,
     this.cap,
     this.emax, {
-    this.rcap = defaultMaxDynArrayCount,
-  });
+    required int rcap,
+    required int relemMax,
+  }) : rcap = _finite(rcap, arrayMax),
+       relemMax = _finite(relemMax, fixlenMax);
 
   final List<String> out;
+
+  /// The schema `count:` — the element index bound (-1: none declared).
   final int cap;
 
   /// The **receiver cap** on the element index, used only where the schema
   /// declared no `count` (`cap < 0`) — see [_overCapacity]. Generated code
-  /// passes the deployment's number; the default is the family's
-  /// [defaultMaxDynArrayCount], because §6.2.1 admits no unset state.
+  /// passes the deployment's number; §6.2.1 gives this library none to invent,
+  /// so it is required, and a negative one reads as [arrayMax].
   final int rcap;
+
+  /// The schema element `maxlen:` — the element byte-length bound (-1: none).
   final int emax;
+
+  /// The **receiver cap** on an element's byte length, used only where the
+  /// schema declared no `maxlen` (`emax < 0`) — see [_overLength]. Required for
+  /// the reason [rcap] is; a negative one reads as [fixlenMax].
+  final int relemMax;
 
   @override
   void onFixlenHeader(int id, int subtype, int length) {
     // A contradicting subtype is not this array's element (§7.3): it is skipped,
-    // so the capacity bound must not be applied to it either.
+    // so neither bound must be applied to it.
     if (subtype != FixlenType.string) return;
     if (_overCapacity(this, id, cap, rcap)) return;
-    if (emax >= 0 && length > emax) invalidate();
+    _overLength(this, length, emax, relemMax);
   }
 
   @override
   void onStringBytes(int id, Uint8List bytes) {
     if (_overCapacity(this, id, cap, rcap)) return;
-    // A backstop, and coverage says so: [onFixlenHeader] already rejected this
-    // bound at the length word and [invalidate] stopped the decode there, so
-    // neither engine can reach it. It stays for a caller driving the collector
-    // by hand, and because a guard that reads the payload's own length is the
-    // one that cannot be wrong.
-    if (emax >= 0 && bytes.length > emax) {
-      invalidate();
-      return;
-    }
+    // A backstop, and coverage says so: [onFixlenHeader] already rejected these
+    // bounds at the length word and [invalidate]/[limitExceeded] stopped the
+    // decode there, so neither engine can reach it. It stays for a caller
+    // driving the collector by hand, and because a guard that reads the
+    // payload's own length is the one that cannot be wrong.
+    if (_overLength(this, bytes.length, emax, relemMax)) return;
     final s = decodeUtf8Strict(bytes);
     if (s == null) {
       invalidate();
@@ -141,33 +208,42 @@ class StringSeq extends VisitorBase {
 /// text; the bytes are copied, so a decoded message outlives the buffer it was
 /// decoded from.
 class BlobSeq extends VisitorBase {
-  BlobSeq(this.out, this.cap, this.emax, {this.rcap = defaultMaxDynArrayCount});
+  BlobSeq(
+    this.out,
+    this.cap,
+    this.emax, {
+    required int rcap,
+    required int relemMax,
+  }) : rcap = _finite(rcap, arrayMax),
+       relemMax = _finite(relemMax, fixlenMax);
 
   final List<Uint8List> out;
+
+  /// The schema `count:` — the element index bound (-1: none declared).
   final int cap;
 
-  /// The **receiver cap** on the element index, used only where the schema
-  /// declared no `count` (`cap < 0`) — see [_overCapacity]. Generated code
-  /// passes the deployment's number; the default is the family's
-  /// [defaultMaxDynArrayCount], because §6.2.1 admits no unset state.
+  /// The **receiver cap** on the element index — see [StringSeq.rcap].
   final int rcap;
+
+  /// The schema element `maxlen:` — the element byte-length bound (-1: none).
   final int emax;
+
+  /// The **receiver cap** on an element's byte length — see
+  /// [StringSeq.relemMax].
+  final int relemMax;
 
   @override
   void onFixlenHeader(int id, int subtype, int length) {
     if (subtype != FixlenType.blob) return;
     if (_overCapacity(this, id, cap, rcap)) return;
-    if (emax >= 0 && length > emax) invalidate();
+    _overLength(this, length, emax, relemMax);
   }
 
   @override
   void onBlob(int id, Uint8List value) {
     if (_overCapacity(this, id, cap, rcap)) return;
     // The same backstop as StringSeq's, unreachable for the same reason.
-    if (emax >= 0 && value.length > emax) {
-      invalidate();
-      return;
-    }
+    if (_overLength(this, value.length, emax, relemMax)) return;
     _reserve(out, id, () => Uint8List(0));
     out[id] = Uint8List.fromList(value);
   }
@@ -182,21 +258,15 @@ class BlobSeq extends VisitorBase {
 /// An element is filled in place at its id rather than appended, so a re-opened
 /// element id merges into what an earlier opening set (§7.4).
 class MessageSeq<T> extends VisitorBase {
-  MessageSeq(
-    this.out,
-    this.cap,
-    this.make,
-    this.vis, {
-    this.rcap = defaultMaxDynArrayCount,
-  });
+  MessageSeq(this.out, this.cap, this.make, this.vis, {required int rcap})
+    : rcap = _finite(rcap, arrayMax);
 
   final List<T> out;
+
+  /// The schema `count:` — the element index bound (-1: none declared).
   final int cap;
 
-  /// The **receiver cap** on the element index, used only where the schema
-  /// declared no `count` (`cap < 0`) — see [_overCapacity]. Generated code
-  /// passes the deployment's number; the default is the family's
-  /// [defaultMaxDynArrayCount], because §6.2.1 admits no unset state.
+  /// The **receiver cap** on the element index — see [StringSeq.rcap].
   final int rcap;
   final T Function() make;
   final MessageVisitor Function(T) vis;
@@ -212,22 +282,19 @@ class MessageSeq<T> extends VisitorBase {
 /// Collects the rows of an array whose elements are themselves WRAPPER arrays.
 ///
 /// `make` builds the collector for one row, which for a row of rows is another
-/// [NestedSeq] — the recursion the depth-3 shapes need.
+/// [NestedSeq] — the recursion the depth-3 shapes need. The row's own bounds,
+/// schema and receiver alike, are the row collector's; this one bounds the row
+/// **index** only.
 class NestedSeq<T> extends VisitorBase {
-  NestedSeq(
-    this.out,
-    this.cap,
-    this.make, {
-    this.rcap = defaultMaxDynArrayCount,
-  });
+  NestedSeq(this.out, this.cap, this.make, {required int rcap})
+    : rcap = _finite(rcap, arrayMax);
 
   final List<List<T>> out;
+
+  /// The schema `count:` — the row index bound (-1: none declared).
   final int cap;
 
-  /// The **receiver cap** on the element index, used only where the schema
-  /// declared no `count` (`cap < 0`) — see [_overCapacity]. Generated code
-  /// passes the deployment's number; the default is the family's
-  /// [defaultMaxDynArrayCount], because §6.2.1 admits no unset state.
+  /// The **receiver cap** on the row index — see [StringSeq.rcap].
   final int rcap;
   final MessageVisitor Function(List<T>) make;
 
@@ -246,6 +313,12 @@ class NestedSeq<T> extends VisitorBase {
 /// one contradicts the declared element type and is skipped (§7.3), not
 /// rejected. `lo`/`hi` bound each element to its declared width (§7.1); equal
 /// values mean "nothing narrower than the wire to check".
+///
+/// A row here is a real compact array with a real `element_count` on the wire,
+/// so it carries a second pair of bounds beside the row index: `rowCount`, the
+/// row's declared `count:`, and `rowCap`, the receiver's cap where the schema
+/// declared none. They are weighed in [onArrayBegin] — at the count word,
+/// before the row's destination is sized (§6.2.1).
 class IntMatrixSeq extends VisitorBase {
   IntMatrixSeq(
     this.out,
@@ -253,23 +326,48 @@ class IntMatrixSeq extends VisitorBase {
     this.signed,
     this.lo,
     this.hi, {
-    this.rcap = defaultMaxDynArrayCount,
-  });
+    required int rcap,
+    required this.rowCount,
+    required int rowCap,
+  }) : rcap = _finite(rcap, arrayMax),
+       rowCap = _finite(rowCap, arrayMax);
 
   final List<List<int>> out;
+
+  /// The schema `count:` of the matrix — the row index bound (-1: none).
   final int cap;
 
-  /// The **receiver cap** on the element index, used only where the schema
-  /// declared no `count` (`cap < 0`) — see [_overCapacity]. Generated code
-  /// passes the deployment's number; the default is the family's
-  /// [defaultMaxDynArrayCount], because §6.2.1 admits no unset state.
+  /// The **receiver cap** on the row index — see [StringSeq.rcap].
   final int rcap;
+
+  /// The schema `count:` of a **row** — its element count bound (-1: none).
+  final int rowCount;
+
+  /// The **receiver cap** on a row's element count, used only where the schema
+  /// declared no row `count` (`rowCount < 0`). Required for the reason [rcap]
+  /// is; a negative one reads as [arrayMax].
+  final int rowCap;
+
   final bool signed;
   final int lo;
   final int hi;
 
+  ArrayKind get _kind => signed ? ArrayKind.signed : ArrayKind.unsigned;
+
+  @override
+  void onArrayBegin(int id, ArrayKind kind, int count) {
+    // A row of the other kind is not this array's element (§7.3): skipped, so
+    // no bound of this field's applies to it.
+    if (kind != _kind) return;
+    if (_overCapacity(this, id, cap, rcap)) return;
+    _overLength(this, count, rowCount, rowCap);
+  }
+
   void _row(int id, Int64List v) {
     if (_overCapacity(this, id, cap, rcap)) return;
+    // The backstop to [onArrayBegin]'s row-count guard, reachable only by a
+    // caller driving the collector by hand — see [StringSeq.onStringBytes].
+    if (_overLength(this, v.length, rowCount, rowCap)) return;
     if (lo != hi) {
       for (final e in v) {
         if (e < lo || e > hi) {
@@ -299,28 +397,50 @@ class IntMatrixSeq extends VisitorBase {
 /// An fp32 row is copied through [copyFp32] rather than element by element, so a
 /// signaling or payload NaN survives bit-for-bit (§4.6/§6.5) — widening each
 /// element through a Dart `double` would quiet it.
+///
+/// `rowCount`/`rowCap` bound a row's element count exactly as [IntMatrixSeq]'s
+/// do.
 class DoubleMatrixSeq extends VisitorBase {
   DoubleMatrixSeq(
     this.out,
     this.cap,
     this.f64, {
-    this.rcap = defaultMaxDynArrayCount,
-  });
+    required int rcap,
+    required this.rowCount,
+    required int rowCap,
+  }) : rcap = _finite(rcap, arrayMax),
+       rowCap = _finite(rowCap, arrayMax);
 
   final List<List<double>> out;
+
+  /// The schema `count:` of the matrix — the row index bound (-1: none).
   final int cap;
 
-  /// The **receiver cap** on the element index, used only where the schema
-  /// declared no `count` (`cap < 0`) — see [_overCapacity]. Generated code
-  /// passes the deployment's number; the default is the family's
-  /// [defaultMaxDynArrayCount], because §6.2.1 admits no unset state.
+  /// The **receiver cap** on the row index — see [StringSeq.rcap].
   final int rcap;
+
+  /// The schema `count:` of a **row** — its element count bound (-1: none).
+  final int rowCount;
+
+  /// The **receiver cap** on a row's element count — see [IntMatrixSeq.rowCap].
+  final int rowCap;
+
   final bool f64;
+
+  ArrayKind get _kind => f64 ? ArrayKind.fp64 : ArrayKind.fp32;
+
+  @override
+  void onArrayBegin(int id, ArrayKind kind, int count) {
+    if (kind != _kind) return;
+    if (_overCapacity(this, id, cap, rcap)) return;
+    _overLength(this, count, rowCount, rowCap);
+  }
 
   @override
   void onFp32Array(int id, Float32List values) {
     if (f64) return;
     if (_overCapacity(this, id, cap, rcap)) return;
+    if (_overLength(this, values.length, rowCount, rowCap)) return;
     _reserve(out, id, () => <double>[]);
     out[id] = copyFp32(values, values.length);
   }
@@ -329,6 +449,7 @@ class DoubleMatrixSeq extends VisitorBase {
   void onFp64Array(int id, Float64List values) {
     if (!f64) return;
     if (_overCapacity(this, id, cap, rcap)) return;
+    if (_overLength(this, values.length, rowCount, rowCap)) return;
     _reserve(out, id, () => <double>[]);
     out[id] = List<double>.from(values);
   }
@@ -337,21 +458,44 @@ class DoubleMatrixSeq extends VisitorBase {
 /// Collects the rows of a boolean matrix. Booleans travel as the unsigned
 /// integer wire type, so a row arrives on [onUnsignedArray] and any non-zero
 /// element is `true`.
+///
+/// `rowCount`/`rowCap` bound a row's element count exactly as [IntMatrixSeq]'s
+/// do.
 class BoolMatrixSeq extends VisitorBase {
-  BoolMatrixSeq(this.out, this.cap, {this.rcap = defaultMaxDynArrayCount});
+  BoolMatrixSeq(
+    this.out,
+    this.cap, {
+    required int rcap,
+    required this.rowCount,
+    required int rowCap,
+  }) : rcap = _finite(rcap, arrayMax),
+       rowCap = _finite(rowCap, arrayMax);
 
   final List<List<bool>> out;
+
+  /// The schema `count:` of the matrix — the row index bound (-1: none).
   final int cap;
 
-  /// The **receiver cap** on the element index, used only where the schema
-  /// declared no `count` (`cap < 0`) — see [_overCapacity]. Generated code
-  /// passes the deployment's number; the default is the family's
-  /// [defaultMaxDynArrayCount], because §6.2.1 admits no unset state.
+  /// The **receiver cap** on the row index — see [StringSeq.rcap].
   final int rcap;
+
+  /// The schema `count:` of a **row** — its element count bound (-1: none).
+  final int rowCount;
+
+  /// The **receiver cap** on a row's element count — see [IntMatrixSeq.rowCap].
+  final int rowCap;
+
+  @override
+  void onArrayBegin(int id, ArrayKind kind, int count) {
+    if (kind != ArrayKind.unsigned) return;
+    if (_overCapacity(this, id, cap, rcap)) return;
+    _overLength(this, count, rowCount, rowCap);
+  }
 
   @override
   void onUnsignedArray(int id, Int64List values) {
     if (_overCapacity(this, id, cap, rcap)) return;
+    if (_overLength(this, values.length, rowCount, rowCap)) return;
     _reserve(out, id, () => <bool>[]);
     out[id] = [for (final v in values) v != 0];
   }

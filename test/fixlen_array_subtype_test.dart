@@ -22,13 +22,13 @@ import 'vector_support.dart';
 ///  5. a consumer whose declared element type **contradicts** `kind` skips the
 ///     field (§7.3) and MUST NOT apply the schema `count` bound — the field was
 ///     never this array's value. A matching `kind` gets the bound;
-///  6. last, the receiver **policy** limit
-///     ([sofab.DecoderLimits.maxArrayCount]) — `limitExceeded`, never `invalid`,
-///     and still ahead of the payload allocation it prevents. It waits for the
-///     subtype because whether the *schema* bounds this count is itself a
-///     question about the element kind, and a schema-bounded field is exempt
-///     from the limit altogether (CORELIB_PLAN §6.2.1 — corelib-dart#40,
-///     covered in `schema_bound_limit_test.dart`).
+///  6. a consumer whose declared element type MATCHES but which declares no
+///     `count` weighs the receiver **policy** cap instead — `limitExceeded`,
+///     never `invalid`, and still ahead of the payload allocation it prevents.
+///     It is stated in the very same hook, as the *else* of the schema bound,
+///     which is what keeps the two from ever both applying (CORELIB_PLAN §6.2.1
+///     — covered in `schema_bound_limit_test.dart`). The decoder holds no cap
+///     of its own.
 ///
 /// The corelib carries no verdict logic of its own here: it only decides *when*
 /// the hook fires and *what kind* it carries. The generated, schema-bound
@@ -169,20 +169,43 @@ void main() {
       expect(v.begins, isEmpty);
     });
 
-    test('maxArrayCount is still limitExceeded, never folded into invalid', () {
-      // A receiver *policy* limit (CORELIB_PLAN §6.2.1) stays its own outcome.
-      // What DID move (#40) is only *where* it is decided: behind the
-      // fixlen_word and behind the hook, because a schema-bounded field is
-      // exempt from it and the exemption is asked per element kind. This
-      // consumer declares no bound through onArrayCountBound, so the limit
-      // applies to it exactly as before — but the hook has already fired.
+    test('a receiver cap is limitExceeded, never folded into invalid', () {
+      // A receiver *policy* cap (CORELIB_PLAN §6.2.1) is its own outcome, and it
+      // is decided behind the fixlen_word and inside the hook — because whether
+      // this count is even this field's is a question about the element kind
+      // (§7.3), and because a schema-bounded field is exempt from the cap
+      // altogether. id 2 is the field the schema leaves unbounded.
+      //
+      // Header `15` = (2 << 3) | ARRAY_FIXLEN.
       final v = _run(
-        _fixArray(count: '03', word: _fp32, elems: 3),
-        limits: const sofab.DecoderLimits(maxArrayCount: 2),
+        _fixArray(count: '03', word: _fp32, elems: 3, hdr: '15'),
+        cap: 2,
       );
       expect(v.status, sofab.DecodeStatus.limitExceeded);
       expect(v.inv, isFalse);
-      expect(v.begins, ['0:fp32:3']);
+      expect(v.begins, ['2:fp32:3']);
+    });
+
+    test('the cap stays off the field the schema bounds', () {
+      // The same three elements at id 0, which declares `count: 5`. §6.2.1: a
+      // cap "MUST NOT be applied to a field the schema already bounds" — so a
+      // cap of 2 must not touch it, and the message decodes.
+      final v = _run(_fixArray(count: '03', word: _fp32, elems: 3), cap: 2);
+      expect(v.status, sofab.DecodeStatus.complete);
+      expect(v.inv, isFalse);
+      expect(v.field, isNotNull);
+    });
+
+    test('an fp64 header at the unbounded id is skipped, not capped', () {
+      // §7.3 again, on the cap side: the element kind contradicts what id 2
+      // declares, so the field was never its value and no bound of its own —
+      // schema or policy — is measured against it.
+      final v = _run(
+        _fixArray(count: '03', word: _fp64, elems: 3, hdr: '15'),
+        cap: 2,
+      );
+      expect(v.status, sofab.DecodeStatus.complete);
+      expect(v.begins, ['2:fp64:3']);
     });
 
     test('a skipped fixlen array still fires no hook at all', () {
@@ -257,9 +280,10 @@ String _fixArray({
   required String word,
   int elems = 0,
   bool closed = true,
+  String hdr = '05',
 }) {
   final width = word == _fp64 ? 8 : 4;
-  return _scoped('05$count$word${'00' * (elems * width)}', closed: closed);
+  return _scoped('$hdr$count$word${'00' * (elems * width)}', closed: closed);
 }
 
 /// Runs [hex] through **both** decode paths — the one-shot contiguous decoder and
@@ -267,18 +291,18 @@ String _fixArray({
 /// — asserts they agree on every observable, and returns the shared result.
 _Gen _run(
   String hex, {
-  sofab.DecoderLimits limits = const sofab.DecoderLimits(),
+  int cap = arrayMaxCap,
   bool skip = false,
   int intId = -1,
   int intBound = 0,
 }) {
   final bytes = hexToBytes(hex);
 
-  final contig = _Gen(skip: skip, intId: intId, intBound: intBound);
-  contig.status = sofab.Decoder.decode(bytes, contig, limits: limits);
+  final contig = _Gen(skip: skip, intId: intId, intBound: intBound, cap: cap);
+  contig.status = sofab.Decoder.decode(bytes, contig);
 
-  final stream = _Gen(skip: skip, intId: intId, intBound: intBound);
-  final dec = sofab.Decoder(stream, limits: limits);
+  final stream = _Gen(skip: skip, intId: intId, intBound: intBound, cap: cap);
+  final dec = sofab.Decoder(stream);
   var last = sofab.DecodeStatus.complete;
   for (final b in bytes) {
     last = dec.feed([b]);
@@ -310,8 +334,22 @@ _Gen _run(
 /// arm matching the declared element kind, and otherwise lets the field be
 /// skipped — which is exactly the shape sofabgen emits once `onArrayBegin`
 /// carries the kind.
+/// The loosest a receiver cap gets: the format ceiling (§6.2.1 admits no
+/// unlimited mode, so there is nothing looser to spell).
+const int arrayMaxCap = sofab.arrayMax;
+
 class _Gen extends sofab.MessageVisitor {
-  _Gen({this.skip = false, this.intId = -1, this.intBound = 0});
+  _Gen({
+    this.skip = false,
+    this.intId = -1,
+    this.intBound = 0,
+    this.cap = arrayMaxCap,
+  });
+
+  /// The deployment's `max_dyn_array_count`, as generated code would carry it.
+  /// It governs [_unboundedId] and nothing else: §6.2.1 forbids applying it to
+  /// [_declaredId], which the schema bounds.
+  final int cap;
 
   /// Refuse to read the array at all (models a field the schema does not know).
   final bool skip;
@@ -323,6 +361,10 @@ class _Gen extends sofab.MessageVisitor {
   static const int _declaredId = 0;
   static const sofab.ArrayKind _declaredKind = sofab.ArrayKind.fp32;
   static const int _declaredCount = 5;
+
+  /// A second `array<fp32>` field the schema declares with NO `count`, so the
+  /// receiver cap is what governs it.
+  static const int _unboundedId = 2;
 
   /// Sticky INVALID flag, as the generated visitor keeps (§5.2 anti-folding).
   bool inv = false;
@@ -349,6 +391,13 @@ class _Gen extends sofab.MessageVisitor {
     begins.add('$id:${kind.name}:$count');
     if (id == intId) {
       if (kind == sofab.ArrayKind.unsigned && count > intBound) inv = true;
+      return;
+    }
+    if (id == _unboundedId) {
+      // Declared, but with no `count`: the receiver cap governs, and its breach
+      // is a policy rejection rather than INVALID (§6.2.1, §6.3). Gated on the
+      // element kind for the same §7.3 reason as the bounded field below.
+      if (kind == _declaredKind && count > cap) limitExceeded();
       return;
     }
     if (id != _declaredId) return;
