@@ -25,6 +25,18 @@ class _Invalidated implements Exception {
   const _Invalidated();
 }
 
+/// Raised by [MessageVisitor.limitExceeded] and caught by whichever decode
+/// engine is running, which then reports `limitExceeded` and stops.
+///
+/// A second control signal rather than a flag on the first, because
+/// CORELIB_PLAN §6.2.1 forbids folding a receiver-limit breach into `INVALID`:
+/// *"exceeding one is a policy rejection — a category distinct from INVALID …
+/// An implementation MUST NOT report it as `InvalidMessage`"*. The two travel
+/// the same way and arrive as different outcomes.
+class _LimitExceeded implements Exception {
+  const _LimitExceeded();
+}
+
 abstract class MessageVisitor {
   /// Whether to read (materialize) the leaf field, or skip it. Default: read.
   bool shouldRead(int id, int type) => true;
@@ -47,6 +59,27 @@ abstract class MessageVisitor {
   /// Safe from any depth, including inside a nested collector. It never
   /// returns normally.
   void invalidate() => throw const _Invalidated();
+
+  /// Reject the running decode as [DecodeStatus.limitExceeded] from inside a
+  /// callback — the receiver-cap counterpart of [invalidate].
+  ///
+  /// A **configured receiver limit** (CORELIB_PLAN §6.2.1) is not a statement
+  /// about the bytes: they are well-formed, and the same message decodes for a
+  /// receiver configured more loosely. §6.2.1 therefore forbids folding a
+  /// breach into `INVALID`, and §6.3 keeps `LimitExceeded` distinct so a caller
+  /// can tell *"raise my limit, or the sender must send less"* from *"these
+  /// bytes are broken"*.
+  ///
+  /// The decoder raises it itself at a count or length header
+  /// ([DecoderLimits]). This is the channel for the one bound the decoder
+  /// cannot see: a **wrapper array's element index**, which is the array's
+  /// length (MESSAGE_SPEC §5.1) and is checked where the elements are
+  /// collected — `lib/src/seq.dart`, or a generated visitor doing the same job.
+  /// Without it a collector's only refusal was [invalidate], which reports the
+  /// wrong category.
+  ///
+  /// Safe from any depth. It never returns normally.
+  void limitExceeded() => throw const _LimitExceeded();
 
   void onUnsigned(int id, int value) {}
   void onSigned(int id, int value) {}
@@ -697,6 +730,9 @@ class Decoder {
     } on _Invalidated {
       _terminal = true;
       return _terminalStatus = DecodeStatus.invalid;
+    } on _LimitExceeded {
+      _terminal = true;
+      return _terminalStatus = DecodeStatus.limitExceeded;
     }
   }
 
@@ -1324,6 +1360,8 @@ class _ContiguousDecoder {
       _walk(root, 0);
     } on _Invalidated {
       return DecodeStatus.invalid;
+    } on _LimitExceeded {
+      return DecodeStatus.limitExceeded;
     }
     return _st;
   }
