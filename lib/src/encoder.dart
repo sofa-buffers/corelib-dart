@@ -102,11 +102,11 @@ typedef FlushCallback = void Function(Uint8List chunk);
 /// one-shot [encodeToBytes] is that layer in miniature: it allocates once,
 /// visibly, then drives this encoder like any other caller.
 ///
-/// The hot path performs no heap allocation: scalars, headers and array elements
-/// are written straight into the caller-owned buffer. The one exception is the
-/// held-back-sequence run below, which is allocated on the first
-/// [beginSequenceLazy] (never in the constructor, so an encoder that opens no
-/// sequence never pays for it) and grown at most a handful of times.
+/// The hot path performs **no heap allocation**: scalars, headers, strings and
+/// array elements are written straight into the caller-owned buffer, and the
+/// only state the encoder keeps of its own — the held-back-sequence run and the
+/// 8-byte float landing zone — is sized once, in the constructor
+/// (CORELIB_PLAN §6.6).
 ///
 /// Nested sequences are framed **lazily** ([beginSequenceLazy]): the header is
 /// held back until the sequence receives content, so a sequence-typed field that
@@ -138,6 +138,7 @@ class Encoder {
        _flushStart = offset {
     _checkHandover(buffer.length, offset, streaming: true);
     _bufData = ByteData.sublistView(buffer);
+    _fscratchBytes = _fscratch.buffer.asUint8List();
   }
 
   /// Encodes into a caller-supplied [buffer] with **no flush sink** — the first
@@ -168,6 +169,7 @@ class Encoder {
       _flushStart = offset {
     _checkHandover(buffer.length, offset, streaming: false);
     _bufData = ByteData.sublistView(buffer);
+    _fscratchBytes = _fscratch.buffer.asUint8List();
   }
 
   /// Validates a buffer handover (CORELIB_PLAN §5.1) — the constructor, the
@@ -214,9 +216,10 @@ class Encoder {
   ByteData _bufData = ByteData(0);
 
   /// Reusable scratch (+ its byte view) for the rare slow path where a float
-  /// straddles the end of a tiny streaming buffer.
+  /// straddles the end of a tiny streaming buffer. Both are sized at
+  /// construction (CORELIB_PLAN §6.6): bounded working state, never grown.
   final ByteData _fscratch = ByteData(8);
-  late final Uint8List _fscratchBytes = _fscratch.buffer.asUint8List();
+  late final Uint8List _fscratchBytes;
 
   /// Encoder-side nesting depth guard (CORELIB_PLAN §4.9): must not open more
   /// than [maxDepth] sequences.
@@ -228,18 +231,23 @@ class Encoder {
   /// whole run at once — which is what lets [endSequence] simply pop the last
   /// entry.
   ///
-  /// The run is **unbounded**: it grows on demand up to [maxDepth], so the
-  /// hold-back reaches every legal nesting level and this port is canonical at
-  /// every depth (CORELIB_PLAN §6, "How deep the hold-back reaches" — only a
-  /// heap-free profile may bound the run and frame eagerly beyond the bound).
-  /// There is therefore no eager fallback, and one fewer way to break the
-  /// contiguous-suffix invariant.
+  /// The run reaches the full [maxDepth], so the hold-back covers every legal
+  /// nesting level and this port is canonical at every depth (CORELIB_PLAN
+  /// §6.0.1, "How deep the hold-back reaches" — only a constrained profile may
+  /// bound the run and frame eagerly beyond the bound, and this port takes no
+  /// such bound). There is therefore no eager fallback, and one fewer way to
+  /// break the contiguous-suffix invariant.
   ///
-  /// `null` until the first [beginSequenceLazy], so an encoder that never opens
-  /// a sequence never allocates it. These are **encoder state, not buffer
-  /// content**: a flush can never split a pending run, which is why a tiny
-  /// output buffer produces exactly the one-shot bytes.
-  Int32List? _pendingSeq;
+  /// **Sized at construction**, to that full extent: §6.0.1 makes the pending
+  /// run fixed-size state and §6.6 requires such state to be "sized to its full
+  /// extent when the codec is constructed" — "a pending run that doubles as
+  /// nesting deepens allocates on a `write` path, and that is what this section
+  /// forbids". One `Int32List(255)` per encoder, ~1 KiB, and nothing after it.
+  ///
+  /// These are **encoder state, not buffer content**: a flush can never split a
+  /// pending run, which is why a tiny output buffer produces exactly the
+  /// one-shot bytes.
+  final Int32List _pendingSeq = Int32List(maxDepth);
 
   /// Number of valid entries in [_pendingSeq].
   int _nPendingSeq = 0;
@@ -397,7 +405,7 @@ class Encoder {
   /// stay inlined into every writer.
   @pragma('vm:never-inline')
   void _commitPendingSequences() {
-    final ids = _pendingSeq!;
+    final ids = _pendingSeq;
     final n = _nPendingSeq;
     _nPendingSeq = 0;
     for (var i = 0; i < n; i++) {
@@ -762,25 +770,10 @@ class Encoder {
         'field id out of range 0..2^31-1',
       );
     }
-    var ids = _pendingSeq;
-    if (ids == null || _nPendingSeq == ids.length) {
-      ids = _growPendingSequences();
-    }
-    ids[_nPendingSeq++] = id;
+    // The run holds [maxDepth] entries and the depth check above has already
+    // refused the one that would overflow it, so there is nothing to grow.
+    _pendingSeq[_nPendingSeq++] = id;
     _depth++;
-  }
-
-  /// Allocates (first hold-back) or doubles the pending-run store. Out of line
-  /// and never on the steady-state path: the [maxDepth] ceiling of 255 caps the
-  /// total at six growths, and an encoder that never opens a sequence never
-  /// reaches it at all.
-  @pragma('vm:never-inline')
-  Int32List _growPendingSequences() {
-    final old = _pendingSeq;
-    if (old == null) return _pendingSeq = Int32List(8);
-    final grown = Int32List(old.length * 2);
-    grown.setRange(0, old.length, old);
-    return _pendingSeq = grown;
   }
 
   /// Closes the current sequence, letting it **vanish** if it received no

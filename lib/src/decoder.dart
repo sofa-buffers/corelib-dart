@@ -583,7 +583,11 @@ void _readFp64Array(Float64List dst, Uint8List src, int srcStart, int count) {
 /// for a `string`/`blob` payload; a float payload stages in a reusable slot.
 class Decoder {
   Decoder(MessageVisitor root, {this.limits = const DecoderLimits()})
-    : _vis = root;
+    : _vis = root {
+    // Every piece of bounded working state this decoder will ever use is sized
+    // here, at construction, and never again (CORELIB_PLAN §6.6).
+    _fscratchData = ByteData.view(_fscratch.buffer);
+  }
 
   final DecoderLimits limits;
 
@@ -592,11 +596,25 @@ class Decoder {
   /// every field consults it several times.
   MessageVisitor? _vis;
 
-  /// The *enclosing* scopes' visitors, innermost last; its length is the number
-  /// of open sequences. A plain visitor list, not a wrapper object per scope —
-  /// the scope carried nothing else, so a nested message no longer allocates one
-  /// per `sequence_start`. Empty (and never touched) for a flat message.
-  final List<MessageVisitor?> _enclosing = <MessageVisitor?>[];
+  /// The *enclosing* scopes' visitors, innermost last; [_depth] is the number
+  /// of open sequences. A plain visitor slot per level, not a wrapper object
+  /// per scope — the scope carried nothing else, so a nested message allocates
+  /// nothing per `sequence_start`.
+  ///
+  /// **Sized at construction, to its full extent** (CORELIB_PLAN §6.6): this is
+  /// the parse stack the section names as permitted bounded working state, and
+  /// the permission is conditional on the size coming from this document's
+  /// [maxDepth] rather than from the wire. A list that grew as nesting deepened
+  /// would allocate on a `feed` path, which is exactly what §6.6 forbids —
+  /// "growing it afterwards is forbidden even where the ceiling it grows
+  /// towards is correct".
+  final List<MessageVisitor?> _enclosing = List<MessageVisitor?>.filled(
+    maxDepth,
+    null,
+  );
+
+  /// Number of open sequences — the number of valid entries in [_enclosing].
+  int _depth = 0;
 
   int _state = _sHeader;
   bool _terminal = false; // an INVALID / limitExceeded outcome is sticky
@@ -643,9 +661,11 @@ class Decoder {
   /// times a float read). Per **decoder**, not a shared static, so interleaved
   /// decoders cannot overwrite each other's half-arrived payload.
   ///
-  /// `late` so a decode that never sees a float never allocates it.
-  late final Uint8List _fscratch = Uint8List(8);
-  late final ByteData _fscratchData = ByteData.view(_fscratch.buffer);
+  /// Allocated **at construction**, not on first float: §6.6 permits bounded
+  /// working state only where it is "sized to its full extent when the codec is
+  /// constructed", and a `late final` initialiser runs on a `feed` path.
+  final Uint8List _fscratch = Uint8List(8);
+  late final ByteData _fscratchData;
 
   /// Feeds a chunk of raw bytes. Returns the outcome for everything consumed so
   /// far (CORELIB_PLAN §5.2).
@@ -814,7 +834,7 @@ class Decoder {
   DecodeStatus _boundaryStatus() {
     // COMPLETE only at a field boundary with no open sequence (CORELIB_PLAN
     // §5.2 framing invariant).
-    if (_state == _sHeader && _vn == 0 && _enclosing.isEmpty) {
+    if (_state == _sHeader && _vn == 0 && _depth == 0) {
       return DecodeStatus.complete;
     }
     return DecodeStatus.incomplete;
@@ -937,10 +957,10 @@ class Decoder {
 
   bool _openSequence(int id) {
     // Open count includes skipped sequences, so COMPLETE waits for them too.
-    if (_enclosing.length >= maxDepth) {
+    if (_depth >= maxDepth) {
       return _fail(DecodeStatus.invalid); // nesting past MAX_DEPTH
     }
-    _enclosing.add(_vis);
+    _enclosing[_depth++] = _vis;
     if (_skipDepth > 0) {
       _skipDepth++;
       _vis = null;
@@ -953,11 +973,13 @@ class Decoder {
   }
 
   bool _closeSequence() {
-    if (_enclosing.isEmpty) {
+    if (_depth == 0) {
       return _fail(DecodeStatus.invalid); // sequence-end with no open sequence
     }
     final closed = _vis;
-    _vis = _enclosing.removeLast();
+    final top = --_depth;
+    _vis = _enclosing[top];
+    _enclosing[top] = null; // do not keep a closed scope's visitor alive
     if (_skipDepth > 0) {
       _skipDepth--;
     } else {
