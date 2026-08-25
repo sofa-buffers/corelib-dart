@@ -26,7 +26,13 @@ class _Sink extends sofab.MessageVisitor {
 
 void main() {
   final sink = _Sink();
-  final dec = sofab.Decoder(sink);
+  // 3,000,000 elements is over the receiver's default array cap, which is a
+  // deployment number rather than a format one (CORELIB_PLAN §6.2.1): a
+  // receiver that means to take a 24 MiB array says so.
+  final dec = sofab.Decoder(
+    sink,
+    limits: const sofab.DecoderLimits(maxArrayCount: elemCount),
+  );
 
   // Field 1, wire type array_fixlen; element_count; fixlen_word (fp64 → 8 B).
   final header = BytesBuilder();

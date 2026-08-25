@@ -297,7 +297,15 @@ bool _deliverString(MessageVisitor vis, int id, Uint8List bytes) {
 
 /// Configured receiver-side technical limits (CORELIB_PLAN §6.2.1). These are a
 /// deployment **policy**, not schema validity: exceeding one yields
-/// [DecodeStatus.limitExceeded], never [DecodeStatus.invalid]. `null` = unbounded.
+/// [DecodeStatus.limitExceeded], never [DecodeStatus.invalid].
+///
+/// **There is no unset state and no unlimited mode** (§6.2.1). All three caps
+/// are finite, and a decoder built without a [DecoderLimits] carries the
+/// [defaultMaxDynArrayCount] / [defaultMaxDynStringLen] / [defaultMaxDynBlobLen]
+/// defaults rather than nothing: *"Unbounded by the schema is still bounded by
+/// the receiver."* A deployment that wants other numbers passes them — the
+/// values belong to generated code, which knows the schema and the target — but
+/// it cannot pass "none".
 ///
 /// They are the backstop for the fields the **schema** leaves unbounded, and
 /// only those. §6.2.1: a limit "MUST NOT be applied to a field the schema
@@ -307,10 +315,24 @@ bool _deliverString(MessageVisitor vis, int id, Uint8List bytes) {
 /// a field that answers, the declared bound replaces the limit below and a
 /// breach of it is [DecodeStatus.invalid].
 class DecoderLimits {
-  const DecoderLimits({this.maxArrayCount, this.maxStringLen, this.maxBlobLen});
-  final int? maxArrayCount;
-  final int? maxStringLen;
-  final int? maxBlobLen;
+  /// Every cap is finite and every one has a default; passing a negative value
+  /// is rejected rather than read as "unlimited" (§6.2.1).
+  const DecoderLimits({
+    this.maxArrayCount = defaultMaxDynArrayCount,
+    this.maxStringLen = defaultMaxDynStringLen,
+    this.maxBlobLen = defaultMaxDynBlobLen,
+  }) : assert(maxArrayCount >= 0, 'maxArrayCount must not be negative'),
+       assert(maxStringLen >= 0, 'maxStringLen must not be negative'),
+       assert(maxBlobLen >= 0, 'maxBlobLen must not be negative');
+
+  /// Elements in a schema-unbounded array.
+  final int maxArrayCount;
+
+  /// Bytes in a schema-unbounded `string`.
+  final int maxStringLen;
+
+  /// Bytes in a schema-unbounded `blob`.
+  final int maxBlobLen;
 }
 
 /// Weighs an array's wire [count] against the receiver-side cap and, where the
@@ -330,8 +352,7 @@ DecodeStatus? _arrayCountVerdict(
   ArrayKind kind,
   int count,
 ) {
-  final cap = limits.maxArrayCount;
-  if (cap == null || count <= cap) return null;
+  if (count <= limits.maxArrayCount) return null;
   final bound = vis.onArrayCountBound(id, kind);
   // No schema bound on this field: the cap applies, as a policy rejection.
   if (bound == null) return DecodeStatus.limitExceeded;
@@ -349,7 +370,7 @@ DecodeStatus? _fixlenLenVerdict(
   int subtype,
   int length,
 ) {
-  final int? cap;
+  final int cap;
   if (subtype == FixlenType.string) {
     cap = limits.maxStringLen;
   } else if (subtype == FixlenType.blob) {
@@ -357,7 +378,7 @@ DecodeStatus? _fixlenLenVerdict(
   } else {
     return null;
   }
-  if (cap == null || length <= cap) return null;
+  if (length <= cap) return null;
   final bound = vis.onFixlenLenBound(id, subtype);
   if (bound == null) return DecodeStatus.limitExceeded;
   return length > bound ? DecodeStatus.invalid : null;

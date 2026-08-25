@@ -10,6 +10,16 @@ void main() {
   sofab.DecodeStatus decode(String hex) =>
       sofab.Decoder.decode(hexToBytes(hex), RecordingVisitor());
 
+  /// The same decode with the receiver's array cap wound out to the format
+  /// ceiling, so an ARRAY_MAX count is *admitted* and the outcome is decided by
+  /// the bytes rather than by policy (CORELIB_PLAN §6.2.1). Without this the
+  /// cases below would be measuring [sofab.defaultMaxDynArrayCount].
+  sofab.DecodeStatus decodeUncapped(String hex) => sofab.Decoder.decode(
+    hexToBytes(hex),
+    RecordingVisitor(),
+    limits: const sofab.DecoderLimits(maxArrayCount: sofab.arrayMax),
+  );
+
   test('empty input is COMPLETE (valid empty message)', () {
     expect(decode(''), sofab.DecodeStatus.complete);
   });
@@ -81,14 +91,25 @@ void main() {
     const maxCount = 'ffffffff07';
 
     test('unsigned array, count ARRAY_MAX, no elements → INCOMPLETE', () {
-      expect(decode('03$maxCount'), sofab.DecodeStatus.incomplete);
+      expect(decodeUncapped('03$maxCount'), sofab.DecodeStatus.incomplete);
     });
 
     test('signed array, count ARRAY_MAX, no elements → INCOMPLETE', () {
-      expect(decode('0c$maxCount'), sofab.DecodeStatus.incomplete);
+      expect(decodeUncapped('0c$maxCount'), sofab.DecodeStatus.incomplete);
+    });
+
+    // And with the receiver's own cap in place — which is what an unconfigured
+    // decoder carries (§6.2.1: "There is no unset state and no unlimited
+    // mode") — the same count never reaches the element loop at all: it is
+    // refused at the count word, as a policy rejection distinct from INVALID.
+    test('under the default caps the same count is limitExceeded', () {
+      expect(decode('03$maxCount'), sofab.DecodeStatus.limitExceeded);
+      expect(decode('0c$maxCount'), sofab.DecodeStatus.limitExceeded);
     });
 
     test('the skipping path decides the same way', () {
+      // A skipped field allocates nothing, so no cap is applied to it
+      // (§6.2.1) — the outcome is the truncation, whatever the caps are.
       expect(
         sofab.Decoder.decode(
           hexToBytes('03$maxCount'),
@@ -102,7 +123,11 @@ void main() {
       final rec = RecordingVisitor();
       // Three elements on the wire, ARRAY_MAX declared.
       expect(
-        sofab.Decoder.decode(hexToBytes('03${maxCount}010203'), rec),
+        sofab.Decoder.decode(
+          hexToBytes('03${maxCount}010203'),
+          rec,
+          limits: const sofab.DecoderLimits(maxArrayCount: sofab.arrayMax),
+        ),
         sofab.DecodeStatus.incomplete,
       );
       expect(rec.events.where((e) => e.startsWith('AU:')), isEmpty);
