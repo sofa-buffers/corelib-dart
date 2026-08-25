@@ -133,8 +133,9 @@ abstract class MessageVisitor {
   /// fails the decode with [DecodeStatus.invalid], and valid bytes are decoded
   /// and forwarded to [onString].
   ///
-  /// [bytes] is only valid for the duration of the call — the one-shot decoder
-  /// hands out a view onto the input buffer. Copy it to retain it.
+  /// [bytes] is the destination [onBytesDest] handed over, filled: the
+  /// **caller's** storage on both decode surfaces, aliasing nothing the decoder
+  /// was fed (CORELIB_PLAN §6.7.1 — "`decode(buffer)` copies too").
   void onStringBytes(int id, Uint8List bytes) {
     // One scan, ASCII fast path included — see [decodeUtf8Strict], which is the
     // same call a generated override makes inside a matched arm.
@@ -147,17 +148,150 @@ abstract class MessageVisitor {
   }
 
   // Set by the default [onStringBytes] when the payload is not valid UTF-8, and
-  // consumed by `_deliverString` below. An override never touches it: a
+  // consumed by `_deliverPayload` below. An override never touches it: a
   // schema-bound consumer carries its own sticky INVALID flag.
   bool _stringRejected = false;
 
-  /// [value] is only valid for the duration of the call — the one-shot decoder
-  /// hands out a view onto the input buffer. Copy it to retain it.
+  /// [value] is the destination [onBytesDest] handed over, filled — the
+  /// caller's own storage, on either decode surface.
   void onBlob(int id, Uint8List value) {}
+
+  /// The four whole-aggregate conveniences, fired by the default [onArrayDone]
+  /// with the destination [onArrayDest] handed over. A consumer that supplies
+  /// its own destination overrides [onArrayDone] instead and never sees these.
   void onUnsignedArray(int id, Int64List values) {}
   void onSignedArray(int id, Int64List values) {}
   void onFp32Array(int id, Float32List values) {}
   void onFp64Array(int id, Float64List values) {}
+
+  /// The destination a `string`/`blob` payload is written into — **the
+  /// caller's storage**, asked for at the `fixlen_word`, before a single
+  /// payload byte is consumed and before any truncation is known.
+  ///
+  /// This is CORELIB_PLAN §6.6.3's second shape: *"into a destination the
+  /// caller hands back after being told the announced count, with the codec
+  /// refusing a destination too short rather than growing it"*. The codec owns
+  /// no payload storage (§6.6) and hands out nothing that outlives the callback
+  /// (§6.7), so the only place a payload can land is memory this method
+  /// returns. A payload split across `feed` calls is joined *here*, piece by
+  /// piece as each piece arrives (§6.6.2) — there is no library-owned carry
+  /// buffer.
+  ///
+  /// * [total] is the payload's whole length in bytes, already past the schema
+  ///   bound ([onFixlenHeader]) and the receiver cap ([DecoderLimits]).
+  /// * Return a list of **at least [total] bytes**. A shorter one is a mistake
+  ///   in the *call*, not in the message: the decode fails with
+  ///   [SofabError.invalidArgument] (§6.3's third refusal tier) rather than
+  ///   `InvalidMessage` or `LimitExceeded`, and the decoder never grows what it
+  ///   was handed.
+  /// * Return `null` to **decline** the payload. The field is then walked like
+  ///   a skipped one — nothing is materialized, nothing is UTF-8-validated
+  ///   (§6.4.5), and [onBytesDone] does not fire.
+  ///
+  /// [subtype] is [FixlenType.string] or [FixlenType.blob]; `fp32`/`fp64`
+  /// values land in the decoder's own 8-byte landing zone and never come here.
+  ///
+  /// The default allocates one exactly-sized list per payload and is the
+  /// **caller's** allocation, not the codec's: it runs inside a callback the
+  /// codec made, on storage the codec hands straight back (§6.6.1 — "the
+  /// boundary is ownership, not the stack"). It is what makes [onString],
+  /// [onStringBytes] and [onBlob] work for a hand-written visitor. A consumer
+  /// that owns its storage — generated code, a pooled buffer, a caller decoding
+  /// into a fixed record — overrides this and the codec allocates nothing at
+  /// all.
+  Uint8List? onBytesDest(int id, int subtype, int total) =>
+      total == 0 ? _noBytes : Uint8List(total);
+
+  /// The `string`/`blob` payload is complete in [dest] — the very list
+  /// [onBytesDest] returned, with its first [total] bytes written.
+  ///
+  /// Fires once per payload, however the bytes arrived. The default splits the
+  /// two subtypes onto [onStringBytes] (which validates and transcodes) and
+  /// [onBlob]; a consumer that supplied its own destination usually has nothing
+  /// left to do here and overrides this to a no-op.
+  void onBytesDone(int id, int subtype, Uint8List dest, int total) {
+    final bytes = dest.length == total
+        ? dest
+        : Uint8List.sublistView(dest, 0, total);
+    if (subtype == FixlenType.string) {
+      onStringBytes(id, bytes);
+    } else {
+      onBlob(id, bytes);
+    }
+  }
+
+  /// The destination an **array** payload is decoded into — the caller's
+  /// storage, asked for once per array field after [onArrayBegin], before any
+  /// element is consumed. The array counterpart of [onBytesDest], and the same
+  /// clause: §6.6.3, shape B.
+  ///
+  /// The list must match [kind] and hold at least [count] elements:
+  ///
+  /// | kind | destination |
+  /// |---|---|
+  /// | [ArrayKind.unsigned] / [ArrayKind.signed] | `Int64List` |
+  /// | [ArrayKind.fp32] | `Float32List` |
+  /// | [ArrayKind.fp64] | `Float64List` |
+  ///
+  /// A shorter list, or one of the wrong type, fails the decode with
+  /// [SofabError.invalidArgument] (§6.3) — the decoder neither grows it nor
+  /// silently writes fewer elements. `null` declines the field, which is then
+  /// walked like a skipped one and never delivered.
+  ///
+  /// The two float kinds take a typed list rather than a `double` sink for a
+  /// reason beyond speed: the wire bytes are copied into the list's own
+  /// storage, so a signaling or payload `NaN` survives bit-for-bit (§4.6,
+  /// §6.5), where widening through a Dart `double` would quiet it.
+  ///
+  /// The default allocates an exactly-sized list — again the caller's
+  /// allocation, made inside the callback (§6.6.1) — so [onUnsignedArray] and
+  /// its three siblings keep working unchanged.
+  TypedData? onArrayDest(int id, ArrayKind kind, int count) {
+    switch (kind) {
+      case ArrayKind.unsigned:
+      case ArrayKind.signed:
+        return Int64List(count);
+      case ArrayKind.fp32:
+        return Float32List(count);
+      case ArrayKind.fp64:
+        return Float64List(count);
+    }
+  }
+
+  /// The array is complete in [dest] — the very list [onArrayDest] returned,
+  /// with its first [count] elements written.
+  ///
+  /// The default forwards to the whole-aggregate convenience for [kind]. A
+  /// consumer that supplied its own destination overrides this (often to a
+  /// no-op: the elements are already where it wanted them).
+  void onArrayDone(int id, ArrayKind kind, TypedData dest, int count) {
+    switch (kind) {
+      case ArrayKind.unsigned:
+        final v = dest as Int64List;
+        onUnsignedArray(
+          id,
+          v.length == count ? v : Int64List.sublistView(v, 0, count),
+        );
+      case ArrayKind.signed:
+        final v = dest as Int64List;
+        onSignedArray(
+          id,
+          v.length == count ? v : Int64List.sublistView(v, 0, count),
+        );
+      case ArrayKind.fp32:
+        final v = dest as Float32List;
+        onFp32Array(
+          id,
+          v.length == count ? v : Float32List.sublistView(v, 0, count),
+        );
+      case ArrayKind.fp64:
+        final v = dest as Float64List;
+        onFp64Array(
+          id,
+          v.length == count ? v : Float64List.sublistView(v, 0, count),
+        );
+    }
+  }
 
   /// Called **once** per array field, for every array kind, with the wire
   /// element [count] and the element [kind] — *before* any element is consumed
@@ -317,15 +451,76 @@ class ElemRange {
   const ElemRange(this.min, this.max);
 }
 
-/// Hands a materialized `string` payload to [vis] as raw bytes. Returns `false`
-/// when the *default* [MessageVisitor.onStringBytes] rejected it as invalid
-/// UTF-8; an override signals a rejection through its own sticky flag instead,
-/// so this always returns `true` for one.
-bool _deliverString(MessageVisitor vis, int id, Uint8List bytes) {
-  vis.onStringBytes(id, bytes);
+/// Hands a completed `string`/`blob` payload back to [vis] in the destination it
+/// supplied. Returns `false` when the *default* [MessageVisitor.onStringBytes]
+/// rejected the bytes as invalid UTF-8; an override signals a rejection through
+/// its own sticky flag instead, so this always returns `true` for one.
+bool _deliverPayload(
+  MessageVisitor vis,
+  int id,
+  int subtype,
+  Uint8List dest,
+  int total,
+) {
+  vis.onBytesDone(id, subtype, dest, total);
   if (!vis._stringRejected) return true;
   vis._stringRejected = false; // leave the visitor reusable for a fresh decode
   return false;
+}
+
+/// Asks [vis] for the destination of a `string`/`blob` payload and checks what
+/// comes back (CORELIB_PLAN §6.6.3, §6.3).
+///
+/// `null` means the caller declined and the payload is walked. A destination
+/// **too short for the announced length** is the third refusal tier: the
+/// message is well-formed and within every bound it declares, so it is neither
+/// `InvalidMessage` nor `LimitExceeded` but [SofabError.invalidArgument] — a
+/// mistake in the call. The decoder never grows what it was handed.
+Uint8List? _bytesDest(MessageVisitor vis, int id, int subtype, int total) {
+  final dest = vis.onBytesDest(id, subtype, total);
+  if (dest == null) return null;
+  if (dest.length < total) {
+    throw SofabException(
+      SofabError.invalidArgument,
+      'destination for field $id holds ${dest.length} bytes, '
+      'the payload announces $total',
+    );
+  }
+  return dest;
+}
+
+/// The array counterpart of [_bytesDest]: asks for the destination and checks
+/// that it is long enough **and** of the type [kind] requires. Both failures are
+/// [SofabError.invalidArgument] (§6.3) — the call is wrong, not the message.
+TypedData? _arrayDest(MessageVisitor vis, int id, ArrayKind kind, int count) {
+  final dest = vis.onArrayDest(id, kind, count);
+  if (dest == null) return null;
+  final bool typed;
+  switch (kind) {
+    case ArrayKind.unsigned:
+    case ArrayKind.signed:
+      typed = dest is Int64List;
+    case ArrayKind.fp32:
+      typed = dest is Float32List;
+    case ArrayKind.fp64:
+      typed = dest is Float64List;
+  }
+  if (!typed) {
+    throw SofabException(
+      SofabError.invalidArgument,
+      'destination for array field $id does not match element kind '
+      '${kind.name}',
+    );
+  }
+  if (dest.lengthInBytes < count * dest.elementSizeInBytes) {
+    throw SofabException(
+      SofabError.invalidArgument,
+      'destination for array field $id holds '
+      '${dest.lengthInBytes ~/ dest.elementSizeInBytes} elements, '
+      'the array announces $count',
+    );
+  }
+  return dest;
 }
 
 /// Configured receiver-side technical limits (CORELIB_PLAN §6.2.1). These are a
@@ -606,6 +801,28 @@ void _readFp32Array(Float32List dst, Uint8List src, int srcStart, int count) {
   }
 }
 
+/// Byte-swaps the first [count] elements of [dst] **in place**, where the wire's
+/// little-endian bytes were written straight into a big-endian host's storage.
+///
+/// Reading and writing the same four bytes per element, so no staging buffer is
+/// needed and nothing is allocated (CORELIB_PLAN §6.6). Never runs on any
+/// platform Dart currently targets; it is the reason the fast path can be a
+/// plain byte copy on every one of them.
+void _swapFp32InPlace(Float32List dst, int count) {
+  final bd = ByteData.sublistView(dst);
+  for (var i = 0; i < count; i++) {
+    dst[i] = bd.getFloat32(i * 4, Endian.little);
+  }
+}
+
+/// The fp64 twin of [_swapFp32InPlace].
+void _swapFp64InPlace(Float64List dst, int count) {
+  final bd = ByteData.sublistView(dst);
+  for (var i = 0; i < count; i++) {
+    dst[i] = bd.getFloat64(i * 8, Endian.little);
+  }
+}
+
 /// The fp64 twin of [_readFp32Array]: [count] 8-byte little-endian elements out
 /// of [src] at [srcStart] into [dst], in bulk where the host layout already
 /// matches the wire.
@@ -691,6 +908,16 @@ class Decoder {
   int _fixSubtype = 0;
   int _payloadTotal = 0;
   int _payloadPos = 0;
+
+  /// Where the payload in flight is being written — **the caller's
+  /// destination** ([MessageVisitor.onBytesDest] / [MessageVisitor.onArrayDest],
+  /// the latter as a byte view over its storage), or the decoder's own 8-byte
+  /// landing zone for an `fp32`/`fp64` scalar, or `null` while a payload is
+  /// being walked rather than read.
+  ///
+  /// There is no library-owned carry buffer: a payload split across chunks is
+  /// joined here, in the caller's own storage, one piece per `feed`
+  /// (CORELIB_PLAN §6.6.2).
   Uint8List? _payloadBuf;
 
   // Int-array context.
@@ -703,10 +930,11 @@ class Decoder {
   // so the per-element cost is two integer compares and no call.
   ElemRange? _arrElemRange;
 
-  // Fixlen-array context.
+  // Fixlen-array context: the caller's destination for the array in flight, and
+  // the kind it was asked for.
   int _arrFixSubtype = 0;
-  Float32List? _arrF32;
-  Float64List? _arrF64;
+  TypedData? _arrDest;
+  ArrayKind _arrKind = ArrayKind.unsigned;
 
   /// Reusable 8-byte staging area for one `fp32`/`fp64` scalar payload, and its
   /// `ByteData` twin — the widest a float payload gets. A float field therefore
@@ -744,11 +972,18 @@ class Decoder {
     // compiles an element read down to a load, where `List<int>` indexing is an
     // interface call per byte, and only there can the bulk moves below reach
     // memcpy and a 64-bit varint load. A caller that hands over some other
-    // `List<int>` pays one copy for it — `Uint8List.fromList` truncates to 8
-    // bits exactly as the per-byte mask did — and nothing delivered ever
-    // aliases a fed chunk either way (CORELIB_PLAN §9.6).
-    final chunk = data is Uint8List ? data : Uint8List.fromList(data);
+    // `List<int>` gets the byte-wise reader instead — copying the chunk to get
+    // the fast path would be a chunk copy the wire sizes, which §6.6 forbids
+    // the codec outright.
+    if (data is! Uint8List) return _feedSlow(data);
+    final chunk = data;
     final n = chunk.length;
+    // Built at most once per `feed`, and only for a chunk that actually carries
+    // array elements: `ByteData.sublistView` is a §6.6.2 language-forced handle
+    // — it addresses the caller's chunk, carries no message bytes of its own,
+    // and costs the same whatever the chunk's length — but it is not free, so
+    // it is hoisted out of the per-run call it used to sit in.
+    ByteData? chunkData;
     var i = 0;
     while (i < n) {
       final state = _state;
@@ -768,7 +1003,8 @@ class Decoder {
         // whole varints, and reading them as varints beats one state-machine
         // dispatch per byte by roughly an order of magnitude.
         if (state == _sArrElem) {
-          final took = _bulkArrElems(chunk, i, n);
+          chunkData ??= ByteData.sublistView(chunk);
+          final took = _bulkArrElems(chunk, chunkData, i, n);
           if (took < 0) {
             _terminal = true;
             return _terminalStatus;
@@ -793,6 +1029,25 @@ class Decoder {
         return _terminalStatus;
       }
       i++;
+    }
+    return _boundaryStatus();
+  }
+
+  /// The byte-wise reader for a chunk that is not a `Uint8List`.
+  ///
+  /// One `_step` per byte, masked to 8 bits exactly as `Uint8List.fromList`
+  /// would truncate — the same state machine, only without the bulk moves,
+  /// which need the concrete type. It exists because the alternative is
+  /// copying the chunk, and a copy the *wire* sizes is payload storage the
+  /// codec may not take (CORELIB_PLAN §6.6). Callers wanting the fast path
+  /// hand over a `Uint8List`.
+  DecodeStatus _feedSlow(List<int> data) {
+    final n = data.length;
+    for (var i = 0; i < n; i++) {
+      if (!_step(data[i] & 0xFF)) {
+        _terminal = true;
+        return _terminalStatus;
+      }
     }
     return _boundaryStatus();
   }
@@ -857,7 +1112,7 @@ class Decoder {
   /// array is delivered from exactly one place whether it arrived byte-by-byte
   /// or in a single chunk. It also declines a skipped array, whose elements are
   /// walked rather than materialized.
-  int _bulkArrElems(Uint8List data, int from, int end) {
+  int _bulkArrElems(Uint8List data, ByteData bd, int from, int end) {
     final out = _arrInts;
     final limit = _arrCount - 1;
     final first = _arrIndex;
@@ -865,16 +1120,7 @@ class Decoder {
     // (`feed` only calls this with nothing accumulated, `_vn == 0`.)
     if (out == null || first >= limit || end - from < _bulkVarintMin) return 0;
     final signed = _arrType == WireType.arraySigned;
-    final packed = _varintRun(
-      data,
-      ByteData.sublistView(data),
-      end,
-      from,
-      out,
-      first,
-      limit,
-      signed,
-    );
+    final packed = _varintRun(data, bd, end, from, out, first, limit, signed);
     _arrIndex = packed >>> 32;
     // The declared width, applied AT the element (§7.1) — over the run rather
     // than one element at a time, which is the same `feed` call and so the same
@@ -1062,6 +1308,10 @@ class Decoder {
     // consumer learns of a breach the limit would otherwise short-circuit — the
     // limit is a statement about the receiver's capacity, never about the
     // field's validity (§6.2.1).
+    _fixSubtype = subtype;
+    _payloadTotal = length;
+    _payloadPos = 0;
+    _payloadBuf = null;
     if (_read) {
       _vis!.onFixlenHeader(_fieldId, subtype, length);
       // Receiver-side limit (well-formed bytes → limitExceeded, not INVALID) —
@@ -1074,18 +1324,22 @@ class Decoder {
         length,
       );
       if (verdict != null) return _fail(verdict);
+      // A float payload stages in the reusable per-decoder landing zone (4/8
+      // bytes, both validated above). A `string`/`blob` goes straight into the
+      // destination the caller hands over — asked for here, at the length word,
+      // before a payload byte is consumed (§6.6.3). Declining it turns the
+      // field into a walk, exactly as `shouldRead` returning false would have.
+      if (subtype >= FixlenType.string) {
+        final dest = _bytesDest(_vis!, _fieldId, subtype, length);
+        if (dest == null) {
+          _read = false;
+        } else {
+          _payloadBuf = dest;
+        }
+      } else {
+        _payloadBuf = _fscratch;
+      }
     }
-    _fixSubtype = subtype;
-    _payloadTotal = length;
-    _payloadPos = 0;
-    // A float payload stages in the reusable per-decoder scratch (4/8 bytes,
-    // both validated above); only a `string`/`blob`, which is handed to the
-    // visitor, needs storage of its own.
-    _payloadBuf = !_read || length == 0
-        ? null
-        : (subtype == FixlenType.fp32 || subtype == FixlenType.fp64
-              ? _fscratch
-              : Uint8List(length));
     _state = _sFixPayload;
     return length == 0 ? _payloadComplete() : true;
   }
@@ -1135,16 +1389,21 @@ class Decoder {
         _vis!.onFp64(_fieldId, _fscratchData.getFloat64(0, Endian.little));
         return true;
       case FixlenType.string:
-        // Raw wire bytes go to the destination; validation happens there, never
-        // here — this point is only reached for a field being materialized
-        // (CORELIB_PLAN §6.4). The default hook validates strictly (no U+FFFD
-        // substitution) and only then decodes the now-known-valid bytes.
-        if (!_deliverString(_vis!, _fieldId, _payloadBuf ?? _noBytes)) {
+      case FixlenType.blob:
+        // The payload is complete in the caller's own destination; validation
+        // happens there, never here — this point is only reached for a field
+        // being materialized (CORELIB_PLAN §6.4). The default string hook
+        // validates strictly (no U+FFFD substitution) and only then decodes the
+        // now-known-valid bytes.
+        if (!_deliverPayload(
+          _vis!,
+          _fieldId,
+          _fixSubtype,
+          _payloadBuf ?? _noBytes,
+          _payloadTotal,
+        )) {
           return _fail(DecodeStatus.invalid);
         }
-        return true;
-      case FixlenType.blob:
-        _vis!.onBlob(_fieldId, _payloadBuf ?? _noBytes);
         return true;
     }
     return _fail(DecodeStatus.invalid);
@@ -1165,18 +1424,29 @@ class Decoder {
       final kind = _arrType == WireType.arraySigned
           ? ArrayKind.signed
           : ArrayKind.unsigned;
+      _arrKind = kind;
       _vis!.onArrayBegin(_fieldId, kind, count);
       final verdict = _arrayCountVerdict(_vis!, limits, _fieldId, kind, count);
       if (verdict != null) return _fail(verdict);
       // Asked once, here, for the same reason onArrayBegin fires here: this is
       // where the field is fully identified and no element has been consumed.
       _arrElemRange = _vis!.onArrayElemBound(_fieldId, kind);
+      // ... and the destination, for the same reason again: the elements are
+      // decoded straight into the caller's storage (§6.6.3), so it has to be in
+      // hand before the first one. Declining turns the field into a walk.
+      final dest = _arrayDest(_vis!, _fieldId, kind, count);
+      if (dest == null) {
+        _read = false;
+        _arrInts = null;
+      } else {
+        _arrInts = dest as Int64List;
+      }
     } else {
       _arrElemRange = null;
+      _arrInts = null;
     }
     _arrCount = count;
     _arrIndex = 0;
-    _arrInts = _read ? Int64List(count) : null;
     if (count == 0) {
       if (_read) _emitIntArray();
       _state = _sHeader;
@@ -1208,12 +1478,7 @@ class Decoder {
   }
 
   void _emitIntArray() {
-    final v = _arrInts!;
-    if (_arrType == WireType.arraySigned) {
-      _vis!.onSignedArray(_fieldId, v);
-    } else {
-      _vis!.onUnsignedArray(_fieldId, v);
-    }
+    _vis!.onArrayDone(_fieldId, _arrKind, _arrInts!, _arrCount);
   }
 
   bool _onArrFixCount(int count) {
@@ -1251,6 +1516,7 @@ class Decoder {
     // INVALID here dominates a short tail (§5.2). It also fires for count == 0.
     if (_read) {
       final kind = subtype == FixlenType.fp32 ? ArrayKind.fp32 : ArrayKind.fp64;
+      _arrKind = kind;
       _vis!.onArrayBegin(_fieldId, kind, _arrCount);
       final verdict = _arrayCountVerdict(
         _vis!,
@@ -1265,47 +1531,42 @@ class Decoder {
     _payloadTotal = _arrCount * length;
     _payloadPos = 0;
     if (_read) {
-      // ONE allocation for the payload, not two: the result list is allocated
-      // here and the arriving wire bytes are staged directly in *its* storage,
-      // because a fixlen array's payload already is that list's little-endian
-      // byte image. Peak memory is therefore the array itself, and
-      // [_emitFixArray] has nothing left to copy or convert — the streaming
-      // path costs what the one-shot path costs. A (hypothetical) big-endian
-      // host cannot alias the two and keeps a separate staging buffer plus the
-      // element-wise conversion in [_readFp32Array]/[_readFp64Array].
-      final TypedData out;
-      if (subtype == FixlenType.fp32) {
-        final list = Float32List(_arrCount);
-        _arrF32 = list;
-        _arrF64 = null;
-        out = list;
+      // NO staging buffer, and no copy at the end: the arriving wire bytes are
+      // written straight into the **caller's** destination, because a fixlen
+      // array's payload already is that list's little-endian byte image. Peak
+      // memory is the caller's list and nothing else, and [_emitFixArray] has
+      // nothing left to move — the streaming path costs what the one-shot path
+      // costs. A (hypothetical) big-endian host writes the same bytes and swaps
+      // them in place once the payload is whole, which still allocates nothing.
+      final dest = _arrayDest(_vis!, _fieldId, _arrKind, _arrCount);
+      if (dest == null) {
+        _read = false;
+        _arrDest = null;
+        _payloadBuf = null;
       } else {
-        final list = Float64List(_arrCount);
-        _arrF64 = list;
-        _arrF32 = null;
-        out = list;
+        _arrDest = dest;
+        _payloadBuf = Uint8List.sublistView(dest);
       }
-      _payloadBuf = _hostIsLittleEndian
-          ? Uint8List.sublistView(out)
-          : Uint8List(_payloadTotal);
+    } else {
+      _arrDest = null;
+      _payloadBuf = null;
     }
     _state = _sArrFixPayload;
     return _payloadTotal == 0 ? _payloadComplete() : true;
   }
 
   void _emitFixArray() {
-    // Where the payload was staged in the result list's own bytes (the rule —
-    // see [_onArrFixWord]) the elements are already there, bit-exact; only a
-    // big-endian host still has a staging buffer to convert out of.
-    if (_arrFixSubtype == FixlenType.fp32) {
-      final out = _arrF32!;
-      if (!_hostIsLittleEndian) _readFp32Array(out, _payloadBuf!, 0, _arrCount);
-      _vis!.onFp32Array(_fieldId, out);
-    } else {
-      final out = _arrF64!;
-      if (!_hostIsLittleEndian) _readFp64Array(out, _payloadBuf!, 0, _arrCount);
-      _vis!.onFp64Array(_fieldId, out);
+    // The elements are already in the caller's list, bit-exact; only a
+    // big-endian host has anything left to do, and it does it in place.
+    final out = _arrDest!;
+    if (!_hostIsLittleEndian) {
+      if (_arrFixSubtype == FixlenType.fp32) {
+        _swapFp32InPlace(out as Float32List, _arrCount);
+      } else {
+        _swapFp64InPlace(out as Float64List, _arrCount);
+      }
     }
+    _vis!.onArrayDone(_fieldId, _arrKind, out, _arrCount);
   }
 
   /// One-shot decode of a whole, already-in-memory [bytes] buffer into
@@ -1511,10 +1772,26 @@ class _ContiguousDecoder {
     // (flagged in the override) dominates a short payload (§5.2) — and before
     // the receiver-side limit, which must not short-circuit it (§6.2.1). See
     // [_fixlenLenVerdict] for the limit-vs-schema-bound split.
+    // The destination is asked for at the same point the streaming surface asks
+    // — at the length word, before the payload — so the two surfaces make the
+    // same calls in the same order on the same bytes (§6.7.1). `subtype >=
+    // string` is the pair that carries one: fp32/fp64 land in the shared 8-byte
+    // scratch.
+    Uint8List? dest;
     if (read) {
       vis!.onFixlenHeader(id, subtype, length);
       final verdict = _fixlenLenVerdict(vis, _limits, id, subtype, length);
       if (verdict != null) return _bad(verdict);
+      if (subtype >= FixlenType.string) {
+        // A payload longer than what is left in the buffer has been refuted by
+        // the input: the field can never be delivered, so the caller is not
+        // asked for storage it could never be given. Same deduction as
+        // [_intArray]'s, and the reason the one-shot surface never sizes
+        // anything from a count or length the message cannot back.
+        if (_pos + length > _len) return _bad(DecodeStatus.incomplete);
+        dest = _bytesDest(vis, id, subtype, length);
+        if (dest == null) read = false;
+      }
     }
     if (_pos + length > _len) return _bad(DecodeStatus.incomplete);
     final start = _pos;
@@ -1548,23 +1825,17 @@ class _ContiguousDecoder {
           vis!.onFp64(id, _scratchData.getFloat64(0, Endian.little));
           break;
         case FixlenType.string:
-          // See _emitFixlen: the destination validates, the decoder does not.
-          // `Uint8List.view` is a little cheaper than `sublistView`, which adds
-          // a generic range check on top of the same work.
-          final view = Uint8List.view(
-            _buf.buffer,
-            _buf.offsetInBytes + start,
-            length,
-          );
-          if (!_deliverString(vis!, id, view)) {
+        case FixlenType.blob:
+          // The payload is **copied** into the caller's destination, exactly as
+          // the streaming surface copies it: §6.7.1 gives the one-shot path no
+          // view exemption — "decode(buffer) copies too", so that a port's
+          // memory behaviour cannot depend on which entry point was used. See
+          // _emitFixlen: the destination validates, the decoder does not.
+          final d = dest!;
+          if (length != 0) d.setRange(0, length, _buf, start);
+          if (!_deliverPayload(vis!, id, subtype, d, length)) {
             return _bad(DecodeStatus.invalid);
           }
-          break;
-        case FixlenType.blob:
-          vis!.onBlob(
-            id,
-            Uint8List.view(_buf.buffer, _buf.offsetInBytes + start, length),
-          );
           break;
       }
     }
@@ -1586,8 +1857,8 @@ class _ContiguousDecoder {
     // receiver-side limit comes after the hook and yields to a schema bound
     // (§6.2.1) — see [_arrayCountVerdict].
     ElemRange? range;
+    final kind = signed ? ArrayKind.signed : ArrayKind.unsigned;
     if (read) {
-      final kind = signed ? ArrayKind.signed : ArrayKind.unsigned;
       vis!.onArrayBegin(id, kind, count);
       final verdict = _arrayCountVerdict(vis, _limits, id, kind, count);
       if (verdict != null) return _bad(verdict);
@@ -1601,18 +1872,43 @@ class _ContiguousDecoder {
       }
       return true;
     }
-    // Size the result from the bytes actually in hand, not from the wire count.
-    // Every element costs at least one varint byte, so a count above the bytes
-    // that remain has already been refuted by the input: at most `avail`
-    // elements can ever be written, and the array is bound for INCOMPLETE. The
-    // allocation is therefore capped at the input's own size — a 6-byte message
-    // claiming ARRAY_MAX elements would otherwise ask the VM for 17 GB (§7.2
-    // item 5: a well-defined outcome, never a crash; §6.2.1: decide *before*
-    // the allocation). The decode itself still runs over the prefix, so an
-    // element outside its declared width keeps outranking the truncation (§5.2)
-    // instead of being lost to an early bail-out.
+    // A count above the bytes that remain has already been refuted by the
+    // input: every element costs at least one varint byte, so the array is
+    // bound for INCOMPLETE and will never be delivered. The caller is not asked
+    // for a destination it could never be given — a 6-byte message claiming
+    // ARRAY_MAX elements would otherwise have anything sized from that count
+    // (§7.2 item 5: a well-defined outcome, never a crash). The prefix is still
+    // walked, because an element outside its declared width keeps outranking
+    // the truncation (§5.2) instead of being lost to an early bail-out.
+    //
+    // The streaming surface cannot make this deduction — it does not know what
+    // has not arrived yet — which is exactly the gap §6.2.1's receiver caps
+    // cover, and they are checked above on both surfaces alike.
     final avail = _len - _pos;
-    final out = Int64List(count <= avail ? count : avail);
+    if (count > avail) {
+      for (var k = 0; k < count; k++) {
+        final raw = _uvarint();
+        if (_st != DecodeStatus.complete) return false;
+        final v = signed ? (raw >>> 1) ^ -(raw & 1) : raw;
+        if (range != null &&
+            (signed
+                ? (v < range.min || v > range.max)
+                : (v < 0 || v > range.max))) {
+          return _bad(DecodeStatus.invalid);
+        }
+      }
+      return _bad(DecodeStatus.incomplete); // unreachable: count > avail
+    }
+    final dest = _arrayDest(vis!, id, kind, count);
+    if (dest == null) {
+      // Declined: walk the elements and deliver nothing.
+      for (var k = 0; k < count; k++) {
+        _uvarint();
+        if (_st != DecodeStatus.complete) return false;
+      }
+      return true;
+    }
+    final out = dest as Int64List;
     var i = 0;
     // Word-wise element run — the same [_varintRun] the streaming surface uses,
     // so both cost the same per element. Entered only when a maximal varint is
@@ -1655,11 +1951,7 @@ class _ContiguousDecoder {
     if (range != null && _elemOutOfRange(out, 0, count, signed, range)) {
       return _bad(DecodeStatus.invalid);
     }
-    if (signed) {
-      vis!.onSignedArray(id, out);
-    } else {
-      vis!.onUnsignedArray(id, out);
-    }
+    vis.onArrayDone(id, kind, out, count);
     return true;
   }
 
@@ -1689,11 +1981,19 @@ class _ContiguousDecoder {
     // Subtype known and legal: offer the field now, carrying the real element
     // kind, still before the payload (thus before truncation) — over-count
     // flagged here dominates a short tail (§5.2). Fires for count == 0 too.
+    final kind = subtype == FixlenType.fp32 ? ArrayKind.fp32 : ArrayKind.fp64;
+    TypedData? dest;
     if (read) {
-      final kind = subtype == FixlenType.fp32 ? ArrayKind.fp32 : ArrayKind.fp64;
       vis!.onArrayBegin(id, kind, count);
       final verdict = _arrayCountVerdict(vis, _limits, id, kind, count);
       if (verdict != null) return _bad(verdict);
+      // The payload is fixed-width, so a buffer too short for `count * length`
+      // has refuted the count outright: nothing is asked for and nothing is
+      // sized from it. Same deduction as [_intArray]'s, exact here.
+      if (_pos + count * length <= _len) {
+        dest = _arrayDest(vis, id, kind, count);
+        if (dest == null) read = false;
+      }
     }
     final total = count * length;
     if (_pos + total > _len) return _bad(DecodeStatus.incomplete);
@@ -1701,13 +2001,13 @@ class _ContiguousDecoder {
     _pos += total;
     if (read) {
       if (subtype == FixlenType.fp32) {
-        final o = Float32List(count);
+        final o = dest as Float32List;
         _readFp32Array(o, _buf, start, count);
-        vis!.onFp32Array(id, o);
+        vis!.onArrayDone(id, kind, o, count);
       } else {
-        final o = Float64List(count);
+        final o = dest as Float64List;
         _readFp64Array(o, _buf, start, count);
-        vis!.onFp64Array(id, o);
+        vis!.onArrayDone(id, kind, o, count);
       }
     }
     return true;

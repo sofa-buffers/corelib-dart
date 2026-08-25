@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:sofa_buffers_corelib/sofa_buffers_corelib.dart' as sofab;
 import 'package:test/test.dart';
 
@@ -133,6 +135,21 @@ void main() {
       expect(rec.events.where((e) => e.startsWith('AU:')), isEmpty);
     });
 
+    test('a length larger than the input never sizes a destination', () {
+      // The fixlen twin of the cases above: a `string` announcing FIXLEN_MAX
+      // bytes with none present. The one-shot surface knows the buffer cannot
+      // back that length, so it never asks the caller for a destination; the
+      // streaming surface has the receiver cap for the same job.
+      var asked = false;
+      final st = sofab.Decoder.decode(
+        hexToBytes('02f2ffffff0f'),
+        _AskRecorder(() => asked = true),
+        limits: const sofab.DecoderLimits(maxStringLen: sofab.fixlenMax),
+      );
+      expect(st, sofab.DecodeStatus.incomplete);
+      expect(asked, isFalse);
+    });
+
     test('a count that the input can satisfy is unaffected', () {
       final rec = RecordingVisitor();
       expect(
@@ -142,4 +159,16 @@ void main() {
       expect(rec.events, ['AU:0:1,2,3']);
     });
   });
+}
+
+/// Records whether the decoder ever asked for a payload destination.
+class _AskRecorder extends sofab.MessageVisitor {
+  _AskRecorder(this.onAsk);
+  final void Function() onAsk;
+
+  @override
+  Uint8List? onBytesDest(int id, int subtype, int total) {
+    onAsk();
+    return Uint8List(total);
+  }
 }

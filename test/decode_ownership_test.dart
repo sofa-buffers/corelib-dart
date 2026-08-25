@@ -1,17 +1,21 @@
-// CORELIB_PLAN §9.6 — *Input buffer (decoding)*: a port must state, for the
-// **one-shot** `decode(buffer)`, whether decoded `string`/`blob` values are
-// zero-copy views into the caller's buffer or copies. For the **streaming**
-// `feed(chunk)` there is nothing to choose: §6 requires a fed chunk to be
-// reusable the moment `feed` returns.
+// CORELIB_PLAN §7.2 item 4 — the chunk-lifetime and one-shot-buffer tests:
 //
-// This port's two surfaces differ, so the two halves below pin them:
+// * **Overwrite every chunk after `feed` returns** — scrub it, and assert the
+//   decoded message is unchanged. "Nothing else in this list would notice a
+//   decoder that kept a slice into a fed chunk."
+// * **Overwrite the one-shot buffer too** — run `decode(buffer)`, scrub the
+//   whole buffer, and assert the decoded message is unchanged. "The one-shot
+//   path has no view exemption (§6.7.1), and this is the test that proves it; a
+//   port that borrows from the buffer it was handed passes every other item on
+//   this list."
 //
-// * the behaviour half proves what each surface actually does with the bytes —
-//   `Decoder.decode` borrows the caller's buffer, `Decoder.feed` never aliases
-//   a fed chunk;
-// * the documentation half reads the README's `## Memory handling` section and
-//   rejects it unless it states both, because a caller who retains a delivered
-//   `Uint8List` learns the rule from there and nowhere else.
+// The second half of this file used to assert the **opposite** — that
+// `Decoder.decode` hands `onBlob`/`onStringBytes` a view onto the caller's
+// buffer — under the older §9.6, which let a port choose view-or-copy and state
+// its choice. §6.7.1 removed the choice: "decode(buffer) copies too … otherwise
+// a port's memory behaviour would depend on which entry point was used". Every
+// value now lands in a destination the caller supplied (§6.6.3), on both
+// surfaces, so scrubbing the input cannot reach it.
 
 import 'dart:typed_data';
 
@@ -43,68 +47,82 @@ class _Keeper extends sofab.MessageVisitor {
 
   @override
   void onString(int id, String value) => string = value;
+
+  Int64List? ints;
+  Float64List? fp64;
+
+  @override
+  void onUnsignedArray(int id, Int64List values) => ints = values;
+
+  @override
+  void onFp64Array(int id, Float64List values) => fp64 = values;
 }
 
 void main() {
-  group('one-shot decode borrows the caller\'s buffer', () {
-    test('a delivered blob is a view into the input, not a copy', () {
+  group('the one-shot buffer is scrubbable the moment decode returns', () {
+    test('a delivered blob survives the whole buffer being overwritten', () {
       final input = blobAbc();
       final keep = _Keeper();
       expect(sofab.Decoder.decode(input, keep), sofab.DecodeStatus.complete);
       expect(keep.blob, orderedEquals([0x61, 0x62, 0x63]));
 
-      // The caller reuses its own buffer. A copy would be unaffected; a view
-      // moves with the bytes, and that is the contract §9.6 wants stated.
-      input[2] = 0x7a; // 'z'
+      input.fillRange(0, input.length, 0x5a);
       expect(
         keep.blob,
-        orderedEquals([0x7a, 0x62, 0x63]),
-        reason: 'Decoder.decode must hand onBlob a zero-copy view',
+        orderedEquals([0x61, 0x62, 0x63]),
+        reason: 'decode(buffer) must copy into the caller destination (§6.7.1)',
       );
-      // A view, positioned on the payload: the same backing store, offset past
-      // the two header bytes.
-      expect(keep.blob!.offsetInBytes, input.offsetInBytes + 2);
+      // And it is the caller's own storage, not a window onto the input.
+      expect(keep.blob!.buffer, isNot(same(input.buffer)));
     });
 
-    test('onStringBytes is a view too; onString is a fresh String', () {
+    test('a string survives it too, as bytes and as a String', () {
       final input = stringAbc();
       final keep = _Keeper();
       expect(sofab.Decoder.decode(input, keep), sofab.DecodeStatus.complete);
       expect(keep.string, 'abc');
-      expect(keep.stringBytes!.offsetInBytes, input.offsetInBytes + 2);
 
-      input[2] = 0x7a;
-      expect(keep.stringBytes, orderedEquals([0x7a, 0x62, 0x63]));
-      // Transcoding always copies, so the String is immune by construction.
+      input.fillRange(0, input.length, 0x5a);
+      expect(keep.stringBytes, orderedEquals([0x61, 0x62, 0x63]));
       expect(keep.string, 'abc');
+      expect(keep.stringBytes!.buffer, isNot(same(input.buffer)));
     });
 
-    test(
-      'a view stays inside the caller-supplied window of a larger buffer',
-      () {
-        // The input is a window onto a bigger arena: the view must land on the
-        // message's bytes, not on the arena's origin.
-        final arena = Uint8List(32);
-        arena.setRange(8, 13, blobAbc());
-        final input = Uint8List.sublistView(arena, 8, 13);
-        final keep = _Keeper();
-        expect(sofab.Decoder.decode(input, keep), sofab.DecodeStatus.complete);
-        expect(keep.blob, orderedEquals([0x61, 0x62, 0x63]));
-        arena[10] = 0x7a;
-        expect(keep.blob, orderedEquals([0x7a, 0x62, 0x63]));
-      },
-    );
+    test('a window onto a larger arena is not aliased either', () {
+      final arena = Uint8List(32);
+      arena.setRange(8, 13, blobAbc());
+      final input = Uint8List.sublistView(arena, 8, 13);
+      final keep = _Keeper();
+      expect(sofab.Decoder.decode(input, keep), sofab.DecodeStatus.complete);
+      arena.fillRange(0, arena.length, 0x5a);
+      expect(keep.blob, orderedEquals([0x61, 0x62, 0x63]));
+    });
 
-    test('a non-Uint8List input is copied once, so it is not aliased', () {
+    test('an array survives the buffer being overwritten', () {
+      // array_unsigned id 1, count 3, elements 1,2,3 — then an fp64 array.
+      final ints = Uint8List.fromList([0x0b, 0x03, 0x01, 0x02, 0x03]);
+      final keep = _Keeper();
+      expect(sofab.Decoder.decode(ints, keep), sofab.DecodeStatus.complete);
+      ints.fillRange(0, ints.length, 0x5a);
+      expect(keep.ints, orderedEquals([1, 2, 3]));
+
+      final fp = BytesBuilder(copy: true);
+      final enc = sofab.Encoder(fp.add, buffer: Uint8List(64));
+      enc.writeFp64Array(1, const [1.5, 2.5]);
+      enc.flush();
+      final fpBytes = fp.takeBytes();
+      final keep2 = _Keeper();
+      expect(sofab.Decoder.decode(fpBytes, keep2), sofab.DecodeStatus.complete);
+      fpBytes.fillRange(0, fpBytes.length, 0x5a);
+      expect(keep2.fp64, orderedEquals([1.5, 2.5]));
+    });
+
+    test('a non-Uint8List input is not aliased either', () {
       final input = <int>[0x0a, 0x1b, 0x61, 0x62, 0x63];
       final keep = _Keeper();
       expect(sofab.Decoder.decode(input, keep), sofab.DecodeStatus.complete);
       input[2] = 0x7a;
-      expect(
-        keep.blob,
-        orderedEquals([0x61, 0x62, 0x63]),
-        reason: 'the plain List<int> is copied into a Uint8List up front',
-      );
+      expect(keep.blob, orderedEquals([0x61, 0x62, 0x63]));
     });
   });
 
