@@ -333,6 +333,187 @@ void main() {
     );
   });
 
+  // CORELIB_PLAN §6.2.1 / corelib-dart#86. A wrapper array has no count header,
+  // so its length is the highest element **index** and the index is what the
+  // receiver cap has to bound — "checked before the container it indexes into
+  // is extended". The schema `count` (`cap`) and the receiver cap (`rcap`) are
+  // different statements and reach different outcomes: INVALID for the first,
+  // limitExceeded for the second, and §6.2.1 forbids folding either into the
+  // other. They are never both in play — a receiver cap "MUST NOT be applied to
+  // a field the schema already bounds".
+  group('the receiver cap on the element index', () {
+    test('an index at the cap is limitExceeded, and nothing is placed', () {
+      final out = <String>[];
+      final st = run(
+        (e) => e.writeString(4, 'x'),
+        sofab.StringSeq(out, -1, -1, rcap: 4),
+      );
+      expect(st, sofab.DecodeStatus.limitExceeded);
+      expect(out, isEmpty, reason: 'rejected before the container grew');
+    });
+
+    test('index cap-1 decodes', () {
+      final out = <String>[];
+      final st = run(
+        (e) => e.writeString(3, 'x'),
+        sofab.StringSeq(out, -1, -1, rcap: 4),
+      );
+      expect(st, sofab.DecodeStatus.complete);
+      expect(out.length, 4);
+      expect(out[3], 'x');
+    });
+
+    test('a schema-bounded array is governed by its count alone', () {
+      // cap = 2, rcap = 1: the receiver cap must not touch a field the schema
+      // bounds, so index 1 decodes and index 2 is INVALID, not limitExceeded.
+      final ok = <String>[];
+      expect(
+        run((e) => e.writeString(1, 'x'), sofab.StringSeq(ok, 2, -1, rcap: 1)),
+        sofab.DecodeStatus.complete,
+      );
+      final bad = <String>[];
+      expect(
+        run((e) => e.writeString(2, 'x'), sofab.StringSeq(bad, 2, -1, rcap: 1)),
+        sofab.DecodeStatus.invalid,
+      );
+    });
+
+    test('the cap is checked at the fixlen header too', () {
+      // Truncated right behind an over-index element's header: the index
+      // verdict still dominates the truncation (§5.2 anti-folding).
+      final out = BytesBuilder(copy: true);
+      final enc = sofab.Encoder(out.add, buffer: Uint8List(64));
+      enc.beginSequenceLazy(1);
+      enc.writeString(4, 'abcdef');
+      enc.endSequence();
+      enc.flush();
+      final whole = out.takeBytes();
+      final cut = Uint8List.sublistView(whole, 0, whole.length - 4);
+      final dst = <String>[];
+      expect(
+        sofab.Decoder.decode(cut, _Root(sofab.StringSeq(dst, -1, -1, rcap: 4))),
+        sofab.DecodeStatus.limitExceeded,
+      );
+    });
+
+    test('after a rejected index nothing is left partially extended', () {
+      final out = <String>[];
+      final st = run((e) {
+        e.writeString(0, 'a');
+        e.writeString(9, 'z');
+      }, sofab.StringSeq(out, -1, -1, rcap: 4));
+      expect(st, sofab.DecodeStatus.limitExceeded);
+      expect(out, [
+        'a',
+      ], reason: 'the accepted element stands, the rest does not');
+    });
+
+    test('every collector carries the same bound', () {
+      final blobs = <Uint8List>[];
+      expect(
+        run(
+          (e) => e.writeBlob(4, Uint8List.fromList([1])),
+          sofab.BlobSeq(blobs, -1, -1, rcap: 4),
+        ),
+        sofab.DecodeStatus.limitExceeded,
+      );
+
+      final pts = <_Point>[];
+      expect(
+        run(
+          (e) {
+            e.beginSequenceLazy(4);
+            e.writeSigned(0, 1);
+            e.endSequenceKeep();
+          },
+          sofab.MessageSeq<_Point>(
+            pts,
+            -1,
+            _Point.new,
+            _PointVisitor.new,
+            rcap: 4,
+          ),
+        ),
+        sofab.DecodeStatus.limitExceeded,
+      );
+      expect(pts, isEmpty);
+
+      final rows = <List<int>>[];
+      expect(
+        run(
+          (e) => e.writeUnsignedArray(4, const [1, 2]),
+          sofab.IntMatrixSeq(rows, -1, false, 0, 0, rcap: 4),
+        ),
+        sofab.DecodeStatus.limitExceeded,
+      );
+
+      final flags = <List<bool>>[];
+      expect(
+        run(
+          (e) => e.writeUnsignedArray(4, const [1]),
+          sofab.BoolMatrixSeq(flags, -1, rcap: 4),
+        ),
+        sofab.DecodeStatus.limitExceeded,
+      );
+
+      final mat = <List<double>>[];
+      expect(
+        run(
+          (e) => e.writeFp64Array(4, const [1.5]),
+          sofab.DoubleMatrixSeq(mat, -1, true, rcap: 4),
+        ),
+        sofab.DecodeStatus.limitExceeded,
+      );
+
+      final nested = <List<String>>[];
+      expect(
+        run(
+          (e) {
+            e.beginSequenceLazy(4);
+            e.writeString(0, 'x');
+            e.endSequenceKeep();
+          },
+          sofab.NestedSeq<String>(
+            nested,
+            -1,
+            (row) => sofab.StringSeq(row, -1, -1),
+          ),
+        ),
+        sofab.DecodeStatus.complete,
+      );
+      final nested2 = <List<String>>[];
+      expect(
+        run(
+          (e) {
+            e.beginSequenceLazy(4);
+            e.writeString(0, 'x');
+            e.endSequenceKeep();
+          },
+          sofab.NestedSeq<String>(
+            nested2,
+            -1,
+            (row) => sofab.StringSeq(row, -1, -1),
+            rcap: 4,
+          ),
+        ),
+        sofab.DecodeStatus.limitExceeded,
+      );
+    });
+
+    test('an unconfigured collector is still bounded', () {
+      // No rcap passed at all: the default is finite (§6.2.1 admits no unset
+      // state), so a far-away index is a policy rejection rather than a
+      // multi-million-entry list.
+      final out = <String>[];
+      final st = run(
+        (e) => e.writeString(sofab.defaultMaxDynArrayCount, 'x'),
+        sofab.StringSeq(out, -1, -1),
+      );
+      expect(st, sofab.DecodeStatus.limitExceeded);
+      expect(out, isEmpty);
+    });
+  });
+
   group('the payload-side bound', () {
     test(
       'an over-maxlen element is rejected even when the header word is not',

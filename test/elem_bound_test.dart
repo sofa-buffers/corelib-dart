@@ -211,8 +211,29 @@ void main() {
     // §5.2 says decides first.
     final v = _WidthVisitor();
     expect(
-      _verdict(v, sofab.Decoder.decode(hexToBytes('0cffffffff07b051'), v)),
+      _verdict(
+        v,
+        sofab.Decoder.decode(
+          hexToBytes('0cffffffff07b051'),
+          v,
+          // The receiver cap is wound out so the count is admitted: an
+          // unconfigured decoder refuses this count at the count word instead
+          // (§6.2.1), which the next case pins.
+          limits: const sofab.DecoderLimits(maxArrayCount: sofab.arrayMax),
+        ),
+      ),
       sofab.DecodeStatus.invalid,
+    );
+  });
+
+  test('the same impossible count is limitExceeded under the default cap', () {
+    // §6.2.1 fixes the enforcement point at the count word — before the
+    // element the previous case is about is ever read — so the receiver's own
+    // cap decides first, and as a policy rejection, never as INVALID.
+    final v = _WidthVisitor();
+    expect(
+      sofab.Decoder.decode(hexToBytes('0cffffffff07b051'), v),
+      sofab.DecodeStatus.limitExceeded,
     );
   });
 

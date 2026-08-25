@@ -11,6 +11,27 @@ const int idMax = 2147483647;
 const int fixlenMax = 2147483647;
 const int arrayMax = 2147483647;
 
+/// The receiver-side technical limits' **defaults** (CORELIB_PLAN §6.2.1).
+///
+/// §6.2.1 makes three caps mandatory on every receiver — elements in a
+/// schema-unbounded array, bytes in a schema-unbounded `string`, bytes in a
+/// schema-unbounded `blob` — and says of them: *"There is no unset state and no
+/// unlimited mode. Unbounded by the schema is still bounded by the receiver."*
+/// A `DecoderLimits` therefore has no way to express "no limit", and these are
+/// what it starts from.
+///
+/// **The numbers are a deployment judgement, not a wire fact.** They come from
+/// generated code, which knows the schema and the target (§6.2.1: *"The limits
+/// come from generated code … the values are a per-language, per-deployment
+/// judgement"*). What the corelib owes is that the unconfigured decoder is
+/// already bounded, so a `Decoder` built with no `DecoderLimits` at all cannot
+/// be talked into an unbounded commitment by a 7-byte message. These values
+/// match the ones `corelib-ts` defaults to, so two unconfigured receivers in
+/// the family agree.
+const int defaultMaxDynArrayCount = 1 << 20; // 1,048,576 elements
+const int defaultMaxDynStringLen = 16 << 20; // 16 MiB
+const int defaultMaxDynBlobLen = 64 << 20; // 64 MiB
+
 /// Maximum nested-sequence depth (CORELIB_PLAN §4.9, §6.2).
 const int maxDepth = 255;
 

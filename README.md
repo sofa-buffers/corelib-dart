@@ -59,9 +59,9 @@ The public surface lives under the fixed `sofab` namespace; import it aliased.
 |-------------|--------------------------------|
 | Streaming output | `Encoder` writes into a fixed `Uint8List` and invokes a `FlushCallback` when it fills; the buffer can be smaller than the message and swapped mid-stream (`installBuffer`). `Encoder.overBuffer` takes the same caller buffer **without** a sink: it holds the whole message (`written`) or reports `BufferFull`. |
 | Streaming input | `Decoder.feed()` accepts any-size chunks; an explicit byte-state machine resumes across boundaries and returns the three-valued `DecodeStatus` — no finalize step. |
-| Zero unnecessary copies | Flush hands out a `Uint8List.sublistView` of the live buffer; decoded blobs bind the payload buffer directly; string bytes are validated in place before one decode; a streamed `fp32`/`fp64` array is assembled *in* the typed list it is delivered as. |
-| Low / no allocation on the hot path | Header/varint/array writes go straight to the buffer; `Encoder.reset()` reuses buffer + encoder across messages; typed-data (`Int64List`/`Float64List`) for arrays; a decoded `fp32`/`fp64` scalar stages in a reusable per-decoder slot, and an open sequence costs no object at all. |
-| Small, predictable footprint | One tiny per-field carry buffer for chunk-straddling payloads; no reflection, no codegen at runtime. |
+| Zero unnecessary copies | Flush hands out a `Uint8List.sublistView` of the live buffer; a payload is written once, straight into the destination its reader supplied — including a string transcoded on encode, which goes into the output buffer rather than through one of its own; an `fp32`/`fp64` array is decoded *in* the typed list it is delivered as. |
+| No allocation on the hot path | Header/varint/array writes go straight to the caller's buffer; every decoded payload goes straight into the caller's destination; `Encoder.reset()` reuses buffer + encoder across messages; a decoded `fp32`/`fp64` scalar stages in a reusable per-decoder slot, and an open sequence costs no object at all. |
+| Small, predictable footprint | Codec state is one `MAX_DEPTH` run plus an 8-byte landing zone per side, sized in the constructor and never grown; no reflection, no codegen at runtime. |
 | Type safety | Typed `write*` methods and a typed `MessageVisitor`; `SofabException` carries a `SofabError` code, `Decoder` reports `DecodeStatus`. |
 | Cross-language compatibility | Validated against the shared `assets/test_vectors.json` for encode, decode, chunked, skip and roundtrip. |
 
@@ -318,14 +318,14 @@ skipped field is never UTF-8-validated.
 ## Memory handling
 
 Only two buffers matter — the one you encode into and the one you decode from —
-and both are caller-owned. The two decode surfaces answer the ownership question
-differently, so they get a row each.
+and both are caller-owned. The library owns neither, on either decode surface.
 
 | Buffer | Owner | Lifetime |
 |--------|-------|----------|
 | Output buffer (encode) | Caller — always | Reused after every flush; caller may swap it mid-stream. The flush view is valid only during the callback — copy to keep. |
-| Input buffer, one-shot decode (`Decoder.decode`) | Caller | Must outlive the call **and every value kept from it**: delivered `blob` / `onStringBytes` values are zero-copy views into your buffer. Copy to retain. |
+| Input buffer, one-shot decode (`Decoder.decode`) | Caller | Must outlive the call. Nothing delivered aliases it. |
 | Input chunk, streaming decode (`Decoder.feed`) | Caller | Reusable the moment `feed` returns. Nothing delivered aliases the chunk. |
+| Every decoded value | Caller | Written into a destination you supplied, and yours for as long as you keep it. |
 
 - **The library allocates no output buffer.** Every buffer the encoder writes
   into is one you handed over: `buffer:` is a **required** argument of the
@@ -343,6 +343,11 @@ differently, so they get a row each.
   installation, not just the first. If the buffer fills with no room after a
   flush, `writeX` throws `BufferFull` rather than overflowing.
   `Encoder.reset()` rewinds it for the next message.
+- **A sink is only ever handed memory inside the installed buffer.**
+  Pass-through is forbidden: however large a `string` or `blob` you write, its
+  bytes travel through the output buffer like everything else, so a flush
+  callback has exactly one case to handle. There is no permission that
+  reinstates it.
 - **`MIN_OUTPUT_BUFFER` = `sofab.minOutputBuffer` = 1.** The smallest buffer
   this port accepts for *streaming*, and a one-byte streaming buffer produces
   byte-identical output to the one-shot path. It binds a buffer installed **with
@@ -357,49 +362,82 @@ differently, so they get a row each.
   a no-op that leaves the bytes where they are. `written` is a zero-copy view of
   the message inside your buffer, starting at the installation's `offset`, valid
   until the next write.
-- **Input buffer, one-shot decode — zero-copy.** You own the buffer you pass to
-  `Decoder.decode`, and the decoder borrows it: `onBlob` and `onStringBytes`
-  receive a `Uint8List` **view** onto your bytes, not a copy. The view is valid
-  exactly as long as the buffer is alive and unmodified, so copy it
-  (`Uint8List.fromList(value)`) to keep it past the visitor call. `onString` is
-  the exception in the other direction: transcoding to a Dart `String` always
-  copies, so that value is yours unconditionally. Passing a plain `List<int>`
-  that is not a `Uint8List` copies it into one up front — the views then point
-  into that private copy, and your list is untouched. Only `blob` and
-  `onStringBytes` borrow: an array field is a freshly allocated typed list on
-  either surface, and scalars are values.
-- **Input chunk, streaming decode — copied out.** You own the chunks you feed
-  and may reuse or overwrite each one the moment `feed` returns: a payload is
-  reassembled into a library-owned carry buffer, so no delivered value ever
-  aliases a fed chunk. The hot path allocates nothing for scalars — an
-  `fp32`/`fp64` payload stages in a reusable slot the decoder owns for its
-  lifetime — so that per-field carry buffer, for a `string` or `blob`, is the
-  only library-owned heap. Values are delivered to your visitor at completion;
-  copy them out if you need them past the callback. Feeding a plain `List<int>`
-  that is not a `Uint8List` copies the chunk once up front, the same way
-  `Decoder.decode` does.
-- **A streamed array is never staged twice.** An `array<fp32>`/`array<fp64>`
-  payload *is* the little-endian byte image of the `Float32List`/`Float64List`
-  it decodes into, so a chunked decode has no carry buffer for it at all: the
-  arriving bytes are written straight into the list that will be delivered. Peak
-  memory is one array, whatever the chunking. Payload bytes (this and
-  `string`/`blob` alike) are moved a chunk-run at a time rather than byte by
-  byte.
-- **Array counts are never trusted for sizing.** On the one-shot surface
-  (`Decoder.decode`) the whole message is in hand, so an `element_count` larger
-  than the bytes that remain is refuted by the input: the result is sized from
-  what those bytes can actually hold, and the decode reports `incomplete`. A
-  short message claiming `ARRAY_MAX` elements therefore costs an allocation on
-  the order of the message, not of the count. When the input arrives in chunks
-  the count cannot be refuted that way — there set
-  `DecoderLimits(maxArrayCount: …)`, which is enforced at the count word,
-  *before* the allocation it prevents, and reports `limitExceeded`.
+- **Input bytes (decoding).** You own them, and they must stay alive for the
+  duration of the call you hand them to — `feed(chunk)` or `decode(buffer)` —
+  and no longer. Both surfaces are the same in this: the moment the call
+  returns, the bytes are yours to reuse, overwrite or free, and nothing the
+  decoder delivered changes.
+- **No wire value decides an allocation in the library.** No count, length or
+  payload on the wire sizes anything the codec takes, on the one-shot path
+  exactly as on the streaming one. There is **no library-owned accumulator for
+  a chunk-straddling field**: a `string` or `blob` split across `feed` calls is
+  joined in *your* destination, one piece per call.
+- **Every decoded value lands in a destination you supply.** The decoder asks
+  for it at the header that announces the size — `onBytesDest(id, subtype,
+  total)` for a `string`/`blob`, `onArrayDest(id, kind, count)` for an array —
+  and writes into what you hand back. Returning a list shorter than announced,
+  or of the wrong element type, fails the decode with
+  `SofabException(invalidArgument, …)`: the decoder never grows what it was
+  given. Returning `null` declines the field, which is then walked like a
+  skipped one.
+
+  The `MessageVisitor` defaults allocate an exactly-sized destination per field
+  and forward it to `onString`, `onStringBytes`, `onBlob` and the four
+  whole-array callbacks, so a hand-written visitor needs none of this. That
+  allocation is **yours**, made inside a callback: override the two `…Dest`
+  hooks with storage you own — a record's own list, a pooled buffer — and the
+  decode allocates nothing at all.
+- **Nothing outlives the callback.** What a callback receives is valid until it
+  returns; a value you keep, you keep because the storage was yours to begin
+  with. There is no payload-position getter and no "valid until the next feed"
+  value, on either surface. `onString` is the one value the library materializes
+  for you — transcoding to a Dart `String` always copies — and it is
+  unconditionally yours.
+- **The library's own state is sized once, in the constructor.** An `Encoder`
+  holds a `MAX_DEPTH`-entry pending-sequence run and an 8-byte float landing
+  zone; a `Decoder` holds a `MAX_DEPTH`-entry parse stack and its own 8-byte
+  landing zone. None of them grows, and none of them is sized by anything on the
+  wire. An open sequence costs no object at all, and an `fp32`/`fp64` scalar
+  stages in that landing zone rather than in a per-field buffer.
+- **The typed-data handles the language forces, in full.** Dart's bulk-copy and
+  float primitives take a view object rather than a pointer and a length, so the
+  codec allocates these — each a fixed-size wrapper over memory *you* own, whose
+  cost is the same for ten bytes as for ten megabytes:
+
+  | handle | when |
+  |---|---|
+  | `Uint8List.sublistView` of the output buffer | once per flush, and once per `written` |
+  | `ByteData.sublistView` of the output buffer | once per buffer installation |
+  | `String.codeUnits` | once per non-ASCII `writeString` |
+  | `ByteData.sublistView` of a fed chunk | at most once per `feed`, and only for a chunk carrying integer-array elements |
+  | `Uint8List.sublistView` of an array destination | once per `fp32`/`fp64` array field |
+  | `ByteData.view` of the input buffer | once per `Decoder.decode` that reads an array |
+
+  `bench/alloc_profile.dart` measures what is left, and
+  `test/alloc_profile_test.dart` gates it: a 16-byte and a 4096-byte payload of
+  the same field shape must cost the same.
+- **The collectors beside the codec are the generated layer's, and they
+  allocate.** `StringSeq`, `BlobSeq`, `MessageSeq`, `NestedSeq`, `IntMatrixSeq`,
+  `DoubleMatrixSeq` and `BoolMatrixSeq` build a wrapper array's container as its
+  elements arrive — the one place where growing is right, because a wrapper
+  array has no count on the wire and its length is *highest present id + 1*.
+  They are helpers the generated layer reaches through the visitor, not part of
+  the codec. Their growth is `List.add`'s, which doubles, so filling a gap of
+  *n* costs O(*n*) amortised rather than O(*n*²) — **untested**: Dart offers no
+  in-process allocation counter fine enough to assert a growth geometry, so this
+  is stated here rather than reported as a covered case.
 - **`DecoderLimits` is the *unbounded*-field backstop, and only that.** Its
   three caps are deployment policy, not schema validity: they apply to a field
   whose schema declares no `count:`/`maxlen:`, and never to a field the schema
-  already bounds — there a breach is `invalid`, never `limitExceeded`. Only the
-  schema knows which fields those are, so a schema-bound (generated) consumer
-  says so:
+  already bounds — there a breach is `invalid`, never `limitExceeded`. All three
+  are finite and there is no way to say "unlimited": an unconfigured `Decoder`
+  carries `sofab.defaultMaxDynArrayCount` (2²⁰ elements),
+  `sofab.defaultMaxDynStringLen` (16 MiB) and `sofab.defaultMaxDynBlobLen`
+  (64 MiB). A wrapper array's element **index** is bounded the same way, by the
+  collectors' `rcap`, because the index is what the array's length is.
+
+  Only the schema knows which fields the caps must stay off, so a schema-bound
+  (generated) consumer says so:
 
   ```dart
   @override
@@ -412,13 +450,13 @@ differently, so they get a row each.
 
   For a field that answers, the declared bound *replaces* the cap: a wire
   count/length past it is `invalid` (decided at the count/length word, before
-  the allocation), and one within it decodes however tight the cap is.
+  the payload), and one within it decodes however tight the cap is.
   `kind`/`subtype` are what the **wire** declares — return `null` for one the
   field does not declare, since that is a skipped field and no schema bound
   covers it. Both hooks are asked at most once per field and only once a cap has
-  actually been exceeded, so a decode with no `DecoderLimits` never calls them.
-  `onFixlenHeader`/`onArrayBegin` fire *before* the cap is weighed either way,
-  so a consumer that enforces its bound there always sees the header.
+  actually been exceeded. `onFixlenHeader`/`onArrayBegin` fire *before* the cap
+  is weighed either way, so a consumer that enforces its bound there always sees
+  the header.
 
 ## Build & test
 
@@ -446,12 +484,15 @@ git-ignored.
 Three tools, following the cross-language [`BENCH_SPEC.md`](https://github.com/sofa-buffers/documentation/blob/main/BENCH_SPEC.md):
 
 ```console
-bash  bench/run_bench.sh         # AOT-native throughput + per-op (recommended)
-bash  bench/run_callgrind.sh     # Callgrind Ir/op (instructions retired per op)
+bash  bench/run_bench.sh          # AOT-native throughput + per-op (recommended)
+bash  bench/run_callgrind.sh      # Callgrind Ir/op (instructions retired per op)
 
 # Quick JIT variants (no compile step, but slower / with VM warmup):
-dart run bench/bench.dart        # throughput (MB/s) over a ~1s CPU-time loop
-dart run bench/perf.dart         # per-op cost for the 170-byte perf message
+dart run bench/bench.dart         # throughput (MB/s) over a ~1s CPU-time loop
+dart run bench/perf.dart          # per-op cost for the 170-byte perf message
+
+# Allocations per op (JIT only — it needs the VM service):
+dart run bench/alloc_profile.dart
 ```
 
 > **Run the benchmarks AOT-compiled** (`bench/run_bench.sh` uses
@@ -484,3 +525,11 @@ dart run bench/perf.dart         # per-op cost for the 170-byte perf message
   and machine-independent. It uses the **two-rep subtraction** method (Dart has
   no stable per-workload native symbol to toggle), running an AOT-compiled
   target at two rep counts and subtracting to cancel startup and setup cost.
+- **`alloc_profile`** — allocations and allocated bytes per op, from the VM
+  service's per-class accumulators, for encode and decode of every payload shape
+  at 16 bytes and at 4096. It runs the workload in a spawned isolate (the
+  service RPC allocates in the isolate it reports on) and reports every row net
+  of a `noop` row measured the same way. What it is for is the property the
+  memory rule protects: a row must not cost more because the payload in it is
+  larger. `test/alloc_profile_test.dart` asserts exactly that, so it is a gate
+  rather than a report.

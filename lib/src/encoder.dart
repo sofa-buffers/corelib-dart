@@ -102,11 +102,11 @@ typedef FlushCallback = void Function(Uint8List chunk);
 /// one-shot [encodeToBytes] is that layer in miniature: it allocates once,
 /// visibly, then drives this encoder like any other caller.
 ///
-/// The hot path performs no heap allocation: scalars, headers and array elements
-/// are written straight into the caller-owned buffer. The one exception is the
-/// held-back-sequence run below, which is allocated on the first
-/// [beginSequenceLazy] (never in the constructor, so an encoder that opens no
-/// sequence never pays for it) and grown at most a handful of times.
+/// The hot path performs **no heap allocation**: scalars, headers, strings and
+/// array elements are written straight into the caller-owned buffer, and the
+/// only state the encoder keeps of its own — the held-back-sequence run and the
+/// 8-byte float landing zone — is sized once, in the constructor
+/// (CORELIB_PLAN §6.6).
 ///
 /// Nested sequences are framed **lazily** ([beginSequenceLazy]): the header is
 /// held back until the sequence receives content, so a sequence-typed field that
@@ -138,6 +138,7 @@ class Encoder {
        _flushStart = offset {
     _checkHandover(buffer.length, offset, streaming: true);
     _bufData = ByteData.sublistView(buffer);
+    _fscratchBytes = _fscratch.buffer.asUint8List();
   }
 
   /// Encodes into a caller-supplied [buffer] with **no flush sink** — the first
@@ -168,6 +169,7 @@ class Encoder {
       _flushStart = offset {
     _checkHandover(buffer.length, offset, streaming: false);
     _bufData = ByteData.sublistView(buffer);
+    _fscratchBytes = _fscratch.buffer.asUint8List();
   }
 
   /// Validates a buffer handover (CORELIB_PLAN §5.1) — the constructor, the
@@ -214,9 +216,10 @@ class Encoder {
   ByteData _bufData = ByteData(0);
 
   /// Reusable scratch (+ its byte view) for the rare slow path where a float
-  /// straddles the end of a tiny streaming buffer.
+  /// straddles the end of a tiny streaming buffer. Both are sized at
+  /// construction (CORELIB_PLAN §6.6): bounded working state, never grown.
   final ByteData _fscratch = ByteData(8);
-  late final Uint8List _fscratchBytes = _fscratch.buffer.asUint8List();
+  late final Uint8List _fscratchBytes;
 
   /// Encoder-side nesting depth guard (CORELIB_PLAN §4.9): must not open more
   /// than [maxDepth] sequences.
@@ -228,18 +231,23 @@ class Encoder {
   /// whole run at once — which is what lets [endSequence] simply pop the last
   /// entry.
   ///
-  /// The run is **unbounded**: it grows on demand up to [maxDepth], so the
-  /// hold-back reaches every legal nesting level and this port is canonical at
-  /// every depth (CORELIB_PLAN §6, "How deep the hold-back reaches" — only a
-  /// heap-free profile may bound the run and frame eagerly beyond the bound).
-  /// There is therefore no eager fallback, and one fewer way to break the
-  /// contiguous-suffix invariant.
+  /// The run reaches the full [maxDepth], so the hold-back covers every legal
+  /// nesting level and this port is canonical at every depth (CORELIB_PLAN
+  /// §6.0.1, "How deep the hold-back reaches" — only a constrained profile may
+  /// bound the run and frame eagerly beyond the bound, and this port takes no
+  /// such bound). There is therefore no eager fallback, and one fewer way to
+  /// break the contiguous-suffix invariant.
   ///
-  /// `null` until the first [beginSequenceLazy], so an encoder that never opens
-  /// a sequence never allocates it. These are **encoder state, not buffer
-  /// content**: a flush can never split a pending run, which is why a tiny
-  /// output buffer produces exactly the one-shot bytes.
-  Int32List? _pendingSeq;
+  /// **Sized at construction**, to that full extent: §6.0.1 makes the pending
+  /// run fixed-size state and §6.6 requires such state to be "sized to its full
+  /// extent when the codec is constructed" — "a pending run that doubles as
+  /// nesting deepens allocates on a `write` path, and that is what this section
+  /// forbids". One `Int32List(255)` per encoder, ~1 KiB, and nothing after it.
+  ///
+  /// These are **encoder state, not buffer content**: a flush can never split a
+  /// pending run, which is why a tiny output buffer produces exactly the
+  /// one-shot bytes.
+  final Int32List _pendingSeq = Int32List(maxDepth);
 
   /// Number of valid entries in [_pendingSeq].
   int _nPendingSeq = 0;
@@ -397,7 +405,7 @@ class Encoder {
   /// stay inlined into every writer.
   @pragma('vm:never-inline')
   void _commitPendingSequences() {
-    final ids = _pendingSeq!;
+    final ids = _pendingSeq;
     final n = _nPendingSeq;
     _nPendingSeq = 0;
     for (var i = 0; i < n; i++) {
@@ -566,24 +574,19 @@ class Encoder {
   /// encoder draining through a tiny buffer), and every string that is not pure
   /// ASCII.
   void _writeStringSlow(int id, String value) {
-    final n = value.length;
-    var ascii = true;
-    for (var i = 0; i < n; i++) {
-      if (value.codeUnitAt(i) >= 0x80) {
-        ascii = false;
-        break;
-      }
-    }
-    if (ascii) {
-      _writeHeaderAndVarint(id, WireType.fixlen, (n << 3) | FixlenType.string);
-      for (var i = 0; i < n; i++) {
-        _writeByte(value.codeUnitAt(i));
-      }
-      return;
-    }
-    // Non-ASCII: strict transcode (allocates), rejecting unpaired surrogates.
-    final bytes = encodeUtf8Strict(value);
-    if (bytes == null) {
+    // One `codeUnits` view, used by whichever path runs. It is a fixed-size
+    // handle over the caller's own `String` (CORELIB_PLAN §6.6.2): it carries
+    // no message bytes, and it costs the same for a ten-character string as for
+    // a ten-thousand-character one, so the wire cannot size it.
+    final units = value.codeUnits;
+    if (_writeStringInline(id, units)) return;
+    // The buffer cannot hold the whole payload — a streaming encoder draining
+    // through a small buffer. Size the field first (one pass), then write the
+    // payload byte by byte, flushing as it fills: a `string` is a divisible run
+    // and may be split at any byte (§5.1.3). There is still no transcode
+    // buffer; what is paid instead is a second pass over the code units.
+    final nbytes = utf8LengthStrictUnits(units);
+    if (nbytes < 0) {
       throw const SofabException(
         SofabError.invalidArgument,
         'string is not valid UTF-8 (unpaired surrogate)',
@@ -592,9 +595,124 @@ class Encoder {
     _writeHeaderAndVarint(
       id,
       WireType.fixlen,
-      (bytes.length << 3) | FixlenType.string,
+      (nbytes << 3) | FixlenType.string,
     );
-    _writeRaw(bytes, 0, bytes.length);
+    _writeUtf8(units);
+  }
+
+  /// Writes the whole `string` field in **one pass** over [units], straight into
+  /// the output buffer, or returns false having written nothing.
+  ///
+  /// The wire length of a non-ASCII string is not known until it has been
+  /// transcoded, and the `fixlen_word` carrying it goes out *before* the
+  /// payload. The two ways out of that are a transcode buffer — storage the
+  /// codec would size from the value, which §6.6 forbids — and this one: leave
+  /// the widest a `fixlen_word` can be (5 bytes) unwritten, transcode into the
+  /// buffer behind it, then write the now-known word and slide the payload back
+  /// against it. The slide is a `memmove` of bytes already in cache, against a
+  /// second pass of code-unit reads, which measured dearer.
+  ///
+  /// Entered only with room for everything it could write — any held-back
+  /// sequence headers (at most five bytes each), this header, a maximal
+  /// `fixlen_word`, and three bytes per code unit, which covers every case (a
+  /// surrogate pair is two units and four bytes). No flush can occur inside
+  /// that, so an unpaired surrogate part-way in rewinds the cursor *and* the
+  /// pending-sequence run and leaves no trace at all.
+  bool _writeStringInline(int id, List<int> units) {
+    if (id < 0 || id > idMax) return false; // let the slow path raise it
+    final n = units.length;
+    final buf = _buf;
+    final start = _pos;
+    final pending = _nPendingSeq;
+    if (start + pending * 5 + 25 + 3 * n > buf.length) return false;
+    if (pending != 0) _commitPendingSequences();
+    final bd = _bufData;
+    final wordAt = _putVarint(buf, bd, _pos, (id << 3) | WireType.fixlen);
+    final from = wordAt + 5; // the widest fixlen_word, left unwritten for now
+    var o = from;
+    for (var i = 0; i < n; i++) {
+      final c = units[i];
+      if (c < 0x80) {
+        buf[o++] = c;
+      } else if (c < 0x800) {
+        buf[o++] = 0xC0 | (c >> 6);
+        buf[o++] = 0x80 | (c & 0x3F);
+      } else if (c >= 0xD800 && c <= 0xDBFF) {
+        final c2 = i + 1 < n ? units[i + 1] : 0;
+        if (c2 < 0xDC00 || c2 > 0xDFFF) {
+          _pos = start; // unpaired high surrogate: undo, held-back run included
+          _nPendingSeq = pending;
+          throw const SofabException(
+            SofabError.invalidArgument,
+            'string is not valid UTF-8 (unpaired surrogate)',
+          );
+        }
+        i++;
+        final cp = 0x10000 + (((c - 0xD800) << 10) | (c2 - 0xDC00));
+        buf[o++] = 0xF0 | (cp >> 18);
+        buf[o++] = 0x80 | ((cp >> 12) & 0x3F);
+        buf[o++] = 0x80 | ((cp >> 6) & 0x3F);
+        buf[o++] = 0x80 | (cp & 0x3F);
+      } else if (c >= 0xDC00 && c <= 0xDFFF) {
+        _pos = start; // lone low surrogate
+        _nPendingSeq = pending;
+        throw const SofabException(
+          SofabError.invalidArgument,
+          'string is not valid UTF-8 (unpaired surrogate)',
+        );
+      } else {
+        buf[o++] = 0xE0 | (c >> 12);
+        buf[o++] = 0x80 | ((c >> 6) & 0x3F);
+        buf[o++] = 0x80 | (c & 0x3F);
+      }
+    }
+    final nbytes = o - from;
+    final word = (nbytes << 3) | FixlenType.string;
+    final w = _varintLen(word);
+    // Slide the payload back against the word. `setRange` on one typed list is
+    // a `memmove`, so the overlap at w == 4 is safe.
+    if (w != 5 && nbytes != 0) {
+      buf.setRange(wordAt + w, wordAt + w + nbytes, buf, from);
+    }
+    // Written byte by byte on purpose: [_putVarint] stores eight bytes
+    // unconditionally, which here would land on the payload just moved into
+    // place. At most five iterations.
+    var q = wordAt;
+    var x = word;
+    while (x >= 0x80) {
+      buf[q++] = (x & 0x7F) | 0x80;
+      x >>>= 7;
+    }
+    buf[q++] = x;
+    _pos = wordAt + w + nbytes;
+    return true;
+  }
+
+  /// Transcodes [units] into the output buffer one byte at a time, flushing as
+  /// it fills — the small-buffer path, where [_writeStringInline] could not
+  /// speculate. Every unit here is known encodable ([utf8LengthStrictUnits] ran
+  /// first), so there is no surrogate check left to make.
+  void _writeUtf8(List<int> units) {
+    final n = units.length;
+    for (var i = 0; i < n; i++) {
+      final c = units[i];
+      if (c < 0x80) {
+        _writeByte(c);
+      } else if (c < 0x800) {
+        _writeByte(0xC0 | (c >> 6));
+        _writeByte(0x80 | (c & 0x3F));
+      } else if (c >= 0xD800 && c <= 0xDBFF) {
+        final cp = 0x10000 + (((c - 0xD800) << 10) | (units[++i] - 0xDC00));
+        _writeByte(0xF0 | (cp >> 18));
+        _writeByte(0x80 | ((cp >> 12) & 0x3F));
+        _writeByte(0x80 | ((cp >> 6) & 0x3F));
+        _writeByte(0x80 | (cp & 0x3F));
+      } else {
+        _writeByte(0xE0 | (c >> 12));
+        _writeByte(0x80 | ((c >> 6) & 0x3F));
+        _writeByte(0x80 | (c & 0x3F));
+      }
+    }
   }
 
   /// Writes an opaque blob (fixlen subtype blob, CORELIB_PLAN §4.6).
@@ -762,25 +880,10 @@ class Encoder {
         'field id out of range 0..2^31-1',
       );
     }
-    var ids = _pendingSeq;
-    if (ids == null || _nPendingSeq == ids.length) {
-      ids = _growPendingSequences();
-    }
-    ids[_nPendingSeq++] = id;
+    // The run holds [maxDepth] entries and the depth check above has already
+    // refused the one that would overflow it, so there is nothing to grow.
+    _pendingSeq[_nPendingSeq++] = id;
     _depth++;
-  }
-
-  /// Allocates (first hold-back) or doubles the pending-run store. Out of line
-  /// and never on the steady-state path: the [maxDepth] ceiling of 255 caps the
-  /// total at six growths, and an encoder that never opens a sequence never
-  /// reaches it at all.
-  @pragma('vm:never-inline')
-  Int32List _growPendingSequences() {
-    final old = _pendingSeq;
-    if (old == null) return _pendingSeq = Int32List(8);
-    final grown = Int32List(old.length * 2);
-    grown.setRange(0, old.length, old);
-    return _pendingSeq = grown;
   }
 
   /// Closes the current sequence, letting it **vanish** if it received no

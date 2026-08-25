@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+### Conformance with CORELIB_PLAN@c837108 — the codec allocates no payload storage
+
+**Breaking for a visitor that overrode nothing but relied on where its values
+came from; source-compatible for everything else.** `onString`,
+`onStringBytes`, `onBlob` and the four whole-array callbacks keep their
+signatures and keep firing.
+
+* **Every decoded payload lands in a destination the caller supplies.** Four new
+  `MessageVisitor` hooks — `onBytesDest` / `onBytesDone` for a `string`/`blob`,
+  `onArrayDest` / `onArrayDone` for an array — are asked at the header that
+  announces the size, before a payload byte is consumed (§6.6.3). Their defaults
+  allocate one exactly-sized destination and forward it to the callbacks above,
+  so a hand-written visitor is unchanged; a consumer that owns its storage
+  overrides the two `…Dest` hooks and the codec allocates nothing at all.
+  Returning `null` declines the field, which is then walked like a skipped one;
+  returning something shorter than announced, or of the wrong element type, is
+  `SofabError.invalidArgument` (§6.3's third refusal tier).
+* **`Decoder.decode` no longer hands out a view onto the caller's buffer.**
+  §6.7.1 gives the one-shot path no view exemption — "decode(buffer) copies
+  too" — so both surfaces now copy into the caller's destination. Code that
+  retained an `onBlob`/`onStringBytes` value and read it after mutating the
+  input buffer saw the mutation; it no longer does.
+* **The receiver caps are finite and mandatory.** `DecoderLimits`' three fields
+  are non-nullable with the defaults `defaultMaxDynArrayCount` (2²⁰),
+  `defaultMaxDynStringLen` (16 MiB) and `defaultMaxDynBlobLen` (64 MiB): §6.2.1
+  admits "no unset state and no unlimited mode". Passing `null` no longer
+  compiles, and a negative value is rejected. A decode that legitimately exceeds
+  a default now needs the cap raised — before this, seven bytes could ask the VM
+  for 17 GB.
+* **A wrapper array's element index is bounded too**, by a new `rcap` argument
+  on every collector in `seq.dart`, and `MessageVisitor.limitExceeded()` is the
+  channel it reports through — the receiver-cap counterpart of `invalidate()`,
+  arriving as `DecodeStatus.limitExceeded` rather than as INVALID, which §6.2.1
+  forbids for a policy bound (closes #86).
+* **The encoder transcodes a string into the output buffer** instead of into a
+  buffer of its own, and its held-back sequence run and the decoder's parse
+  stack are sized in the constructor rather than grown.
+* `utf8LengthStrict` / `utf8LengthStrictUnits` join the UTF-8 primitives: the
+  byte length of a `String`, or −1 where an unpaired surrogate makes it
+  unencodable.
+* New: `bench/alloc_profile.dart` measures the codec's allocations per op and
+  `test/alloc_profile_test.dart` gates them; the shared `sequence_growth`
+  vectors run.
+
 ### The generated layer's schema-free half, moved here (VisitorBase, decodeUtf8Strict, utf8Length, elementsEqual)
 
 Purely additive: nothing existing changed name or behaviour, and generated code
