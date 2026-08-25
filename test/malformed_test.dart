@@ -267,6 +267,42 @@ void main() {
     );
   });
 
+  // §7.2 item 5: "Cover the oversized id on a **sequence-end** header too, not
+  // only on a value-bearing one: §6.2 admits no exception, and an
+  // implementation that validates the id only in the branches that *use* it
+  // passes the value-bearing case and misses this one."
+  group('an oversized id on a sequence-end header', () {
+    // (2^31 << 3) | 7 — the end marker's id is discarded (§4.9), but it is
+    // still an id and ID_MAX still binds it.
+    const overMax = '8780808040';
+
+    test('one-shot → INVALID', () {
+      expect(decode(overMax), sofab.DecodeStatus.invalid);
+    });
+
+    test('streaming, byte at a time → INVALID', () {
+      final dec = sofab.Decoder(RecordingVisitor());
+      var st = sofab.DecodeStatus.complete;
+      for (final b in hexToBytes(overMax)) {
+        st = dec.feed([b]);
+      }
+      expect(st, sofab.DecodeStatus.invalid);
+    });
+
+    test('inside an open sequence it is still INVALID', () {
+      // The end marker would otherwise close the sequence and complete the
+      // message, so this is the case an id check placed in the *value-bearing*
+      // branches alone would let through.
+      expect(decode('0e0005$overMax'), sofab.DecodeStatus.invalid);
+    });
+
+    test('the same end marker at exactly ID_MAX is accepted (control)', () {
+      // ((2^31-1) << 3) | 7, one below the case above: the sequence closes
+      // normally and the message completes.
+      expect(decode('0e0005ffffffff3f'), sofab.DecodeStatus.complete);
+    });
+  });
+
   test('INVALID takes precedence over INCOMPLETE when both apply', () {
     // 560a59 is malformed (fp64 wrong length) AND truncated → must be INVALID.
     expect(decode('560a59'), sofab.DecodeStatus.invalid);

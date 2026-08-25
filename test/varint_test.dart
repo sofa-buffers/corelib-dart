@@ -21,6 +21,18 @@ class _Collect extends sofab.MessageVisitor {
   void onUnsignedArray(int id, Int64List v) => arrays.add(v.toList());
   @override
   void onSignedArray(int id, Int64List v) => arrays.add(v.toList());
+
+  final events = <String>[];
+  @override
+  void onString(int id, String value) => events.add('STR:$id:$value');
+  @override
+  sofab.MessageVisitor? onSequenceStart(int id) {
+    events.add('SEQ:$id');
+    return this;
+  }
+
+  @override
+  void onSequenceEnd() => events.add('END');
 }
 
 /// Decodes [bytes] one-shot **and** byte-at-a-time, asserting both surfaces
@@ -45,6 +57,7 @@ _Collect _decodeBothWays(List<int> bytes, sofab.DecodeStatus expected) {
 
   expect(streamed.values, oneShot.values, reason: 'scalars must agree');
   expect(streamed.arrays, oneShot.arrays, reason: 'arrays must agree');
+  expect(streamed.events, oneShot.events, reason: 'events must agree');
   return oneShot;
 }
 
@@ -172,6 +185,91 @@ void main() {
       expect(got.arrays, [
         [5, 300, 7],
       ]);
+    });
+  });
+
+  // CORELIB_PLAN §7.2 item 5b — tolerance, at the *describing* words rather
+  // than at values: "input that is non-canonical but well-formed MUST decode to
+  // the value it denotes and re-encode canonically, never INVALID". These are
+  // the cases "a majority-vote conformance check cannot catch, since
+  // implementations may be uniformly too strict".
+  group('non-minimal varints at the describing words (§7.2 item 5b)', () {
+    test('a field header', () {
+      // (0 << 3) | 0 written as a two-byte varint, then value 5.
+      final got = _decodeBothWays([
+        0x80, 0x00, //  header, non-minimal
+        0x05,
+      ], sofab.DecodeStatus.complete);
+      expect(got.values, [5]);
+    });
+
+    test('a two-byte field header written in three bytes', () {
+      // id 130, unsigned: (130 << 3) | 0 = 1040, minimal is 2 bytes.
+      final got = _decodeBothWays([
+        0x90, 0x88, 0x00, //  1040, non-minimal
+        0x07,
+      ], sofab.DecodeStatus.complete);
+      expect(got.values, [7]);
+    });
+
+    test('a fixlen_word', () {
+      // string id 0, length 3: word (3 << 3) | 2 = 26, written non-minimally.
+      final got = _decodeBothWays([
+        0x02, //              header id 0, fixlen
+        0x9a, 0x00, //        fixlen_word 26, non-minimal
+        0x61, 0x62, 0x63, //  "abc"
+      ], sofab.DecodeStatus.complete);
+      expect(got.events, ['STR:0:abc']);
+    });
+
+    test('an element count', () {
+      final got = _decodeBothWays([
+        0x03, //        array id 0, unsigned
+        0x83, 0x00, //  count 3, non-minimal
+        0x01, 0x02, 0x03,
+      ], sofab.DecodeStatus.complete);
+      expect(got.arrays, [
+        [1, 2, 3],
+      ]);
+    });
+
+    test('a fixlen-array count and its shared word', () {
+      final got = _decodeBothWays([
+        0x05, //        array id 0, fixlen
+        0x81, 0x00, //  count 1, non-minimal
+        0xa0, 0x00, //  fixlen_word (4 << 3) | fp32 = 32, non-minimal
+        0x00, 0x00, 0x80, 0x3f, // 1.0f
+      ], sofab.DecodeStatus.complete);
+      expect(got.events, isEmpty);
+    });
+
+    test('a sequence-end header whose id is non-zero re-encodes as 0x07', () {
+      // §4.9: the id of a sequence-end header is discarded. "a sequence-end
+      // header whose id is non-zero but within ID_MAX MUST decode as an
+      // ordinary sequence end and re-encode as 0x07".
+      final got = _decodeBothWays([
+        0x0e, //  sequence start, id 1
+        0x00, 0x05, //  child: unsigned id 0 = 5
+        0x2f, //  sequence end with id 5 — (5 << 3) | 7
+      ], sofab.DecodeStatus.complete);
+      expect(got.events, ['SEQ:1', 'END']);
+      expect(got.values, [5]);
+
+      final re = sofab.Encoder.encodeToBytes((e) {
+        e.beginSequenceLazy(1);
+        e.writeUnsigned(0, 5);
+        e.endSequence();
+      });
+      expect(re, [0x0e, 0x00, 0x05, 0x07]);
+    });
+
+    test('a sequence-end header written as a non-minimal varint', () {
+      final got = _decodeBothWays([
+        0x0e, //        sequence start, id 1
+        0x00, 0x05,
+        0x87, 0x00, //  end marker 0x07, non-minimal
+      ], sofab.DecodeStatus.complete);
+      expect(got.events, ['SEQ:1', 'END']);
     });
   });
 

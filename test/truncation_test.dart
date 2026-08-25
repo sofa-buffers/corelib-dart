@@ -66,6 +66,48 @@ void main() {
     );
   });
 
+  // §7.2 item 6: "Cover a `fixlen_word` cut after its first byte with that byte
+  // carrying a reserved subtype (0x4–0x7): the subtype is already settled by
+  // the low 3 bits, so an implementation that evaluates it early answers
+  // INVALID where §4.1.1 requires INCOMPLETE. Nothing else in this list
+  // exercises the no-partial-evaluation rule."
+  group('no part of an incomplete varint is evaluated (§4.1.1)', () {
+    for (final sub in const [0x4, 0x5, 0x6, 0x7]) {
+      test('a fixlen_word cut after a first byte carrying subtype $sub', () {
+        // header id 0 fixlen, then one continuation byte whose low 3 bits are
+        // the reserved subtype. The word is unfinished, so nothing about it is
+        // settled — INCOMPLETE, not INVALID.
+        final hex = '02${(0x80 | sub).toRadixString(16).padLeft(2, '0')}';
+        expect(decode(hex), sofab.DecodeStatus.incomplete);
+
+        final dec = sofab.Decoder(RecordingVisitor());
+        var st = sofab.DecodeStatus.complete;
+        for (final b in hexToBytes(hex)) {
+          st = dec.feed([b]);
+        }
+        expect(st, sofab.DecodeStatus.incomplete);
+      });
+    }
+
+    test('and the completed word with a reserved subtype is INVALID', () {
+      // The control: once the varint terminates, the subtype decides.
+      expect(decode('0204'), sofab.DecodeStatus.invalid); // len 0, subtype 4
+      expect(decode('028400'), sofab.DecodeStatus.invalid); // the same, in two
+    });
+
+    test('an array fixlen_word cut the same way is INCOMPLETE too', () {
+      // array id 0 fixlen, count 1, then a first word byte carrying subtype 4.
+      expect(decode('050184'), sofab.DecodeStatus.incomplete);
+      expect(decode('050104'), sofab.DecodeStatus.invalid);
+    });
+
+    test('a field header cut mid-varint settles no wire type', () {
+      // The low 3 bits say "sequence end", which would balance nothing — but
+      // the header is unfinished, so it says nothing at all yet.
+      expect(decode('87'), sofab.DecodeStatus.incomplete);
+    });
+  });
+
   test('feeding the missing bytes completes an INCOMPLETE stream', () {
     final rec = RecordingVisitor();
     final dec = sofab.Decoder(rec);
