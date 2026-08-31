@@ -205,35 +205,32 @@ void main() {
   test('an over-width element outranks even an impossible count', () {
     // Contiguous path only: the count here is ARRAY_MAX, which the streaming
     // decoder has no way to refute (it cannot know how many bytes still
-    // follow) — §6.2.1's `maxArrayCount` is the instrument for that side. On
-    // the one-shot surface the input itself refutes the count, but a decoder
-    // that bailed on the count alone would lose the over-width element that
-    // §5.2 says decides first.
+    // follow) — a receiver cap in the consumer is the instrument for that side,
+    // and the next case pins it. On the one-shot surface the input itself
+    // refutes the count, but a decoder that bailed on the count alone would
+    // lose the over-width element that §5.2 says decides first.
     final v = _WidthVisitor();
     expect(
-      _verdict(
-        v,
-        sofab.Decoder.decode(
-          hexToBytes('0cffffffff07b051'),
-          v,
-          // The receiver cap is wound out so the count is admitted: an
-          // unconfigured decoder refuses this count at the count word instead
-          // (§6.2.1), which the next case pins.
-          limits: const sofab.DecoderLimits(maxArrayCount: sofab.arrayMax),
-        ),
-      ),
+      _verdict(v, sofab.Decoder.decode(hexToBytes('0cffffffff07b051'), v)),
       sofab.DecodeStatus.invalid,
     );
   });
 
-  test('the same impossible count is limitExceeded under the default cap', () {
-    // §6.2.1 fixes the enforcement point at the count word — before the
-    // element the previous case is about is ever read — so the receiver's own
-    // cap decides first, and as a policy rejection, never as INVALID.
-    final v = _WidthVisitor();
+  test('a consumer that caps the count decides at the count word', () {
+    // §6.2.1 fixes the enforcement point at the count word — before the element
+    // the previous case is about is ever read — so a receiver cap stated there
+    // decides first, and as a policy rejection, never as INVALID. The cap is
+    // the consumer's: the decoder holds none and would run straight into the
+    // element.
+    final v = _CappedWidthVisitor(4);
     expect(
       sofab.Decoder.decode(hexToBytes('0cffffffff07b051'), v),
       sofab.DecodeStatus.limitExceeded,
+    );
+    expect(
+      v.reachedElements,
+      isFalse,
+      reason: 'the width guard was never reached',
     );
   });
 
@@ -278,6 +275,28 @@ class _WidthVisitor extends _PlainVisitor {
         return null;
     }
     return null;
+  }
+}
+
+/// [_WidthVisitor] plus the receiver cap generated code would carry for a
+/// schema-unbounded array (CORELIB_PLAN §6.2.1), applied at the count header.
+class _CappedWidthVisitor extends _WidthVisitor {
+  _CappedWidthVisitor(this.cap);
+  final int cap;
+
+  /// Set when the element-width bound is asked for — i.e. when the cap let the
+  /// array through.
+  bool reachedElements = false;
+
+  @override
+  void onArrayBegin(int id, sofab.ArrayKind kind, int count) {
+    if (count > cap) limitExceeded();
+  }
+
+  @override
+  sofab.ElemRange? onArrayElemBound(int id, sofab.ArrayKind kind) {
+    reachedElements = true;
+    return super.onArrayElemBound(id, kind);
   }
 }
 

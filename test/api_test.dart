@@ -117,56 +117,52 @@ void main() {
     expect(bytesToHex(out.toBytes()), bytesToHex(oneShot));
   });
 
-  group('receiver-side limits (policy, not INVALID)', () {
-    test('array count over maxArrayCount → limitExceeded', () {
+  // The caps are the VISITOR's, not the decoder's (CORELIB_PLAN §6.2.1: *"The
+  // numbers and the allocation are not the codec's … the visitor decides"*).
+  // [CappedVisitor] stands in for generated code holding the three configured
+  // `max_dyn_*` numbers and applying them at the header hooks.
+  group('receiver-side caps (policy, not INVALID)', () {
+    test('array count over the cap → limitExceeded', () {
       final bytes = sofab.Encoder.encodeToBytes(
         (e) => e.writeUnsignedArray(0, [1, 2, 3, 4, 5]),
       );
+      final v = CappedVisitor(maxArrayCount: 4);
+      expect(sofab.Decoder.decode(bytes, v), sofab.DecodeStatus.limitExceeded);
+      expect(v.dests, isEmpty, reason: 'refused before the allocation');
+      // The same bytes decode for a receiver configured more loosely — which is
+      // exactly why §6.2.1 forbids folding this into INVALID.
       expect(
-        sofab.Decoder.decode(
-          bytes,
-          RecordingVisitor(),
-          limits: const sofab.DecoderLimits(maxArrayCount: 4),
-        ),
-        sofab.DecodeStatus.limitExceeded,
-      );
-      // Same bytes decode fine with no configured limit.
-      expect(
-        sofab.Decoder.decode(bytes, RecordingVisitor()),
+        sofab.Decoder.decode(bytes, CappedVisitor(maxArrayCount: 8)),
         sofab.DecodeStatus.complete,
       );
     });
 
-    test('string length over maxStringLen → limitExceeded', () {
+    test('string length over the cap → limitExceeded', () {
       final bytes = sofab.Encoder.encodeToBytes(
         (e) => e.writeString(0, 'abcdef'),
       );
       expect(
-        sofab.Decoder.decode(
-          bytes,
-          RecordingVisitor(),
-          limits: const sofab.DecoderLimits(maxStringLen: 3),
-        ),
+        sofab.Decoder.decode(bytes, CappedVisitor(maxStringLen: 3)),
         sofab.DecodeStatus.limitExceeded,
+      );
+      expect(
+        sofab.Decoder.decode(bytes, CappedVisitor(maxStringLen: 6)),
+        sofab.DecodeStatus.complete,
       );
     });
 
-    test(
-      'a skipped over-limit field is not policed (limit applies on read)',
-      () {
-        final bytes = sofab.Encoder.encodeToBytes(
-          (e) => e.writeUnsignedArray(7, [1, 2, 3, 4, 5]),
-        );
-        expect(
-          sofab.Decoder.decode(
-            bytes,
-            RecordingVisitor(skipIds: {7}),
-            limits: const sofab.DecoderLimits(maxArrayCount: 4),
-          ),
-          sofab.DecodeStatus.complete,
-        );
-      },
-    );
+    test('a skipped over-cap field is not policed (a cap applies on read)', () {
+      final bytes = sofab.Encoder.encodeToBytes(
+        (e) => e.writeUnsignedArray(7, [1, 2, 3, 4, 5]),
+      );
+      expect(
+        sofab.Decoder.decode(
+          bytes,
+          CappedVisitor(maxArrayCount: 4, skipIds: const {7}),
+        ),
+        sofab.DecodeStatus.complete,
+      );
+    });
   });
 
   test('empty sequence and empty arrays are well-formed', () {

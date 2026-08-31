@@ -302,6 +302,64 @@ class RecordingVisitor extends sofab.MessageVisitor {
   void onSequenceEnd() => events.add('END');
 }
 
+/// Stands in for generated code carrying the three configured `max_dyn_*` caps
+/// (CORELIB_PLAN §6.2.1), for the tests that need a *receiver* rather than a
+/// bare recorder.
+///
+/// The caps are the visitor's, because §6.2.1 leaves them nowhere else: *"The
+/// numbers and the allocation are not the codec's … the visitor decides."* Each
+/// is applied in the header hook the codec reports at — [onArrayBegin] for a
+/// count, [onFixlenHeader] for a `string`/`blob` length — which is also the
+/// point before the destination is asked for, so a refusal costs no allocation.
+/// The schema it stands for bounds nothing, so every field is the cap's
+/// business; a consumer whose schema DOES bound a field states that bound here
+/// instead, and never both (see `schema_bound_limit_test.dart`).
+///
+/// There is no unset state (§6.2.1): the loosest a cap gets is the format's own
+/// ceiling.
+class CappedVisitor extends RecordingVisitor {
+  CappedVisitor({
+    this.maxArrayCount = sofab.arrayMax,
+    this.maxStringLen = sofab.fixlenMax,
+    this.maxBlobLen = sofab.fixlenMax,
+    super.skipIds,
+  });
+
+  final int maxArrayCount;
+  final int maxStringLen;
+  final int maxBlobLen;
+
+  /// The ids a destination was asked for — i.e. the allocations that happened.
+  final List<int> dests = [];
+
+  @override
+  void onArrayBegin(int id, sofab.ArrayKind kind, int count) {
+    if (count > maxArrayCount) limitExceeded();
+  }
+
+  @override
+  void onFixlenHeader(int id, int subtype, int length) {
+    if (subtype == sofab.FixlenType.string && length > maxStringLen) {
+      limitExceeded();
+    }
+    if (subtype == sofab.FixlenType.blob && length > maxBlobLen) {
+      limitExceeded();
+    }
+  }
+
+  @override
+  Uint8List? onBytesDest(int id, int subtype, int total) {
+    dests.add(id);
+    return super.onBytesDest(id, subtype, total);
+  }
+
+  @override
+  TypedData? onArrayDest(int id, sofab.ArrayKind kind, int count) {
+    dests.add(id);
+    return super.onArrayDest(id, kind, count);
+  }
+}
+
 /// Expected events with the given ids (and their sub-sequences) removed —
 /// mirrors what the skipping decoder should surface.
 List<String> expectedEventsSkipping(List<dynamic> fields, Set<int> skipIds) {

@@ -32,6 +32,19 @@ import 'decoder.dart';
 ///   position from binding its child as that element, since a leaf collector
 ///   declares no sequences and inherits the skip.
 ///
+/// **A third default is worth flipping, and this class cannot flip it for you:**
+/// [MessageVisitor.onArrayDest] and [MessageVisitor.onBytesDest]. Their defaults
+/// allocate a destination sized from the wire — the caller's allocation, made
+/// inside a callback (§6.6.1), and exactly right for a hand-written visitor that
+/// wants every field. A schema-bound scope does not: an id it does not declare,
+/// or one whose wire kind contradicts what it declares (MESSAGE_SPEC §7.3), is a
+/// **skipped** field, and CORELIB_PLAN §6.2.1 says a skipped field is never
+/// capped *because* it allocates nothing. That is only true if the scope says
+/// so — by overriding these two and returning `null` for every id it does not
+/// bind, which is a tighter bound than any receiver cap: not "at most N
+/// elements" but none. The decoder itself holds no cap to fall back on (§6.2.1
+/// — the numbers are not the codec's), so this is the guard for that shape.
+///
 /// Every other hook keeps its [MessageVisitor] default. Reporting a rejected
 /// payload is the subclass's own business: the callbacks return `void`, so a
 /// schema violation seen here is recorded on a sticky INVALID flag the consumer

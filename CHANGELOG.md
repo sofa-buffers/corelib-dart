@@ -2,6 +2,63 @@
 
 ## Unreleased
 
+### The codec holds no limits (CORELIB_PLAN §6.2.1 / §6.6.1 @ a550618)
+
+**Breaking, deliberately.** `DecoderLimits` is deleted, not deprecated, and every
+collector's receiver caps are required arguments.
+
+CORELIB_PLAN §6.2.1 keeps the three `max_dyn_*` limits mandatory on every
+receiver and keeps "no unset state and no unlimited mode" — but it says whose the
+numbers are: *"The numbers and the allocation are not the codec's. The limits
+come from generated code, which knows the schema and the target … What the codec
+contributes is the report and the category … the visitor decides. The codec never
+invents a limit of its own and never clamps to one."* A decoder-level cap could
+not honour that: it bound every field indiscriminately, including the
+schema-bounded ones §6.2.1 forbids it to touch, and it fired on fields nothing
+was going to materialize — which the same section forbids outright (*"a decode
+that steps over an over-cap field it was never going to read stays COMPLETE"*).
+
+* **Gone from the decoder:** `DecoderLimits`, the `limits:` parameter on
+  `Decoder` and `Decoder.decode`, and the two enforcement sites at the
+  `fixlen_word` and the `element_count`. Gone from the library: the
+  `defaultMaxDynArrayCount` / `defaultMaxDynStringLen` / `defaultMaxDynBlobLen`
+  constants — three numbers this port invented, which §6.2.1 leaves it no room
+  to. Gone with them: `MessageVisitor.onArrayCountBound` and
+  `onFixlenLenBound`, which existed only to keep a codec-held cap off a
+  schema-bounded field; with no codec-held cap the question is never asked.
+* **`DecodeStatus.limitExceeded` and `MessageVisitor.limitExceeded()` stay.**
+  §6.3 makes the category mandatory and forbids folding it into INVALID. What
+  changed is who raises it: a generated visitor arm or a collector, never the
+  decoder.
+* **Scalars and native arrays are bounded in the header hooks**
+  `onFixlenHeader` / `onArrayBegin`, which already fire at the count/length word
+  and before any destination is asked for — the enforcement point §6.2.1 fixes.
+  The cap goes in as the *else* of the schema bound, which is what makes "never
+  both" structural rather than a rule to remember.
+* **The collectors carry the rest, as required arguments.** `rcap` (element
+  index) is joined by `relemMax` (an element's byte length, beside the schema
+  `emax`) on `StringSeq`/`BlobSeq`, and by `rowCount` + `rowCap` (a matrix row's
+  own element count) on `IntMatrixSeq`/`DoubleMatrixSeq`/`BoolMatrixSeq`. The row
+  count had no schema bound at all before — the decoder's cap was its only
+  guard — so `rowCount` closes a gap rather than moving one.
+* **A missing cap is a caller defect, not a ceiling and not a limit.** Where the
+  schema declared no bound, a non-positive receiver cap is refused at
+  construction with `SofabError.invalidArgument` (§6.3). An earlier draft of this
+  change read it as the **format ceiling** instead; §6.2.1 rules that out in so
+  many words — *"a format ceiling (§6.2) reached because no cap was stated is the
+  format's bound, not a receiver cap, and a port MUST NOT present it as one"* —
+  and reporting `LimitExceeded` against it would promise a limit to raise that
+  was never configured. A caller that wants the ceiling as its policy passes
+  `arrayMax` / `fixlenMax` explicitly, and then the number is the caller's. Where
+  the **schema** bounds the field the cap is never consulted and never policed
+  (§6.2.1: it "MUST NOT be applied to a field the schema already bounds").
+* **Two behaviour changes to expect.** An over-cap field the consumer has no arm
+  for now decodes COMPLETE instead of `limitExceeded` — it allocates nothing, so
+  there was never anything to bound (a consumer that wants no allocation for it
+  at all returns `null` from `onArrayDest`/`onBytesDest`). And a matrix row
+  longer than its schema `count:` is now INVALID where it previously decoded.
+
+
 ### Conformance with CORELIB_PLAN@c837108 — the codec allocates no payload storage
 
 **Breaking for a visitor that overrode nothing but relied on where its values
@@ -24,18 +81,17 @@ signatures and keep firing.
   too" — so both surfaces now copy into the caller's destination. Code that
   retained an `onBlob`/`onStringBytes` value and read it after mutating the
   input buffer saw the mutation; it no longer does.
-* **The receiver caps are finite and mandatory.** `DecoderLimits`' three fields
-  are non-nullable with the defaults `defaultMaxDynArrayCount` (2²⁰),
-  `defaultMaxDynStringLen` (16 MiB) and `defaultMaxDynBlobLen` (64 MiB): §6.2.1
-  admits "no unset state and no unlimited mode". Passing `null` no longer
-  compiles, and a negative value is rejected. A decode that legitimately exceeds
-  a default now needs the cap raised — before this, seven bytes could ask the VM
-  for 17 GB.
+* **The receiver caps are finite and mandatory** — `DecoderLimits`' three fields
+  became non-nullable with defaults, because §6.2.1 admits "no unset state and
+  no unlimited mode". *Superseded further down this same Unreleased section:*
+  `DecoderLimits` is gone, because §6.2.1 also says the numbers are not the
+  codec's. The caps stay mandatory; they are now the consumer's.
 * **A wrapper array's element index is bounded too**, by a new `rcap` argument
   on every collector in `seq.dart`, and `MessageVisitor.limitExceeded()` is the
   channel it reports through — the receiver-cap counterpart of `invalidate()`,
   arriving as `DecodeStatus.limitExceeded` rather than as INVALID, which §6.2.1
-  forbids for a policy bound (closes #86).
+  forbids for a policy bound (closes #86). `rcap` is now required rather than
+  defaulted, and has two siblings — see below.
 * **The encoder transcodes a string into the output buffer** instead of into a
   buffer of its own, and its held-back sequence run and the decoder's parse
   stack are sized in the constructor rather than grown.

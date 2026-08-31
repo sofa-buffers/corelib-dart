@@ -36,9 +36,6 @@ export 'src/wire.dart'
         arrayMax,
         maxDepth,
         minOutputBuffer,
-        defaultMaxDynArrayCount,
-        defaultMaxDynStringLen,
-        defaultMaxDynBlobLen,
         WireType,
         FixlenType,
         ArrayKind,
@@ -53,8 +50,7 @@ export 'src/utf8.dart'
         utf8Length,
         utf8LengthStrict;
 export 'src/encoder.dart' show Encoder, FlushCallback;
-export 'src/decoder.dart'
-    show Decoder, MessageVisitor, DecoderLimits, ElemRange;
+export 'src/decoder.dart' show Decoder, MessageVisitor, ElemRange;
 export 'src/visitor_base.dart' show VisitorBase;
 export 'src/lists.dart' show elementsEqual;
 export 'src/seq.dart'

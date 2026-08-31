@@ -11,26 +11,16 @@ const int idMax = 2147483647;
 const int fixlenMax = 2147483647;
 const int arrayMax = 2147483647;
 
-/// The receiver-side technical limits' **defaults** (CORELIB_PLAN §6.2.1).
-///
-/// §6.2.1 makes three caps mandatory on every receiver — elements in a
-/// schema-unbounded array, bytes in a schema-unbounded `string`, bytes in a
-/// schema-unbounded `blob` — and says of them: *"There is no unset state and no
-/// unlimited mode. Unbounded by the schema is still bounded by the receiver."*
-/// A `DecoderLimits` therefore has no way to express "no limit", and these are
-/// what it starts from.
-///
-/// **The numbers are a deployment judgement, not a wire fact.** They come from
-/// generated code, which knows the schema and the target (§6.2.1: *"The limits
-/// come from generated code … the values are a per-language, per-deployment
-/// judgement"*). What the corelib owes is that the unconfigured decoder is
-/// already bounded, so a `Decoder` built with no `DecoderLimits` at all cannot
-/// be talked into an unbounded commitment by a 7-byte message. These values
-/// match the ones `corelib-ts` defaults to, so two unconfigured receivers in
-/// the family agree.
-const int defaultMaxDynArrayCount = 1 << 20; // 1,048,576 elements
-const int defaultMaxDynStringLen = 16 << 20; // 16 MiB
-const int defaultMaxDynBlobLen = 64 << 20; // 64 MiB
+// There are deliberately **no `max_dyn_*` default constants here**. CORELIB_PLAN
+// §6.2.1 makes the three receiver-side technical limits mandatory on every
+// receiver, and in the same breath says whose they are: *"The numbers and the
+// allocation are not the codec's. The limits come from generated code, which
+// knows the schema and the target."* A number this library chose would be a
+// number generated code did not, so the caps arrive as arguments — the
+// collectors' `rcap` / `relemMax` / `rowCap` (`lib/src/seq.dart`) and, for a
+// scalar or a compact array, the generated visitor's own header guard. The only
+// numbers left here are the format's own ceilings above, which are facts about
+// the wire rather than policy about a deployment.
 
 /// Maximum nested-sequence depth (CORELIB_PLAN §4.9, §6.2).
 const int maxDepth = 255;

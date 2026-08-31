@@ -103,7 +103,13 @@ void main() {
       final strings = <String>[];
       final structs = <_Elem>[];
       sofab.MessageVisitor collector() => elementType == 'string'
-          ? sofab.StringSeq(strings, -1, -1, rcap: cap)
+          ? sofab.StringSeq(
+              strings,
+              -1,
+              -1,
+              rcap: cap,
+              relemMax: sofab.fixlenMax,
+            )
           : sofab.MessageSeq<_Elem>(
               structs,
               -1,
@@ -123,7 +129,13 @@ void main() {
         _Root(
           fieldId,
           elementType == 'string'
-              ? sofab.StringSeq(strings2, -1, -1, rcap: cap)
+              ? sofab.StringSeq(
+                  strings2,
+                  -1,
+                  -1,
+                  rcap: cap,
+                  relemMax: sofab.fixlenMax,
+                )
               : sofab.MessageSeq<_Elem>(
                   structs2,
                   -1,
