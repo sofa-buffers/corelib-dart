@@ -40,8 +40,18 @@ that steps over an over-cap field it was never going to read stays COMPLETE"*).
   `emax`) on `StringSeq`/`BlobSeq`, and by `rowCount` + `rowCap` (a matrix row's
   own element count) on `IntMatrixSeq`/`DoubleMatrixSeq`/`BoolMatrixSeq`. The row
   count had no schema bound at all before — the decoder's cap was its only
-  guard — so `rowCount` closes a gap rather than moving one. A negative receiver
-  cap reads as the **format ceiling**, never as "unlimited".
+  guard — so `rowCount` closes a gap rather than moving one.
+* **A missing cap is a caller defect, not a ceiling and not a limit.** Where the
+  schema declared no bound, a non-positive receiver cap is refused at
+  construction with `SofabError.invalidArgument` (§6.3). An earlier draft of this
+  change read it as the **format ceiling** instead; §6.2.1 rules that out in so
+  many words — *"a format ceiling (§6.2) reached because no cap was stated is the
+  format's bound, not a receiver cap, and a port MUST NOT present it as one"* —
+  and reporting `LimitExceeded` against it would promise a limit to raise that
+  was never configured. A caller that wants the ceiling as its policy passes
+  `arrayMax` / `fixlenMax` explicitly, and then the number is the caller's. Where
+  the **schema** bounds the field the cap is never consulted and never policed
+  (§6.2.1: it "MUST NOT be applied to a field the schema already bounds").
 * **Two behaviour changes to expect.** An over-cap field the consumer has no arm
   for now decodes COMPLETE instead of `limitExceeded` — it allocates nothing, so
   there was never anything to bound (a consumer that wants no allocation for it

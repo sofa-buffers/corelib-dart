@@ -41,9 +41,17 @@ import 'wire.dart';
 //
 // The receiver caps are **required constructor arguments**: §6.2.1 admits
 // *"no unset state and no unlimited mode"*, and the number is a per-deployment
-// judgement this library is in no position to make. A negative one is read as
-// the **format ceiling** ([arrayMax] / [fixlenMax]) rather than as "unlimited"
-// — the ceiling is a fact of the format, not a number invented here.
+// judgement this library is in no position to make. Nothing here supplies one
+// that was not given: a cap that is not a usable positive number, on a field
+// whose schema declared no bound, is a **caller defect** and is reported as
+// such — [SofabError.invalidArgument] (§6.3), thrown from the constructor by
+// [_requireCap]. It is deliberately *not* [MessageVisitor.limitExceeded]
+// (which would promise a limit to raise that was never configured), and
+// deliberately not the format ceiling: §6.2.1 is explicit that *"a format
+// ceiling (§6.2) reached because no cap was stated is the format's bound, not
+// a receiver cap, and a port MUST NOT present it as one"*. A caller that
+// genuinely wants a ceiling as its policy may still pass [arrayMax] /
+// [fixlenMax] — then the number is the caller's, which is the whole point.
 //
 // Each rule has exactly ONE implementation, [_overCapacity] for an index and
 // [_overLength] for a count or a byte length, however many places state it
@@ -109,13 +117,37 @@ bool _overLength(VisitorBase v, int n, int max, int rmax) {
   return false;
 }
 
-/// A receiver cap as the collectors hold it: finite, always.
+/// Checks a receiver cap at construction and returns it unchanged.
 ///
-/// §6.2.1 admits no unlimited mode, so a negative argument is read as the
-/// **format ceiling** — a fact of the wire format (§6.2), not a number this
-/// library chose. Normalising once in the constructor keeps the per-element
-/// guards a single compare.
-int _finite(int rcap, int ceiling) => rcap < 0 ? ceiling : rcap;
+/// `bound` is the schema sibling this cap stands in for (`cap`/`emax`/
+/// `rowCount`). Where the schema declared a bound (`bound >= 0`) the cap is
+/// never consulted (§6.2.1: a receiver cap *"MUST NOT be applied to a field the
+/// schema already bounds"*), so its value is not this library's business and it
+/// is passed through untouched.
+///
+/// Where the schema declared none, the cap is the *only* thing standing between
+/// a sender and this receiver's allocation, and §6.2.1 leaves nothing to put
+/// there on the caller's behalf: a codec *"MUST NOT supply a default for one it
+/// was not given, MUST NOT read an omitted argument as unlimited, and MUST NOT
+/// clamp to one"*, and a format ceiling reached because no cap was stated *"is
+/// the format's bound, not a receiver cap"*. A non-positive number is therefore
+/// a mistake in the **call**, reported in §6.3's `InvalidArgument` category —
+/// not `LimitExceeded`, which would promise a limit to raise that was never
+/// configured, and not `InvalidMessage`, since no message is involved yet.
+///
+/// Checking once here rather than per element keeps the guards a single
+/// compare, and reports the defect before a byte is decoded.
+int _requireCap(int rcap, int bound, String what) {
+  if (bound >= 0) return rcap;
+  if (rcap <= 0) {
+    throw SofabException(
+      SofabError.invalidArgument,
+      '$what: a schema-unbounded field needs a positive receiver cap from '
+      'generated code (CORELIB_PLAN 6.2.1); got $rcap',
+    );
+  }
+  return rcap;
+}
 
 /// Grows `out` so that index `id` exists, filling the gap with `fill()`.
 ///
@@ -152,8 +184,8 @@ class StringSeq extends VisitorBase {
     this.emax, {
     required int rcap,
     required int relemMax,
-  }) : rcap = _finite(rcap, arrayMax),
-       relemMax = _finite(relemMax, fixlenMax);
+  }) : rcap = _requireCap(rcap, cap, 'StringSeq.rcap'),
+       relemMax = _requireCap(relemMax, emax, 'StringSeq.relemMax');
 
   final List<String> out;
 
@@ -163,15 +195,16 @@ class StringSeq extends VisitorBase {
   /// The **receiver cap** on the element index, used only where the schema
   /// declared no `count` (`cap < 0`) — see [_overCapacity]. Generated code
   /// passes the deployment's number; §6.2.1 gives this library none to invent,
-  /// so it is required, and a negative one reads as [arrayMax].
+  /// so it is required, and where it governs it must be positive — see
+  /// [_requireCap].
   final int rcap;
 
   /// The schema element `maxlen:` — the element byte-length bound (-1: none).
   final int emax;
 
   /// The **receiver cap** on an element's byte length, used only where the
-  /// schema declared no `maxlen` (`emax < 0`) — see [_overLength]. Required for
-  /// the reason [rcap] is; a negative one reads as [fixlenMax].
+  /// schema declared no `maxlen` (`emax < 0`) — see [_overLength]. Required,
+  /// and positive where it governs, for the reason [rcap] is.
   final int relemMax;
 
   @override
@@ -214,8 +247,8 @@ class BlobSeq extends VisitorBase {
     this.emax, {
     required int rcap,
     required int relemMax,
-  }) : rcap = _finite(rcap, arrayMax),
-       relemMax = _finite(relemMax, fixlenMax);
+  }) : rcap = _requireCap(rcap, cap, 'BlobSeq.rcap'),
+       relemMax = _requireCap(relemMax, emax, 'BlobSeq.relemMax');
 
   final List<Uint8List> out;
 
@@ -259,7 +292,7 @@ class BlobSeq extends VisitorBase {
 /// element id merges into what an earlier opening set (§7.4).
 class MessageSeq<T> extends VisitorBase {
   MessageSeq(this.out, this.cap, this.make, this.vis, {required int rcap})
-    : rcap = _finite(rcap, arrayMax);
+    : rcap = _requireCap(rcap, cap, 'MessageSeq.rcap');
 
   final List<T> out;
 
@@ -287,7 +320,7 @@ class MessageSeq<T> extends VisitorBase {
 /// **index** only.
 class NestedSeq<T> extends VisitorBase {
   NestedSeq(this.out, this.cap, this.make, {required int rcap})
-    : rcap = _finite(rcap, arrayMax);
+    : rcap = _requireCap(rcap, cap, 'NestedSeq.rcap');
 
   final List<List<T>> out;
 
@@ -329,8 +362,8 @@ class IntMatrixSeq extends VisitorBase {
     required int rcap,
     required this.rowCount,
     required int rowCap,
-  }) : rcap = _finite(rcap, arrayMax),
-       rowCap = _finite(rowCap, arrayMax);
+  }) : rcap = _requireCap(rcap, cap, 'IntMatrixSeq.rcap'),
+       rowCap = _requireCap(rowCap, rowCount, 'IntMatrixSeq.rowCap');
 
   final List<List<int>> out;
 
@@ -344,8 +377,8 @@ class IntMatrixSeq extends VisitorBase {
   final int rowCount;
 
   /// The **receiver cap** on a row's element count, used only where the schema
-  /// declared no row `count` (`rowCount < 0`). Required for the reason [rcap]
-  /// is; a negative one reads as [arrayMax].
+  /// declared no row `count` (`rowCount < 0`). Required, and positive where it
+  /// governs, for the reason [rcap] is.
   final int rowCap;
 
   final bool signed;
@@ -408,8 +441,8 @@ class DoubleMatrixSeq extends VisitorBase {
     required int rcap,
     required this.rowCount,
     required int rowCap,
-  }) : rcap = _finite(rcap, arrayMax),
-       rowCap = _finite(rowCap, arrayMax);
+  }) : rcap = _requireCap(rcap, cap, 'DoubleMatrixSeq.rcap'),
+       rowCap = _requireCap(rowCap, rowCount, 'DoubleMatrixSeq.rowCap');
 
   final List<List<double>> out;
 
@@ -468,8 +501,8 @@ class BoolMatrixSeq extends VisitorBase {
     required int rcap,
     required this.rowCount,
     required int rowCap,
-  }) : rcap = _finite(rcap, arrayMax),
-       rowCap = _finite(rowCap, arrayMax);
+  }) : rcap = _requireCap(rcap, cap, 'BoolMatrixSeq.rcap'),
+       rowCap = _requireCap(rowCap, rowCount, 'BoolMatrixSeq.rowCap');
 
   final List<List<bool>> out;
 

@@ -723,28 +723,190 @@ void main() {
       // to fall back on, which the analyzer enforces at every call site in this
       // file, and no `max_dyn_*` constant in the library to fall back to.
       //
-      // The one thing a caller can still leave open is a negative number, and
-      // §6.2.1 admits "no unset state and no unlimited mode": it reads as the
-      // FORMAT ceiling — a fact of the wire (§6.2), not a policy invented here.
-      final out = <String>[];
+      // Nor is there anything to read a missing one AS. §6.2.1 forbids all four
+      // ways out by name — a codec "MUST NOT hold a limit of its own, MUST NOT
+      // supply a default for one it was not given, MUST NOT read an omitted
+      // argument as unlimited, and MUST NOT clamp to one" — and closes the last
+      // door explicitly: "a format ceiling (§6.2) reached because no cap was
+      // stated is the FORMAT's bound, not a receiver cap, and a port MUST NOT
+      // present it as one". So a non-positive cap on a schema-unbounded field
+      // is a mistake in the CALL, and it is reported in §6.3's InvalidArgument
+      // category, at construction, before a byte is decoded.
+      for (final bad in [-1, 0]) {
+        expect(
+          () => sofab.StringSeq(
+            <String>[],
+            -1,
+            -1,
+            rcap: bad,
+            relemMax: sofab.fixlenMax,
+          ),
+          throwsA(
+            isA<sofab.SofabException>().having(
+              (e) => e.code,
+              'code',
+              sofab.SofabError.invalidArgument,
+            ),
+          ),
+          reason: 'rcap $bad on a schema-unbounded array',
+        );
+        expect(
+          () => sofab.StringSeq(
+            <String>[],
+            -1,
+            -1,
+            rcap: sofab.arrayMax,
+            relemMax: bad,
+          ),
+          throwsA(
+            isA<sofab.SofabException>().having(
+              (e) => e.code,
+              'code',
+              sofab.SofabError.invalidArgument,
+            ),
+          ),
+          reason: 'relemMax $bad on a schema-unbounded element length',
+        );
+      }
+      // It is InvalidArgument and NOT LimitExceeded on purpose (§6.3): a limit
+      // rejection means "raise my limit", and there was no limit to raise.
+      // Where the SCHEMA bounds the field the cap is never consulted at all
+      // (§6.2.1: it "MUST NOT be applied to a field the schema already
+      // bounds"), so it is not the collector's business and is not policed.
+      final bounded = <String>[];
       expect(
         run(
           (e) => e.writeString(3, 'x'),
-          sofab.StringSeq(out, -1, -1, rcap: -1, relemMax: -1),
+          sofab.StringSeq(bounded, 8, 4, rcap: -1, relemMax: -1),
         ),
         sofab.DecodeStatus.complete,
       );
-      expect(out.length, 4);
-      // ARRAY_MAX itself is past the ceiling, and is refused as such.
+      expect(bounded.length, 4);
+      // A caller that genuinely wants the format ceiling as its policy may
+      // still say so — and then the number is the caller's, which is the whole
+      // point. ARRAY_MAX itself is past that ceiling, and is refused as such.
       final far = <String>[];
       expect(
         run(
           (e) => e.writeString(sofab.arrayMax, 'x'),
-          sofab.StringSeq(far, -1, -1, rcap: -1, relemMax: -1),
+          sofab.StringSeq(
+            far,
+            -1,
+            -1,
+            rcap: sofab.arrayMax,
+            relemMax: sofab.fixlenMax,
+          ),
         ),
         sofab.DecodeStatus.limitExceeded,
       );
       expect(far, isEmpty, reason: 'refused before the container grew');
+    });
+
+    test('every collector polices the cap it is handed', () {
+      // One implementation, stated once per collector: each receiver cap sits
+      // beside the schema bound it stands in for, and each is refused the same
+      // way when the schema left that bound open.
+      Matcher throwsInvalidArgument() => throwsA(
+        isA<sofab.SofabException>().having(
+          (e) => e.code,
+          'code',
+          sofab.SofabError.invalidArgument,
+        ),
+      );
+      expect(
+        () => sofab.BlobSeq(<Uint8List>[], -1, -1, rcap: 0, relemMax: 16),
+        throwsInvalidArgument(),
+      );
+      expect(
+        () => sofab.BlobSeq(<Uint8List>[], -1, -1, rcap: 4, relemMax: 0),
+        throwsInvalidArgument(),
+      );
+      expect(
+        () => sofab.MessageSeq<_Point>(
+          <_Point>[],
+          -1,
+          _Point.new,
+          _PointVisitor.new,
+          rcap: -1,
+        ),
+        throwsInvalidArgument(),
+      );
+      expect(
+        () => sofab.NestedSeq<String>(
+          <List<String>>[],
+          -1,
+          (row) => sofab.StringSeq(
+            row,
+            -1,
+            -1,
+            rcap: sofab.arrayMax,
+            relemMax: sofab.fixlenMax,
+          ),
+          rcap: -1,
+        ),
+        throwsInvalidArgument(),
+      );
+      expect(
+        () => sofab.IntMatrixSeq(
+          <List<int>>[],
+          -1,
+          true,
+          0,
+          0,
+          rcap: -1,
+          rowCount: -1,
+          rowCap: 4,
+        ),
+        throwsInvalidArgument(),
+      );
+      expect(
+        () => sofab.IntMatrixSeq(
+          <List<int>>[],
+          -1,
+          true,
+          0,
+          0,
+          rcap: 4,
+          rowCount: -1,
+          rowCap: -1,
+        ),
+        throwsInvalidArgument(),
+      );
+      expect(
+        () => sofab.DoubleMatrixSeq(
+          <List<double>>[],
+          -1,
+          true,
+          rcap: 4,
+          rowCount: -1,
+          rowCap: 0,
+        ),
+        throwsInvalidArgument(),
+      );
+      expect(
+        () => sofab.BoolMatrixSeq(
+          <List<bool>>[],
+          -1,
+          rcap: 0,
+          rowCount: -1,
+          rowCap: 4,
+        ),
+        throwsInvalidArgument(),
+      );
+      // ... and none of them objects where the schema bound governs instead.
+      expect(
+        () => sofab.IntMatrixSeq(
+          <List<int>>[],
+          8,
+          true,
+          0,
+          0,
+          rcap: -1,
+          rowCount: 8,
+          rowCap: -1,
+        ),
+        returnsNormally,
+      );
     });
   });
 

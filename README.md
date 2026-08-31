@@ -480,6 +480,17 @@ and both are caller-owned. The library owns neither, on either decode surface.
       rcap: maxDynArrayCount, relemMax: maxDynStringLen);
   ```
 
+  "Required" is enforced, not merely typed. Where the schema left the bound open
+  and the cap that stands in for it is not a usable positive number, the
+  collector refuses at construction with `SofabError.invalidArgument` (§6.3) —
+  the mistake is in the *call*. It is deliberately not `limitExceeded`, which
+  would promise a limit to raise that was never configured, and deliberately not
+  the format ceiling: §6.2.1 says *"a format ceiling (§6.2) reached because no
+  cap was stated is the format's bound, not a receiver cap, and a port MUST NOT
+  present it as one"*. Pass `arrayMax` / `fixlenMax` if the ceiling really is
+  your policy — then the number is yours. Where the **schema** bounds the field
+  the cap is never consulted, so it is not policed either.
+
 ## Build & test
 
 ```console
