@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+### Shared vectors: the 131-vector file with the skip matrix (CORELIB_PLAN §7.1 / §7.2 item 7)
+
+`assets/test_vectors.json` is re-copied verbatim from `corelib-c-cpp`
+(sofa-buffers/corelib-c-cpp#160, `f2b3d72`): 131 vectors, 58 of them carrying
+`skip_ids` — the 36-vector `skip/matrix` group covering all 100 (read type,
+skipped type) pairs, plus 16 `skip` vectors for the axes beside it (empty
+payloads, two-byte lengths and counts, fp64 element length, a three-byte header
+varint, and the skip at each message and sequence edge).
+
+* **The skip scenario and its chunked variant run for every vector with
+  `skip_ids`** — 8 vectors before, 58 now. Both were already generic over the
+  file, so adoption needed no new scenario; what is new is that they can no
+  longer pass vacuously: a skip must remove at least one event, and no declined
+  id may reach the visitor.
+* **The loader is asserted to read the file whole.** Nothing here is
+  fixed-size — the C harness's `MAXSKIP` truncation has no analogue in Dart —
+  but `vector file is loaded whole (no silent truncation)` now proves the suite
+  really saw the sizes the matrix needs (`skip_ids` of 9, ids past 100001,
+  130-element arrays, 130-byte payloads, fp64 arrays), so a cap introduced later
+  fails loudly instead of testing less.
+* **`requires` is checked rather than ignored.** This port builds one full
+  profile and runs every vector; the suite now asserts that every `requires`
+  token in the file is one the port implements, so a future capability cannot be
+  run silently as if supported.
+* **The run states its coverage:** `[vectors] 131 vectors, 58 with skip_ids
+  (skip/matrix 36, skip 16) -> 902 checks executed`, in CI on push and PR.
+
+Confirmed non-vacuous: seeding a one-byte-short `fixlen` skip in the decoder
+turns 18 of the new checks red.
+
 ### The codec holds no limits (CORELIB_PLAN §6.2.1 / §6.6.1 @ a550618)
 
 **Breaking, deliberately.** `DecoderLimits` is deleted, not deprecated, and every

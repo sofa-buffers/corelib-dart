@@ -504,8 +504,16 @@ bash bench/run_bench.sh         # release build: `dart compile exe` (AOT) + run
 The test suite reads the shared conformance vectors from
 [`assets/test_vectors.json`](assets/test_vectors.json) (copied verbatim from
 `corelib-c-cpp`) and runs encode, decode, chunked-encode, chunked-decode,
-skip-ids, roundtrip, malformed-input, truncation and invalid-UTF-8 checks. CI
-enforces a >90% line-coverage bar.
+skip-ids, roundtrip, malformed-input, truncation and invalid-UTF-8 checks. Every
+vector carrying `skip_ids` runs the skip scenario twice — once over the whole
+buffer and once fed a byte at a time, so each skip crosses chunk boundaries —
+and the run prints what it covered:
+
+```console
+[vectors] 131 vectors, 58 with skip_ids (skip/matrix 36, skip 16) -> 902 checks executed
+```
+
+CI enforces a >90% line-coverage bar.
 
 Both configurations are built: `dart run` / `dart test` are the debug (JIT)
 configuration, and the release configuration is AOT — `dart compile exe`, which
