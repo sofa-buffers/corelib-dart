@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+### Shared vectors: the `header_limits` block (CORELIB_PLAN §6.2.1 / §6.3, MESSAGE_SPEC §5.2)
+
+`assets/test_vectors.json` is re-copied verbatim from `corelib-c-cpp`
+(sofa-buffers/corelib-c-cpp#163, `3aa3435`), which adds a fourth top-level
+block, and `test/header_limits_test.dart` runs its ten cases.
+
+The block carries the one class no other could: **bytes that declare a length or
+a count and then end**, with not one payload byte behind them — `02 a2 06` is a
+100-byte string declared at id 0, and EOF. The answer is decided at that word,
+before the payload is asked for, so it belongs to the ceiling and is terminal;
+`INCOMPLETE` would be the verdict §5.2.3's reason exists to prevent.
+
+* **Which ceiling speaks is the subject.** A case states `schema: {maxlen: N}`
+  (breach → `invalid`, MESSAGE_SPEC §7.1) or `limits: {max_dyn_…: N}` (breach →
+  `limitExceeded`, §6.2.1) — never both, because §6.2.1 keeps a receiver cap off
+  a field the schema already bounds. `header_string_schema_bounded` and
+  `header_string_over_cap` are the identical bytes under the two ceilings; a port
+  that routes them to one category passes the other nine cases and fails that
+  pair.
+* **Each case runs on both decode surfaces** — one-shot, and streaming in the
+  case's own chunking (`header_string_over_cap_split` divides the length varint
+  itself) plus one byte per feed — and where the case marks the rejection
+  terminal, a further feed of the promised payload must re-raise rather than
+  consume it.
+* **The in-cap controls are asserted as controls.** Every rejection is paired
+  with the same ceiling at a length it admits, which must still answer
+  `incomplete`, and the reader then lifts each control with the bytes it is
+  short of: `incomplete` is by definition the state more bytes change. A test
+  asserts the pairing itself, so a rejection that loses its control fails here.
+* **`requires` means skip in this block, for every tag** — not the reduced-build
+  rejection a *vector* gets, because these cases already assert a rejection with
+  a specific category. This port declares all four tags the block uses,
+  `receiver_caps` included: its generated layer carries §6.2.1 caps distinct from
+  schema bounds (`schema_bound_limit_test.dart`), so nothing is skipped.
+
+Confirmed non-vacuous: deferring the header hand-off past the truncation check on
+both surfaces (the guard `_fixlen` / `_onFixWord` / `_intArray` / `_onArrCount`
+place before the payload) turns all ten cases red — the six rejections report
+`incomplete`, the four controls never see the header word at all. Negative
+control: with every ceiling wound out to the format's own, all six rejections
+fall back to `incomplete` (the block's C++ reference run reports five of six —
+the sixth there is `header_string_amplification`, whose 1 GiB claim meets a lower
+format ceiling; this port's `fixlenMax` is 2^31-1, above it).
+
 ### Shared vectors: the 131-vector file with the skip matrix (CORELIB_PLAN §7.1 / §7.2 item 7)
 
 `assets/test_vectors.json` is re-copied verbatim from `corelib-c-cpp`
