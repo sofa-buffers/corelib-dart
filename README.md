@@ -503,7 +503,7 @@ bash bench/run_bench.sh         # release build: `dart compile exe` (AOT) + run
 
 The test suite reads the shared conformance vectors from
 [`assets/test_vectors.json`](assets/test_vectors.json) (copied verbatim from
-`corelib-c-cpp`) and runs encode, decode, chunked-encode, chunked-decode,
+`corelib-c-cpp`; a daily CI job (`.github/workflows/shared-vectors.yml`) compares this copy's sha256 against that file on `corelib-c-cpp@main`, so a copy left behind by an upstream change is reported rather than going unnoticed) and runs encode, decode, chunked-encode, chunked-decode,
 skip-ids, roundtrip, malformed-input, truncation and invalid-UTF-8 checks. Every
 vector carrying `skip_ids` runs the skip scenario twice — once over the whole
 buffer and once fed a byte at a time, so each skip crosses chunk boundaries —
