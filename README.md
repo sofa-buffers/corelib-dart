@@ -104,7 +104,7 @@ Dart's only floating type is `double`, so an `fp32` **NaN** arrives as raw bits:
 widens to `onFp32`. Re-emit those bits with `Encoder.writeFp32Bits` — widening
 quiets a signaling NaN, and the wire bytes must round-trip unchanged
 (CORELIB_PLAN §6.5). An `fp32` **array** needs nothing extra: it is delivered as
-a `Float32List` and `writeFp32Array` re-emits that list's bytes verbatim.
+a `Float32List` and `writeFp32Array` re-emits that list's bytes verbatim. A daily CI job (`.github/workflows/shared-vectors.yml`) compares the sha256 of this copy against that file on `corelib-c-cpp@main`, so a copy left behind by an upstream change shows up here rather than going unnoticed.
 
 ### Sequences: lazy framing
 
