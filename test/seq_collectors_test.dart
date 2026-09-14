@@ -436,6 +436,57 @@ void main() {
       ]);
     });
 
+    // MESSAGE_SPEC §7.4: a repeated ROW id REPLACES the row rather than merging
+    // into it (generator#523).
+    //
+    // §7.4 makes an array wrapper the exception to scope merging. A re-opened
+    // sequence normally CONTINUES its scope -- which is what gives a struct
+    // element its merge, and MessageSeq must keep it -- but an array wrapper *is*
+    // the value of its field, so a later occurrence replaces it whole. A row is an
+    // array, so it is the replacing kind.
+    //
+    // `_reserve` only extends the list UP TO the index, so a repeated element id
+    // found the previous occurrence's elements still in place and wrote on top of
+    // them. The second occurrence is deliberately SHORTER than the first, so a
+    // merge is caught by the row's LENGTH and not only by its values: ['a','z']
+    // then ['y'] merged to ['y','z'], where §7.4 wants ['y'].
+    //
+    // The same rule is driven against every backend's generated decoder by the
+    // generator's tests/conformance/lib/check_repeated_id.py, on forged bytes no
+    // encoder in the family will produce -- §7.4 forbids emitting a repeated id,
+    // which is why this can only ever be a decoder-side check. Here it is asserted
+    // where it is implemented.
+    test('a repeated row id replaces the row, it does not merge (§7.4)', () {
+      final out = <List<String>>[];
+      final st = run(
+        (e) {
+          e.beginSequenceLazy(0);
+          e.writeString(0, 'a');
+          e.writeString(1, 'z');
+          e.endSequence();
+          e.beginSequenceLazy(0); // the SAME row id, a second time
+          e.writeString(0, 'y');
+          e.endSequence();
+        },
+        sofab.NestedSeq<String>(
+          out,
+          -1,
+          (row) => sofab.StringSeq(
+            row,
+            -1,
+            -1,
+            rcap: sofab.arrayMax,
+            relemMax: sofab.fixlenMax,
+          ),
+          rcap: sofab.arrayMax,
+        ),
+      );
+      expect(st, sofab.DecodeStatus.complete);
+      expect(out, [
+        ['y'],
+      ]);
+    });
+
     test('a row id past the outer capacity is INVALID', () {
       final out = <List<String>>[];
       final st = run(

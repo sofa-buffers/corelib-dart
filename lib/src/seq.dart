@@ -331,10 +331,33 @@ class NestedSeq<T> extends VisitorBase {
   final int rcap;
   final MessageVisitor Function(List<T>) make;
 
+  /// Reserves the row at [id], **clears** it, and returns its collector.
+  ///
+  /// The clear is MESSAGE_SPEC §7.4 (generator#523). A row here is itself an
+  /// array field, and §7.4 makes an array wrapper the exception to scope
+  /// merging: the wrapper *is* the value of its field, so a later occurrence of
+  /// the element id REPLACES it whole, where a re-opened struct/union element
+  /// continues its scope and merges ([MessageSeq], which must therefore not do
+  /// this). [_reserve] only extends the list UP TO the index, so a repeated
+  /// element id used to find the previous occurrence's elements still in place
+  /// and write on top of them — measured on a generated
+  /// `matstr: array<array<string>>` carrying element id 0 twice, `["a","z"]`
+  /// then `["y"]`: `[["y", "z"]]` before, `[["y"]]` after.
+  ///
+  /// The list is cleared in place rather than replaced, because the row
+  /// collector `make` returns holds that very list.
+  ///
+  /// Order is load-bearing: the capacity check returns FIRST, so a refused row
+  /// index cannot wipe a valid earlier row — the §7.3 interaction where a
+  /// destructive reset placed in front of the decision turns a loud failure
+  /// into silent data loss. And [onSequenceStart] is reached only for an actual
+  /// sequence header, so an element arriving as some other wire type never
+  /// reaches the clear at all.
   @override
   MessageVisitor? onSequenceStart(int id) {
     if (_overCapacity(this, id, cap, rcap)) return null;
     _reserve(out, id, () => <T>[]);
+    out[id].clear();
     return make(out[id]);
   }
 }
