@@ -9,6 +9,11 @@ ENV PATH=/opt/dart/bin:/root/.pub-cache/bin:$PATH
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
+    ripgrep \
+    fd-find \
+    shellcheck \
+    shfmt \
+    xxd \
     git \
     unzip \
     gnupg \
