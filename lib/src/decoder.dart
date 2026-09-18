@@ -462,32 +462,43 @@ Uint8List? _bytesDest(MessageVisitor vis, int id, int subtype, int total) {
 TypedData? _arrayDest(MessageVisitor vis, int id, ArrayKind kind, int count) {
   final dest = vis.onArrayDest(id, kind, count);
   if (dest == null) return null;
-  final bool typed;
+  // One type test per kind, and the element count read off the promoted
+  // concrete list: `lengthInBytes`/`elementSizeInBytes` through the abstract
+  // `TypedData` interface are two dynamic calls per array, on every array of
+  // every message. The refusals are unchanged and live out of line.
+  final int have;
   switch (kind) {
     case ArrayKind.unsigned:
     case ArrayKind.signed:
-      typed = dest is Int64List;
+      if (dest is! Int64List) _destKindMismatch(id, kind);
+      have = dest.length;
     case ArrayKind.fp32:
-      typed = dest is Float32List;
+      if (dest is! Float32List) _destKindMismatch(id, kind);
+      have = dest.length;
     case ArrayKind.fp64:
-      typed = dest is Float64List;
+      if (dest is! Float64List) _destKindMismatch(id, kind);
+      have = dest.length;
   }
-  if (!typed) {
-    throw SofabException(
-      SofabError.invalidArgument,
-      'destination for array field $id does not match element kind '
-      '${kind.name}',
-    );
-  }
-  if (dest.lengthInBytes < count * dest.elementSizeInBytes) {
-    throw SofabException(
-      SofabError.invalidArgument,
-      'destination for array field $id holds '
-      '${dest.lengthInBytes ~/ dest.elementSizeInBytes} elements, '
-      'the array announces $count',
-    );
-  }
+  if (have < count) _destTooShort(id, have, count);
   return dest;
+}
+
+@pragma('vm:never-inline')
+Never _destKindMismatch(int id, ArrayKind kind) {
+  throw SofabException(
+    SofabError.invalidArgument,
+    'destination for array field $id does not match element kind '
+    '${kind.name}',
+  );
+}
+
+@pragma('vm:never-inline')
+Never _destTooShort(int id, int have, int count) {
+  throw SofabException(
+    SofabError.invalidArgument,
+    'destination for array field $id holds $have elements, '
+    'the array announces $count',
+  );
 }
 
 // There is deliberately **no `DecoderLimits` here, and no cap state on the
