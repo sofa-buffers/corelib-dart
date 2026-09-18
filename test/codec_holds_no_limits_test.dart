@@ -20,8 +20,8 @@ import 'vector_support.dart';
 /// So this decoder has no cap state, no `DecoderLimits`, and the library defines
 /// no `max_dyn_*` default constant to fall back on. What it guarantees instead
 /// is that the consumer is told **in time**: the count or length reaches the
-/// visitor at the header, before a destination is asked for, on both decode
-/// surfaces and at every chunk boundary.
+/// visitor at the header, in the call that asks for the destination, on both
+/// decode surfaces and at every chunk boundary.
 ///
 /// The case that motivates the whole file: seven bytes declaring an
 /// `array<fp64>` of `ARRAY_MAX` elements. Against a visitor that neither caps
@@ -34,17 +34,13 @@ void main() {
   final bomb = hexToBytes('0dffffffff0741');
 
   group('the codec reports the header and judges nothing', () {
-    test(
-      'the count reaches the visitor before any destination is asked for',
-      () {
-        final v = _Recorder();
-        expect(sofab.Decoder.decode(bomb, v), sofab.DecodeStatus.incomplete);
-        expect(v.begins, [
-          [1, sofab.ArrayKind.fp64, sofab.arrayMax],
-        ]);
-        expect(v.dests, isEmpty, reason: 'declined, so nothing was sized');
-      },
-    );
+    test('the count reaches the visitor before any storage is chosen', () {
+      final v = _Recorder();
+      expect(sofab.Decoder.decode(bomb, v), sofab.DecodeStatus.incomplete);
+      expect(v.begins, [
+        [1, 'fp64', sofab.arrayMax],
+      ]);
+    });
 
     test('the streaming surface reports the same header, byte at a time', () {
       final v = _Recorder();
@@ -54,14 +50,13 @@ void main() {
         st = dec.feed([b]);
       }
       expect(st, sofab.DecodeStatus.incomplete);
+      // The very same single call: neither surface can refute the count before
+      // asking — the streaming one cannot know how many bytes are still coming,
+      // and the one-shot one asks where it does (§6.7.1). Declining is what
+      // bounds it, on both, and nothing was sized.
       expect(v.begins, [
-        [1, sofab.ArrayKind.fp64, sofab.arrayMax],
+        [1, 'fp64', sofab.arrayMax],
       ]);
-      // The streaming surface DOES ask — it cannot know how many bytes are
-      // still coming, so it cannot refute the count the way the one-shot walker
-      // above did. Declining is what bounds it here, and nothing was sized.
-      expect(v.dests, [1]);
-      expect(v.done, isEmpty);
     });
 
     test('a string length reaches it the same way', () {
@@ -75,7 +70,6 @@ void main() {
       expect(v.headers, [
         [0, sofab.FixlenType.string, 0x1FFFFFFE],
       ]);
-      expect(v.dests, isEmpty, reason: 'the input refutes the length outright');
     });
 
     test('no format ceiling was retired with the caps', () {
@@ -172,11 +166,11 @@ void main() {
       // A consumer with no arm for a field allocates nothing for it, which is
       // a stronger guarantee than any cap: not "at most N elements" but none.
       // This is the shape generated code uses for an id its schema does not
-      // declare — [_Recorder] returns null from both destination hooks.
+      // declare — [_Recorder] answers every header call with `null`, the
+      // `MessageVisitor` default.
       final v = _Recorder();
       expect(_oneShot(bomb, v), sofab.DecodeStatus.incomplete);
-      expect(v.dests, isEmpty);
-      expect(v.done, isEmpty, reason: 'nothing was delivered either');
+      expect(_byteAtATime(bomb, _Recorder()), sofab.DecodeStatus.incomplete);
     });
   });
 }
@@ -198,36 +192,39 @@ sofab.DecodeStatus _byteAtATime(Uint8List bytes, sofab.MessageVisitor v) {
 class _Recorder extends sofab.MessageVisitor {
   final List<List<Object>> begins = [];
   final List<List<Object>> headers = [];
-  final List<int> dests = [];
-  final List<int> done = [];
 
-  @override
-  void onArrayBegin(int id, sofab.ArrayKind kind, int count) =>
-      begins.add([id, kind, count]);
+  Null _array(int id, String kind, int count) {
+    begins.add([id, kind, count]);
+    return null;
+  }
 
-  @override
-  void onFixlenHeader(int id, int subtype, int length) =>
-      headers.add([id, subtype, length]);
-
-  @override
-  Uint8List? onBytesDest(int id, int subtype, int total) {
-    dests.add(id);
+  Null _fixlen(int id, int subtype, int length) {
+    headers.add([id, subtype, length]);
     return null;
   }
 
   @override
-  TypedData? onArrayDest(int id, sofab.ArrayKind kind, int count) {
-    dests.add(id);
-    return null;
-  }
-
+  sofab.InlineInt64Array? onUnsignedArray(int id, int count) =>
+      _array(id, 'unsigned', count);
   @override
-  void onArrayDone(int id, sofab.ArrayKind kind, TypedData dest, int count) =>
-      done.add(id);
+  sofab.InlineInt64Array? onSignedArray(int id, int count) =>
+      _array(id, 'signed', count);
+  @override
+  sofab.InlineFloat32Array? onFp32Array(int id, int count) =>
+      _array(id, 'fp32', count);
+  @override
+  sofab.InlineFloat64Array? onFp64Array(int id, int count) =>
+      _array(id, 'fp64', count);
+  @override
+  sofab.InlineString? onString(int id, int length) =>
+      _fixlen(id, sofab.FixlenType.string, length);
+  @override
+  sofab.InlineBytes? onBlob(int id, int length) =>
+      _fixlen(id, sofab.FixlenType.blob, length);
 }
 
 /// Stands in for generated code carrying the three configured caps: it applies
-/// each at the header hook, on a schema that bounds nothing, and refuses with
+/// each in the header call, on a schema that bounds nothing, and refuses with
 /// [sofab.MessageVisitor.limitExceeded] — the category §6.3 reserves for a
 /// policy rejection.
 class _Capped extends sofab.MessageVisitor {
@@ -243,39 +240,41 @@ class _Capped extends sofab.MessageVisitor {
   final int maxBlobLen;
   final Set<int> skipIds;
 
+  /// The ids a destination was handed out for — the allocations that happened.
   final List<int> dests = [];
-  final List<String> strings = [];
+  final List<sofab.InlineString> _strings = [];
 
-  @override
-  bool shouldRead(int id, int type) => !skipIds.contains(id);
+  /// The strings' text, read after the decode.
+  List<String> get strings => [for (final s in _strings) '$s'];
 
-  @override
-  void onArrayBegin(int id, sofab.ArrayKind kind, int count) {
-    if (count > maxArrayCount) limitExceeded();
-  }
-
-  @override
-  void onFixlenHeader(int id, int subtype, int length) {
-    if (subtype == sofab.FixlenType.string && length > maxStringLen) {
-      limitExceeded();
-    }
-    if (subtype == sofab.FixlenType.blob && length > maxBlobLen) {
-      limitExceeded();
-    }
-  }
-
-  @override
-  void onString(int id, String value) => strings.add(value);
-
-  @override
-  Uint8List? onBytesDest(int id, int subtype, int total) {
+  bool _admit(int id, int n, int cap) {
+    if (skipIds.contains(id)) return false;
+    if (n > cap) limitExceeded();
     dests.add(id);
-    return super.onBytesDest(id, subtype, total);
+    return true;
   }
 
   @override
-  TypedData? onArrayDest(int id, sofab.ArrayKind kind, int count) {
-    dests.add(id);
-    return super.onArrayDest(id, kind, count);
+  sofab.InlineInt64Array? onUnsignedArray(int id, int count) =>
+      _admit(id, count, maxArrayCount) ? sofab.InlineInt64Array(count) : null;
+  @override
+  sofab.InlineInt64Array? onSignedArray(int id, int count) =>
+      _admit(id, count, maxArrayCount) ? sofab.InlineInt64Array(count) : null;
+  @override
+  sofab.InlineFloat32Array? onFp32Array(int id, int count) =>
+      _admit(id, count, maxArrayCount) ? sofab.InlineFloat32Array(count) : null;
+  @override
+  sofab.InlineFloat64Array? onFp64Array(int id, int count) =>
+      _admit(id, count, maxArrayCount) ? sofab.InlineFloat64Array(count) : null;
+  @override
+  sofab.InlineBytes? onBlob(int id, int length) =>
+      _admit(id, length, maxBlobLen) ? sofab.InlineBytes(length) : null;
+
+  @override
+  sofab.InlineString? onString(int id, int length) {
+    if (!_admit(id, length, maxStringLen)) return null;
+    final d = sofab.InlineString(length);
+    _strings.add(d);
+    return d;
   }
 }

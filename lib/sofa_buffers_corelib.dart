@@ -38,7 +38,6 @@ export 'src/wire.dart'
         minOutputBuffer,
         WireType,
         FixlenType,
-        ArrayKind,
         DecodeStatus,
         SofabError,
         SofabException;
@@ -51,15 +50,20 @@ export 'src/utf8.dart'
         utf8LengthStrict;
 export 'src/encoder.dart' show Encoder, FlushCallback;
 export 'src/decoder.dart' show Decoder, MessageVisitor, ElemRange;
-export 'src/visitor_base.dart' show VisitorBase;
+export 'src/inline.dart'
+    show
+        InlineBytes,
+        InlineFloat32Array,
+        InlineFloat64Array,
+        InlineInt64Array,
+        InlineString;
 export 'src/lists.dart' show elementsEqual;
 export 'src/seq.dart'
     show
         BlobSeq,
-        BoolMatrixSeq,
-        DoubleMatrixSeq,
+        Float32MatrixSeq,
+        Float64MatrixSeq,
         IntMatrixSeq,
         MessageSeq,
         NestedSeq,
-        StringSeq,
-        copyFp32;
+        StringSeq;

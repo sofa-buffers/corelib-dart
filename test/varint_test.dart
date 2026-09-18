@@ -11,28 +11,47 @@ import 'package:test/test.dart';
 /// leaving them to whichever lengths the shared vectors happen to contain.
 class _Collect extends sofab.MessageVisitor {
   final values = <int>[];
-  final arrays = <List<int>>[];
+  final _arrays = <sofab.InlineInt64Array>[];
+  final _events = <Object>[];
+
+  /// The arrays' contents, read after the decode — when they are whole.
+  List<List<int>> get arrays => [for (final a in _arrays) a.toList()];
+
+  /// The events, a string's text read from its destination after the decode.
+  List<String> get events => [
+    for (final e in _events) e is String ? e : (e as String Function())(),
+  ];
+
+  sofab.InlineInt64Array _array(int count) {
+    final d = sofab.InlineInt64Array(count);
+    _arrays.add(d);
+    return d;
+  }
 
   @override
   void onUnsigned(int id, int value) => values.add(value);
   @override
   void onSigned(int id, int value) => values.add(value);
   @override
-  void onUnsignedArray(int id, Int64List v) => arrays.add(v.toList());
+  sofab.InlineInt64Array? onUnsignedArray(int id, int count) => _array(count);
   @override
-  void onSignedArray(int id, Int64List v) => arrays.add(v.toList());
+  sofab.InlineInt64Array? onSignedArray(int id, int count) => _array(count);
 
-  final events = <String>[];
   @override
-  void onString(int id, String value) => events.add('STR:$id:$value');
+  sofab.InlineString? onString(int id, int length) {
+    final d = sofab.InlineString(length);
+    _events.add(() => 'STR:$id:$d');
+    return d;
+  }
+
   @override
   sofab.MessageVisitor? onSequenceStart(int id) {
-    events.add('SEQ:$id');
+    _events.add('SEQ:$id');
     return this;
   }
 
   @override
-  void onSequenceEnd() => events.add('END');
+  void onSequenceEnd() => _events.add('END');
 }
 
 /// Decodes [bytes] one-shot **and** byte-at-a-time, asserting both surfaces

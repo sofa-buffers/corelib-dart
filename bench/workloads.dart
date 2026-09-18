@@ -197,10 +197,23 @@ void encodeComposite(sofab.Encoder e) {
   e.writeUnsigned(130, 0xDEADBEEF);
 }
 
-/// A no-op visitor that fully traverses a message (reads every field) with
-/// minimal per-field work — the decode hot path for benchmarking.
+/// A visitor that reads every field with minimal per-field work — the decode
+/// hot path for benchmarking.
+///
+/// Every aggregate is decoded into a destination this visitor owns, one per
+/// kind, grown only when a field outgrows it and otherwise reused: the pattern
+/// generated code follows, where a field's storage is sized once to its schema
+/// maximum. So a steady-state decode allocates nothing, and what is measured
+/// is the codec — copying payloads in, validating strings, decoding elements.
 class CountingVisitor extends sofab.MessageVisitor {
   int fields = 0;
+
+  final sofab.InlineString _string = sofab.InlineString(0);
+  final sofab.InlineBytes _blob = sofab.InlineBytes(0);
+  final sofab.InlineInt64Array _ints = sofab.InlineInt64Array(0);
+  final sofab.InlineFloat32Array _f32 = sofab.InlineFloat32Array(0);
+  final sofab.InlineFloat64Array _f64 = sofab.InlineFloat64Array(0);
+
   @override
   void onUnsigned(int id, int value) => fields++;
   @override
@@ -210,17 +223,41 @@ class CountingVisitor extends sofab.MessageVisitor {
   @override
   void onFp64(int id, double value) => fields++;
   @override
-  void onString(int id, String value) => fields++;
+  sofab.InlineString? onString(int id, int length) {
+    fields++;
+    return _string..ensureCapacity(length);
+  }
+
   @override
-  void onBlob(int id, Uint8List value) => fields++;
+  sofab.InlineBytes? onBlob(int id, int length) {
+    fields++;
+    return _blob..ensureCapacity(length);
+  }
+
   @override
-  void onUnsignedArray(int id, Int64List values) => fields += values.length;
+  sofab.InlineInt64Array? onUnsignedArray(int id, int count) {
+    fields += count;
+    return _ints..ensureCapacity(count);
+  }
+
   @override
-  void onSignedArray(int id, Int64List values) => fields += values.length;
+  sofab.InlineInt64Array? onSignedArray(int id, int count) {
+    fields += count;
+    return _ints..ensureCapacity(count);
+  }
+
   @override
-  void onFp32Array(int id, Float32List values) => fields += values.length;
+  sofab.InlineFloat32Array? onFp32Array(int id, int count) {
+    fields += count;
+    return _f32..ensureCapacity(count);
+  }
+
   @override
-  void onFp64Array(int id, Float64List values) => fields += values.length;
+  sofab.InlineFloat64Array? onFp64Array(int id, int count) {
+    fields += count;
+    return _f64..ensureCapacity(count);
+  }
+
   @override
   sofab.MessageVisitor? onSequenceStart(int id) => this;
 }
@@ -228,23 +265,13 @@ class CountingVisitor extends sofab.MessageVisitor {
 /// The `decode: composite skip-all` sink — the path a router or filter runs in
 /// production: walk the message, materialize nothing.
 ///
-/// In this port that is stated outright rather than implied by empty callbacks:
-/// [sofab.MessageVisitor.shouldRead] refuses every leaf at **header** time, so
-/// the payload is jumped over and never materialized or UTF-8-validated
-/// (CORELIB_PLAN §6.4), and [sofab.MessageVisitor.onSequenceStart] returns
-/// `null`, which drops each sub-sequence whole. A visitor that merely overrode
-/// nothing would still be *read*: this port's default `onStringBytes`
-/// transcodes to a Dart `String`, which is exactly the work this row is meant
-/// to leave out. Its distance from `decode: composite` is what not-decoding is
-/// worth here.
+/// That is the `MessageVisitor` default: every string, blob and array header
+/// call answers `null`, so its payload is jumped over and never copied or
+/// UTF-8-validated (CORELIB_PLAN §6.4), every scalar lands in an empty method,
+/// and [onSequenceStart] answers `null`, which drops each sub-sequence whole.
+/// Its distance from `decode: composite` is what not-decoding is worth here.
 class SkipAllVisitor extends sofab.MessageVisitor {
   int skipped = 0;
-
-  @override
-  bool shouldRead(int id, int type) {
-    skipped++;
-    return false;
-  }
 
   @override
   sofab.MessageVisitor? onSequenceStart(int id) {

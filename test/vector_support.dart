@@ -257,49 +257,104 @@ String _expectedArray(Map<String, dynamic> f) {
 /// A [sofab.MessageVisitor] that records the canonical event key of every field
 /// it is given, flattening nested sequences in wire order. Fields whose ids are
 /// in [skipIds] are skipped at every level (never materialized/validated).
+///
+/// An aggregate is recorded at its header, where the decoder asks for its
+/// destination, and rendered from that destination when [events] is read —
+/// after the decode, which is when the destination holds the field. Each gets a
+/// fresh, exactly-sized destination.
 class RecordingVisitor extends sofab.MessageVisitor {
   RecordingVisitor({this.skipIds = const <int>{}});
   final Set<int> skipIds;
-  final List<String> events = <String>[];
+  final List<Object> _events = <Object>[];
+
+  /// The events so far, aggregates rendered from their destinations. A string
+  /// the decode rejected never became a value, so it is left out.
+  List<String> get events => [
+    for (final e in _events)
+      if (e is String) e else ?(e as String? Function())(),
+  ];
+
+  bool _skip(int id) => skipIds.contains(id);
 
   @override
-  bool shouldRead(int id, int type) => !skipIds.contains(id);
+  void onUnsigned(int id, int value) {
+    if (!_skip(id)) _events.add('U:$id:$value');
+  }
 
   @override
-  void onUnsigned(int id, int value) => events.add('U:$id:$value');
+  void onSigned(int id, int value) {
+    if (!_skip(id)) _events.add('S:$id:$value');
+  }
+
   @override
-  void onSigned(int id, int value) => events.add('S:$id:$value');
+  void onFp32(int id, double value) {
+    if (!_skip(id)) _events.add('F32:$id:${fp32Hex(value)}');
+  }
+
   @override
-  void onFp32(int id, double value) => events.add('F32:$id:${fp32Hex(value)}');
+  void onFp64(int id, double value) {
+    if (!_skip(id)) _events.add('F64:$id:${fp64Hex(value)}');
+  }
+
   @override
-  void onFp64(int id, double value) => events.add('F64:$id:${fp64Hex(value)}');
+  sofab.InlineString? onString(int id, int length) {
+    if (_skip(id)) return null;
+    final d = sofab.InlineString(length);
+    _events.add(
+      () => sofab.utf8Valid(d.storage, 0, d.length) ? 'STR:$id:$d' : null,
+    );
+    return d;
+  }
+
   @override
-  void onString(int id, String value) => events.add('STR:$id:$value');
+  sofab.InlineBytes? onBlob(int id, int length) {
+    if (_skip(id)) return null;
+    final d = sofab.InlineBytes(length);
+    _events.add(() => 'BLB:$id:${bytesToHex(d.toBytes())}');
+    return d;
+  }
+
   @override
-  void onBlob(int id, Uint8List value) =>
-      events.add('BLB:$id:${bytesToHex(value)}');
+  sofab.InlineInt64Array? onUnsignedArray(int id, int count) {
+    if (_skip(id)) return null;
+    final d = sofab.InlineInt64Array(count);
+    _events.add(() => 'AU:$id:${d.toList().join(',')}');
+    return d;
+  }
+
   @override
-  void onUnsignedArray(int id, Int64List values) =>
-      events.add('AU:$id:${values.join(',')}');
+  sofab.InlineInt64Array? onSignedArray(int id, int count) {
+    if (_skip(id)) return null;
+    final d = sofab.InlineInt64Array(count);
+    _events.add(() => 'AI:$id:${d.toList().join(',')}');
+    return d;
+  }
+
   @override
-  void onSignedArray(int id, Int64List values) =>
-      events.add('AI:$id:${values.join(',')}');
+  sofab.InlineFloat32Array? onFp32Array(int id, int count) {
+    if (_skip(id)) return null;
+    final d = sofab.InlineFloat32Array(count);
+    _events.add(() => 'AF32:$id:${d.toList().map(fp32Hex).join(',')}');
+    return d;
+  }
+
   @override
-  void onFp32Array(int id, Float32List values) =>
-      events.add('AF32:$id:${values.map(fp32Hex).join(',')}');
-  @override
-  void onFp64Array(int id, Float64List values) =>
-      events.add('AF64:$id:${values.map(fp64Hex).join(',')}');
+  sofab.InlineFloat64Array? onFp64Array(int id, int count) {
+    if (_skip(id)) return null;
+    final d = sofab.InlineFloat64Array(count);
+    _events.add(() => 'AF64:$id:${d.toList().map(fp64Hex).join(',')}');
+    return d;
+  }
 
   @override
   sofab.MessageVisitor? onSequenceStart(int id) {
-    if (skipIds.contains(id)) return null; // skip the whole sub-sequence
-    events.add('SEQ:$id');
+    if (_skip(id)) return null; // skip the whole sub-sequence
+    _events.add('SEQ:$id');
     return this;
   }
 
   @override
-  void onSequenceEnd() => events.add('END');
+  void onSequenceEnd() => _events.add('END');
 }
 
 /// Stands in for generated code carrying the three configured `max_dyn_*` caps
@@ -308,12 +363,11 @@ class RecordingVisitor extends sofab.MessageVisitor {
 ///
 /// The caps are the visitor's, because §6.2.1 leaves them nowhere else: *"The
 /// numbers and the allocation are not the codec's … the visitor decides."* Each
-/// is applied in the header hook the codec reports at — [onArrayBegin] for a
-/// count, [onFixlenHeader] for a `string`/`blob` length — which is also the
-/// point before the destination is asked for, so a refusal costs no allocation.
-/// The schema it stands for bounds nothing, so every field is the cap's
-/// business; a consumer whose schema DOES bound a field states that bound here
-/// instead, and never both (see `schema_bound_limit_test.dart`).
+/// is applied in the header call the codec reports at, before the destination
+/// is chosen, so a refusal costs no allocation. The schema it stands for bounds
+/// nothing, so every field is the cap's business; a consumer whose schema DOES
+/// bound a field states that bound here instead, and never both (see
+/// `schema_bound_limit_test.dart`).
 ///
 /// There is no unset state (§6.2.1): the loosest a cap gets is the format's own
 /// ceiling.
@@ -329,34 +383,53 @@ class CappedVisitor extends RecordingVisitor {
   final int maxStringLen;
   final int maxBlobLen;
 
-  /// The ids a destination was asked for — i.e. the allocations that happened.
+  /// The ids a destination was handed out for — i.e. the allocations that
+  /// happened.
   final List<int> dests = [];
 
-  @override
-  void onArrayBegin(int id, sofab.ArrayKind kind, int count) {
-    if (count > maxArrayCount) limitExceeded();
+  T? _dest<T>(int id, T? d) {
+    if (d != null) dests.add(id);
+    return d;
+  }
+
+  void _count(int id, int count) {
+    if (!_skip(id) && count > maxArrayCount) limitExceeded();
   }
 
   @override
-  void onFixlenHeader(int id, int subtype, int length) {
-    if (subtype == sofab.FixlenType.string && length > maxStringLen) {
-      limitExceeded();
-    }
-    if (subtype == sofab.FixlenType.blob && length > maxBlobLen) {
-      limitExceeded();
-    }
+  sofab.InlineString? onString(int id, int length) {
+    if (!_skip(id) && length > maxStringLen) limitExceeded();
+    return _dest(id, super.onString(id, length));
   }
 
   @override
-  Uint8List? onBytesDest(int id, int subtype, int total) {
-    dests.add(id);
-    return super.onBytesDest(id, subtype, total);
+  sofab.InlineBytes? onBlob(int id, int length) {
+    if (!_skip(id) && length > maxBlobLen) limitExceeded();
+    return _dest(id, super.onBlob(id, length));
   }
 
   @override
-  TypedData? onArrayDest(int id, sofab.ArrayKind kind, int count) {
-    dests.add(id);
-    return super.onArrayDest(id, kind, count);
+  sofab.InlineInt64Array? onUnsignedArray(int id, int count) {
+    _count(id, count);
+    return _dest(id, super.onUnsignedArray(id, count));
+  }
+
+  @override
+  sofab.InlineInt64Array? onSignedArray(int id, int count) {
+    _count(id, count);
+    return _dest(id, super.onSignedArray(id, count));
+  }
+
+  @override
+  sofab.InlineFloat32Array? onFp32Array(int id, int count) {
+    _count(id, count);
+    return _dest(id, super.onFp32Array(id, count));
+  }
+
+  @override
+  sofab.InlineFloat64Array? onFp64Array(int id, int count) {
+    _count(id, count);
+    return _dest(id, super.onFp64Array(id, count));
   }
 }
 

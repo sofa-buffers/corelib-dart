@@ -115,11 +115,11 @@ Uint8List? encodeUtf8Strict(String s) {
 /// [encodeUtf8Strict], and never lossy: no U+FFFD substitution, no dropped
 /// byte (CORELIB_PLAN §6.4).
 ///
-/// This is the materialization step a **schema-bound (generated) consumer**
-/// runs inside a matched destination arm of `MessageVisitor.onStringBytes`, and
-/// it is the same code the default `onStringBytes` runs — validate once, then
-/// build the string — rather than a separate [utf8Valid] scan of the whole
-/// payload followed by an independent transcode of it from byte zero.
+/// It validates once and builds the string in the same pass — rather than a
+/// separate [utf8Valid] scan of the whole payload followed by an independent
+/// transcode of it from byte zero. (A string the decoder writes into an
+/// `InlineString` is already validated there; this is for bytes of the
+/// caller's own.)
 ///
 /// The ASCII fast path is why: a byte below `0x80` is a complete, trivially
 /// valid UTF-8 sequence, so one scan settles validity *and* the transcode for

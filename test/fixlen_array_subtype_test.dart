@@ -17,21 +17,22 @@ import 'vector_support.dart';
 ///  2. read the `fixlen_word`; EOF before or inside it is **INCOMPLETE**;
 ///  3. validate the word as a **format** matter — only fp32/4 and fp64/8 are legal
 ///     elements — anything else is INVALID and is *not* routed to a §7.3 skip;
-///  4. only now offer the field, via `onArrayBegin(id, kind, count)` with
-///     `kind` ∈ {[sofab.ArrayKind.fp32], [sofab.ArrayKind.fp64]};
+///  4. only now offer the field, via its header call — [sofab.MessageVisitor
+///     .onFp32Array] or [sofab.MessageVisitor.onFp64Array], whichever kind the
+///     word names — carrying the count;
 ///  5. a consumer whose declared element type **contradicts** `kind` skips the
 ///     field (§7.3) and MUST NOT apply the schema `count` bound — the field was
 ///     never this array's value. A matching `kind` gets the bound;
 ///  6. a consumer whose declared element type MATCHES but which declares no
 ///     `count` weighs the receiver **policy** cap instead — `limitExceeded`,
 ///     never `invalid`, and still ahead of the payload allocation it prevents.
-///     It is stated in the very same hook, as the *else* of the schema bound,
+///     It is stated in the very same call, as the *else* of the schema bound,
 ///     which is what keeps the two from ever both applying (CORELIB_PLAN §6.2.1
 ///     — covered in `schema_bound_limit_test.dart`). The decoder holds no cap
 ///     of its own.
 ///
 /// The corelib carries no verdict logic of its own here: it only decides *when*
-/// the hook fires and *what kind* it carries. The generated, schema-bound
+/// the call is made and *which* kind's call it is. The generated, schema-bound
 /// consumer is modelled by [_Gen] below, and the combined verdict by
 /// [_Gen.verdict] — exactly as `header_callback_test.dart` does for the §5.2
 /// anti-folding rule.
@@ -228,7 +229,7 @@ void main() {
       expect(v.field, isNull);
     });
 
-    test('signed array header reports ArrayKind.signed', () {
+    test('a signed array header reaches onSignedArray', () {
       // `04` = ARRAY_SIGNED at id 0, two zig-zag elements.
       final v = _run(_scoped('04020002'));
       expect(v.verdict, sofab.DecodeStatus.complete);
@@ -332,8 +333,8 @@ _Gen _run(
 /// Stands in for the generated, schema-bound consumer of `array<fp32, count 5>`
 /// at id 0 (inside `arrays.nested`): it applies the `count` bound **only** in the
 /// arm matching the declared element kind, and otherwise lets the field be
-/// skipped — which is exactly the shape sofabgen emits once `onArrayBegin`
-/// carries the kind.
+/// skipped — which is exactly the shape sofabgen emits: one header call per
+/// wire kind, the bound only in the declared kind's.
 /// The loosest a receiver cap gets: the format ceiling (§6.2.1 admits no
 /// unlimited mode, so there is nothing looser to spell).
 const int arrayMaxCap = sofab.arrayMax;
@@ -359,7 +360,7 @@ class _Gen extends sofab.MessageVisitor {
   final int intBound;
 
   static const int _declaredId = 0;
-  static const sofab.ArrayKind _declaredKind = sofab.ArrayKind.fp32;
+  static const String _declaredKind = 'fp32';
   static const int _declaredCount = 5;
 
   /// A second `array<fp32>` field the schema declares with NO `count`, so the
@@ -369,11 +370,14 @@ class _Gen extends sofab.MessageVisitor {
   /// Sticky INVALID flag, as the generated visitor keeps (§5.2 anti-folding).
   bool inv = false;
 
-  /// Every `onArrayBegin` as `id:kind:count`, in call order.
+  /// Every array header call as `id:kind:count`, in call order.
   final List<String> begins = <String>[];
 
-  /// The declared field's materialized value; `null` = still at its default.
-  Float32List? field;
+  sofab.InlineFloat32Array? _field;
+
+  /// The declared field's destination storage; `null` = never bound, so still
+  /// at its default.
+  Float32List? get field => _field?.storage;
 
   /// The status the decoder itself returned.
   sofab.DecodeStatus status = sofab.DecodeStatus.complete;
@@ -381,43 +385,56 @@ class _Gen extends sofab.MessageVisitor {
   /// The verdict the generated code reports: a sticky INVALID dominates.
   sofab.DecodeStatus get verdict => inv ? sofab.DecodeStatus.invalid : status;
 
-  bool _matched = false;
-
-  @override
-  bool shouldRead(int id, int type) => !skip;
-
-  @override
-  void onArrayBegin(int id, sofab.ArrayKind kind, int count) {
-    begins.add('$id:${kind.name}:$count');
+  /// The bounds, applied in the header call; `true` when the call is for the
+  /// declared field in its declared kind — the one this visitor binds.
+  bool _begin(int id, String kind, int count) {
+    begins.add('$id:$kind:$count');
     if (id == intId) {
-      if (kind == sofab.ArrayKind.unsigned && count > intBound) inv = true;
-      return;
+      if (kind == 'unsigned' && count > intBound) inv = true;
+      return false;
     }
     if (id == _unboundedId) {
       // Declared, but with no `count`: the receiver cap governs, and its breach
       // is a policy rejection rather than INVALID (§6.2.1, §6.3). Gated on the
       // element kind for the same §7.3 reason as the bounded field below.
       if (kind == _declaredKind && count > cap) limitExceeded();
-      return;
+      return false;
     }
-    if (id != _declaredId) return;
+    if (id != _declaredId) return false;
     // §7.3: a header of the wrong element kind is not this field's value, so it
     // is skipped and the schema `count` bound MUST NOT be applied to it.
-    _matched = kind == _declaredKind;
-    if (!_matched) return;
+    if (kind != _declaredKind) return false;
     if (count > _declaredCount) inv = true;
+    return true;
   }
 
   @override
-  void onFp32Array(int id, Float32List values) {
-    if (id == _declaredId && _matched) field = values;
+  sofab.InlineFloat32Array? onFp32Array(int id, int count) {
+    if (skip || !_begin(id, 'fp32', count)) return null;
+    return _field = sofab.InlineFloat32Array(count);
   }
 
-  // The kinds that never match the declared fp32 field are simply dropped.
+  // The kinds that never match the declared fp32 field are skipped.
   @override
-  void onFp64Array(int id, Float64List values) {}
+  sofab.InlineFloat64Array? onFp64Array(int id, int count) {
+    if (!skip) _begin(id, 'fp64', count);
+    return null;
+  }
+
   @override
-  void onUnsignedArray(int id, Int64List values) {}
+  sofab.InlineInt64Array? onUnsignedArray(int id, int count) {
+    if (!skip) _begin(id, 'unsigned', count);
+    return null;
+  }
+
   @override
-  void onSignedArray(int id, Int64List values) {}
+  sofab.InlineInt64Array? onSignedArray(int id, int count) {
+    if (!skip) _begin(id, 'signed', count);
+    return null;
+  }
+
+  // `arrays` (id 100) → `nested` (id 10) → the field: descend with this one
+  // visitor, as the flat stand-in it is.
+  @override
+  sofab.MessageVisitor? onSequenceStart(int id) => this;
 }

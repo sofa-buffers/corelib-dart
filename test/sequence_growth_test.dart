@@ -100,7 +100,7 @@ void main() {
       // Decode into the collector for this element type, with the receiver cap
       // set and no schema `count` (cap = -1): §6.2.1 keeps a receiver cap off a
       // field the schema already bounds, so the two never both apply.
-      final strings = <String>[];
+      final strings = <sofab.InlineString>[];
       final structs = <_Elem>[];
       sofab.MessageVisitor collector() => elementType == 'string'
           ? sofab.StringSeq(
@@ -123,7 +123,7 @@ void main() {
 
       // ... and again through the streaming surface, one byte per feed, which
       // has to reach the same verdict and the same container.
-      final strings2 = <String>[];
+      final strings2 = <sofab.InlineString>[];
       final structs2 = <_Elem>[];
       final dec = sofab.Decoder(
         _Root(
@@ -186,8 +186,12 @@ void main() {
       for (final idx in (expected['default_ids'] as List? ?? const [])) {
         final i = jInt(idx);
         if (elementType == 'string') {
-          expect(strings[i], '', reason: 'gap at $i holds the element default');
-          expect(strings2[i], '');
+          expect(
+            '${strings[i]}',
+            '',
+            reason: 'gap at $i holds the element default',
+          );
+          expect('${strings2[i]}', '');
         } else {
           expect(structs[i].value, 0);
         }
@@ -201,7 +205,7 @@ class _Elem {
   int value = 0;
 }
 
-class _ElemVisitor extends sofab.VisitorBase {
+class _ElemVisitor extends sofab.MessageVisitor {
   _ElemVisitor(this.o);
   final _Elem o;
 
@@ -212,7 +216,7 @@ class _ElemVisitor extends sofab.VisitorBase {
 }
 
 /// Routes the one wrapper-array field to the collector under test.
-class _Root extends sofab.VisitorBase {
+class _Root extends sofab.MessageVisitor {
   _Root(this.fieldId, this.child);
   final int fieldId;
   final sofab.MessageVisitor child;

@@ -1,5 +1,3 @@
-import 'dart:typed_data';
-
 import 'package:sofa_buffers_corelib/sofa_buffers_corelib.dart' as sofab;
 import 'package:test/test.dart';
 
@@ -10,14 +8,6 @@ import 'vector_support.dart';
 /// the missing bytes then completes it. There is no finalize step.
 void main() {
   sofab.DecodeStatus decode(String hex) =>
-      sofab.Decoder.decode(hexToBytes(hex), RecordingVisitor());
-
-  /// The same decode. There is no cap to wind out any more (CORELIB_PLAN
-  /// §6.2.1: the decoder holds none), so an ARRAY_MAX count is admitted and the
-  /// outcome is decided by the bytes — which is what these cases are about.
-  /// The one-shot walker never sizes a destination from a count the input
-  /// cannot back, so an impossible count costs nothing here.
-  sofab.DecodeStatus decodeUncapped(String hex) =>
       sofab.Decoder.decode(hexToBytes(hex), RecordingVisitor());
 
   test('empty input is COMPLETE (valid empty message)', () {
@@ -128,21 +118,32 @@ void main() {
   // message into a 17 GB allocation request — §7.2 item 5 says an oversized
   // count is a well-defined outcome, never a crash, and §6.2.1 says the decision
   // comes *before* the allocation it prevents.
-  group('an element count larger than the input never sizes the result', () {
+  group('a count or length larger than the input is the receiver\'s call', () {
     // count = ARRAY_MAX (2^31-1, the largest legal count) with zero elements.
     const maxCount = 'ffffffff07';
 
-    test('unsigned array, count ARRAY_MAX, no elements → INCOMPLETE', () {
-      expect(decodeUncapped('03$maxCount'), sofab.DecodeStatus.incomplete);
+    // The header call is made on BOTH surfaces before the truncation is known —
+    // it is where a schema bound or a receiver cap is judged, and that verdict
+    // outranks the truncation (§5.2). The one-shot surface asks exactly where
+    // the streaming one must (§6.7.1): what keeps a hostile count from sizing
+    // anything is the receiver's cap (§6.2.1), never a deduction only one
+    // surface could make.
+
+    test('a skipped array announcing ARRAY_MAX → INCOMPLETE', () {
+      // A skipped field allocates nothing, so no cap is applied to it
+      // (§6.2.1) — the outcome is the truncation. (`03` is field 0 unsigned,
+      // `0c` field 1 signed.)
+      for (final hex in ['03$maxCount', '0c$maxCount']) {
+        expect(
+          sofab.Decoder.decode(
+            hexToBytes(hex),
+            RecordingVisitor(skipIds: const {0, 1}),
+          ),
+          sofab.DecodeStatus.incomplete,
+        );
+      }
     });
 
-    test('signed array, count ARRAY_MAX, no elements → INCOMPLETE', () {
-      expect(decodeUncapped('0c$maxCount'), sofab.DecodeStatus.incomplete);
-    });
-
-    // And with a receiver cap in place — which lives in the consumer now
-    // (§6.2.1) — the same count never reaches the element loop at all: it is
-    // refused at the count word, as a policy rejection distinct from INVALID.
     test('under a receiver cap the same count is limitExceeded', () {
       sofab.DecodeStatus capped(String hex) => sofab.Decoder.decode(
         hexToBytes(hex),
@@ -152,40 +153,35 @@ void main() {
       expect(capped('0c$maxCount'), sofab.DecodeStatus.limitExceeded);
     });
 
-    test('the skipping path decides the same way', () {
-      // A skipped field allocates nothing, so no cap is applied to it
-      // (§6.2.1) — the outcome is the truncation, whatever the caps are.
+    test('a count the cap admits but the input cannot back → INCOMPLETE', () {
+      // 1000 elements declared, three present.
       expect(
         sofab.Decoder.decode(
-          hexToBytes('03$maxCount'),
-          RecordingVisitor(skipIds: const {0}),
+          hexToBytes('03e807010203'),
+          CappedVisitor(maxArrayCount: 1024),
         ),
         sofab.DecodeStatus.incomplete,
       );
     });
 
-    test('a decodable prefix is still not delivered', () {
-      final rec = RecordingVisitor();
-      // Three elements on the wire, ARRAY_MAX declared.
-      expect(
-        sofab.Decoder.decode(hexToBytes('03${maxCount}010203'), rec),
-        sofab.DecodeStatus.incomplete,
-      );
-      expect(rec.events.where((e) => e.startsWith('AU:')), isEmpty);
-    });
-
-    test('a length larger than the input never sizes a destination', () {
-      // The fixlen twin of the cases above: a `string` announcing half a
-      // gigabyte with none present. The one-shot surface knows the buffer
-      // cannot back that length, so it never asks the caller for a destination
-      // — no cap is involved, and none is needed.
+    test('a length larger than the input is asked about at its header', () {
+      // The fixlen twin: a `string` announcing half a gigabyte with none
+      // present. The header call is made — so a cap can refuse it — ...
       var asked = false;
       final st = sofab.Decoder.decode(
         hexToBytes('02f2ffffff0f'),
         _AskRecorder(() => asked = true),
       );
       expect(st, sofab.DecodeStatus.incomplete);
-      expect(asked, isFalse);
+      expect(asked, isTrue);
+      // ... and a cap does, before any storage is chosen.
+      expect(
+        sofab.Decoder.decode(
+          hexToBytes('02f2ffffff0f'),
+          CappedVisitor(maxStringLen: 1024),
+        ),
+        sofab.DecodeStatus.limitExceeded,
+      );
     });
 
     test('a count that the input can satisfy is unaffected', () {
@@ -205,8 +201,14 @@ class _AskRecorder extends sofab.MessageVisitor {
   final void Function() onAsk;
 
   @override
-  Uint8List? onBytesDest(int id, int subtype, int total) {
+  sofab.InlineString? onString(int id, int length) {
     onAsk();
-    return Uint8List(total);
+    return null; // asked is all this records; allocating 512 MiB is not
+  }
+
+  @override
+  sofab.InlineBytes? onBlob(int id, int length) {
+    onAsk();
+    return null;
   }
 }

@@ -19,9 +19,14 @@ const int elemCount = 3000000;
 const int chunkSize = 64 * 1024;
 
 class _Sink extends sofab.MessageVisitor {
-  Float64List? got;
+  sofab.InlineFloat64Array? _dest;
+  Float64List? get got => _dest?.storage;
+
+  // The receiver's own storage, sized from the count it was told — the one
+  // payload-sized allocation the heap cap leaves room for.
   @override
-  void onFp64Array(int id, Float64List value) => got = value;
+  sofab.InlineFloat64Array? onFp64Array(int id, int count) =>
+      _dest = sofab.InlineFloat64Array(count);
 }
 
 void main() {

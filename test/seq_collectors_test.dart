@@ -26,7 +26,7 @@ void main() {
 
   group('StringSeq', () {
     test('places each element at its id and fills the gap it leaves', () {
-      final out = <String>[];
+      final out = <sofab.InlineString>[];
       final st = run(
         (e) {
           e.writeString(0, 'a');
@@ -41,13 +41,17 @@ void main() {
         ),
       );
       expect(st, sofab.DecodeStatus.complete);
-      expect(out, ['a', '', 'c']); // length is highest id + 1, not the count
+      expect(_v(out), [
+        'a',
+        '',
+        'c',
+      ]); // length is highest id + 1, not the count
     });
 
     test(
       'an id at the declared capacity is INVALID, and nothing is placed',
       () {
-        final out = <String>[];
+        final out = <sofab.InlineString>[];
         final st = run(
           (e) => e.writeString(2, 'x'),
           sofab.StringSeq(
@@ -59,12 +63,12 @@ void main() {
           ),
         );
         expect(st, sofab.DecodeStatus.invalid);
-        expect(out, isEmpty);
+        expect(_v(out), isEmpty);
       },
     );
 
     test('an element past its declared maxlen is INVALID', () {
-      final out = <String>[];
+      final out = <sofab.InlineString>[];
       expect(
         run(
           (e) => e.writeString(0, 'abcd'),
@@ -79,7 +83,7 @@ void main() {
         sofab.DecodeStatus.invalid,
       );
       // ...and the control one byte shorter decodes.
-      final ok = <String>[];
+      final ok = <sofab.InlineString>[];
       expect(
         run(
           (e) => e.writeString(0, 'abc'),
@@ -93,7 +97,7 @@ void main() {
         ),
         sofab.DecodeStatus.complete,
       );
-      expect(ok, ['abc']);
+      expect(_v(ok), ['abc']);
     });
 
     test('invalid UTF-8 at a materialized element is INVALID', () {
@@ -104,7 +108,7 @@ void main() {
       //   ff fe     two bytes that are not valid UTF-8
       //   07        sequence end
       final bytes = Uint8List.fromList([0x0e, 0x02, 0x12, 0xff, 0xfe, 0x07]);
-      final out = <String>[];
+      final out = <sofab.InlineString>[];
       expect(
         sofab.Decoder.decode(
           bytes,
@@ -120,13 +124,12 @@ void main() {
         ),
         sofab.DecodeStatus.invalid,
       );
-      expect(out, isEmpty);
     });
 
     test(
       'a blob element does not belong to a string array: skipped, not rejected',
       () {
-        final out = <String>[];
+        final out = <sofab.InlineString>[];
         final st = run(
           (e) => e.writeBlob(0, Uint8List.fromList([1, 2, 3])),
           sofab.StringSeq(
@@ -140,14 +143,14 @@ void main() {
         // §7.3 wins over the schema bound: the element is not this array's, so
         // neither its id nor its length is measured against this array's.
         expect(st, sofab.DecodeStatus.complete);
-        expect(out, isEmpty);
+        expect(_v(out), isEmpty);
       },
     );
   });
 
   group('BlobSeq', () {
     test('copies the bytes, so the result outlives the decode buffer', () {
-      final out = <Uint8List>[];
+      final out = <sofab.InlineBytes>[];
       final st = run(
         (e) => e.writeBlob(1, Uint8List.fromList([7, 8])),
         sofab.BlobSeq(
@@ -160,12 +163,12 @@ void main() {
       );
       expect(st, sofab.DecodeStatus.complete);
       expect(out.length, 2);
-      expect(out[0], isEmpty); // the gap
-      expect(out[1], [7, 8]);
+      expect(_v(out[0]), isEmpty); // the gap
+      expect(_v(out[1]), [7, 8]);
     });
 
     test('bounds behave as StringSeq\'s', () {
-      final over = <Uint8List>[];
+      final over = <sofab.InlineBytes>[];
       expect(
         run(
           (e) => e.writeBlob(0, Uint8List.fromList([1, 2, 3])),
@@ -179,7 +182,7 @@ void main() {
         ),
         sofab.DecodeStatus.invalid,
       );
-      final past = <Uint8List>[];
+      final past = <sofab.InlineBytes>[];
       expect(
         run(
           (e) => e.writeBlob(3, Uint8List(0)),
@@ -198,7 +201,7 @@ void main() {
 
   group('IntMatrixSeq', () {
     test('collects rows and bounds each element to its declared width', () {
-      final out = <List<int>>[];
+      final out = <sofab.InlineInt64Array>[];
       final st = run(
         (e) {
           e.writeUnsignedArray(0, [1, 2]);
@@ -216,12 +219,12 @@ void main() {
         ),
       );
       expect(st, sofab.DecodeStatus.complete);
-      expect(out, [
+      expect(_v(out), [
         [1, 2],
         [3],
       ]);
 
-      final over = <List<int>>[];
+      final over = <sofab.InlineInt64Array>[];
       expect(
         run(
           (e) => e.writeUnsignedArray(0, [256]),
@@ -241,7 +244,7 @@ void main() {
     });
 
     test('a signed row is not an unsigned array\'s element (§7.3)', () {
-      final out = <List<int>>[];
+      final out = <sofab.InlineInt64Array>[];
       final st = run(
         (e) => e.writeSignedArray(0, [-1]),
         sofab.IntMatrixSeq(
@@ -256,81 +259,70 @@ void main() {
         ),
       );
       expect(st, sofab.DecodeStatus.complete);
-      expect(out, isEmpty);
+      expect(_v(out), isEmpty);
     });
   });
 
-  group('DoubleMatrixSeq', () {
+  group('Float32MatrixSeq', () {
     test('an fp32 row keeps a signaling NaN bit-for-bit', () {
       final snan = Float32List(1);
       Uint8List.sublistView(snan).setAll(0, [0x01, 0x00, 0xC0, 0x7F]);
-      final out = <List<double>>[];
+      final out = <sofab.InlineFloat32Array>[];
       final st = run(
         (e) => e.writeFp32Array(0, snan),
-        sofab.DoubleMatrixSeq(
+        sofab.Float32MatrixSeq(
           out,
           -1,
-          false,
           rcap: sofab.arrayMax,
           rowCount: -1,
           rowCap: sofab.arrayMax,
         ),
       );
       expect(st, sofab.DecodeStatus.complete);
-      final got = Float32List.fromList(out[0]);
-      expect(Uint8List.sublistView(got), Uint8List.sublistView(snan));
+      expect(
+        Uint8List.sublistView(out[0].storage),
+        Uint8List.sublistView(snan),
+      );
     });
 
     test('an fp64 row is not an fp32 array\'s element (§7.3)', () {
-      final out = <List<double>>[];
+      final out = <sofab.InlineFloat32Array>[];
       final st = run(
         (e) => e.writeFp64Array(0, Float64List.fromList([1.5])),
-        sofab.DoubleMatrixSeq(
+        sofab.Float32MatrixSeq(
+          out,
+          -1,
+          rcap: sofab.arrayMax,
+          rowCount: -1,
+          rowCap: sofab.arrayMax,
+        ),
+      );
+      expect(st, sofab.DecodeStatus.complete);
+      expect(_v(out), isEmpty);
+    });
+  });
+
+  group('a bool matrix', () {
+    test('is an unsigned matrix with no width: any non-zero is true', () {
+      final out = <sofab.InlineInt64Array>[];
+      final st = run(
+        (e) => e.writeUnsignedArray(0, [0, 1, 2]),
+        sofab.IntMatrixSeq(
           out,
           -1,
           false,
+          0,
+          0,
           rcap: sofab.arrayMax,
           rowCount: -1,
           rowCap: sofab.arrayMax,
         ),
       );
       expect(st, sofab.DecodeStatus.complete);
-      expect(out, isEmpty);
-    });
-  });
-
-  group('BoolMatrixSeq', () {
-    test('any non-zero element is true', () {
-      final out = <List<bool>>[];
-      final st = run(
-        (e) => e.writeUnsignedArray(0, [0, 1, 2]),
-        sofab.BoolMatrixSeq(
-          out,
-          -1,
-          rcap: sofab.arrayMax,
-          rowCount: -1,
-          rowCap: sofab.arrayMax,
-        ),
-      );
-      expect(st, sofab.DecodeStatus.complete);
-      expect(out, [
-        [false, true, true],
+      expect(_v(out), [
+        [0, 1, 2],
       ]);
-    });
-  });
-
-  group('copyFp32', () {
-    test('grows to n and preserves the source bytes exactly', () {
-      final src = Float32List.fromList([1.5, -2.25]);
-      final got = sofab.copyFp32(src, 4);
-      expect(got.length, 4);
-      expect(got.sublist(0, 2), [1.5, -2.25]);
-      expect(got[2], 0.0);
-    });
-
-    test('never shrinks below the source', () {
-      final src = Float32List.fromList([1, 2, 3]);
-      expect(sofab.copyFp32(src, 1).length, 3);
+      expect([for (final v in out[0].toList()) v != 0], [false, true, true]);
     });
   });
 
@@ -399,13 +391,13 @@ void main() {
         ),
         sofab.DecodeStatus.invalid,
       );
-      expect(past, isEmpty);
+      expect(_v(past), isEmpty);
     });
   });
 
   group('NestedSeq', () {
     test('collects a row of rows, each row through its own collector', () {
-      final out = <List<String>>[];
+      final out = <List<sofab.InlineString>>[];
       final st = run(
         (e) {
           e.beginSequenceLazy(0);
@@ -416,7 +408,7 @@ void main() {
           e.writeString(0, 'c');
           e.endSequence();
         },
-        sofab.NestedSeq<String>(
+        sofab.NestedSeq<sofab.InlineString>(
           out,
           -1,
           (row) => sofab.StringSeq(
@@ -430,7 +422,7 @@ void main() {
         ),
       );
       expect(st, sofab.DecodeStatus.complete);
-      expect(out, [
+      expect(_v(out), [
         ['a', 'b'],
         ['c'],
       ]);
@@ -457,7 +449,7 @@ void main() {
     // which is why this can only ever be a decoder-side check. Here it is asserted
     // where it is implemented.
     test('a repeated row id replaces the row, it does not merge (§7.4)', () {
-      final out = <List<String>>[];
+      final out = <List<sofab.InlineString>>[];
       final st = run(
         (e) {
           e.beginSequenceLazy(0);
@@ -468,7 +460,7 @@ void main() {
           e.writeString(0, 'y');
           e.endSequence();
         },
-        sofab.NestedSeq<String>(
+        sofab.NestedSeq<sofab.InlineString>(
           out,
           -1,
           (row) => sofab.StringSeq(
@@ -482,20 +474,20 @@ void main() {
         ),
       );
       expect(st, sofab.DecodeStatus.complete);
-      expect(out, [
+      expect(_v(out), [
         ['y'],
       ]);
     });
 
     test('a row id past the outer capacity is INVALID', () {
-      final out = <List<String>>[];
+      final out = <List<sofab.InlineString>>[];
       final st = run(
         (e) {
           e.beginSequenceLazy(3);
           e.writeString(0, 'x');
           e.endSequence();
         },
-        sofab.NestedSeq<String>(
+        sofab.NestedSeq<sofab.InlineString>(
           out,
           3,
           (row) => sofab.StringSeq(
@@ -509,21 +501,20 @@ void main() {
         ),
       );
       expect(st, sofab.DecodeStatus.invalid);
-      expect(out, isEmpty);
+      expect(_v(out), isEmpty);
     });
   });
 
-  group('DoubleMatrixSeq, fp64 rows', () {
+  group('Float64MatrixSeq', () {
     test(
       'collects them, and an fp32 row is not this array\'s element (§7.3)',
       () {
-        final out = <List<double>>[];
+        final out = <sofab.InlineFloat64Array>[];
         final st = run(
           (e) => e.writeFp64Array(1, Float64List.fromList([1.5, 2.5])),
-          sofab.DoubleMatrixSeq(
+          sofab.Float64MatrixSeq(
             out,
             -1,
-            true,
             rcap: sofab.arrayMax,
             rowCount: -1,
             rowCap: sofab.arrayMax,
@@ -531,17 +522,16 @@ void main() {
         );
         expect(st, sofab.DecodeStatus.complete);
         expect(out.length, 2);
-        expect(out[0], isEmpty); // the gap at id 0
-        expect(out[1], [1.5, 2.5]);
+        expect(_v(out[0]), isEmpty); // the gap at id 0
+        expect(_v(out[1]), [1.5, 2.5]);
 
-        final other = <List<double>>[];
+        final other = <sofab.InlineFloat64Array>[];
         expect(
           run(
             (e) => e.writeFp32Array(0, Float32List.fromList([1.5])),
-            sofab.DoubleMatrixSeq(
+            sofab.Float64MatrixSeq(
               other,
               -1,
-              true,
               rcap: sofab.arrayMax,
               rowCount: -1,
               rowCap: sofab.arrayMax,
@@ -549,7 +539,7 @@ void main() {
           ),
           sofab.DecodeStatus.complete,
         );
-        expect(other, isEmpty);
+        expect(_v(other), isEmpty);
       },
     );
   });
@@ -564,30 +554,30 @@ void main() {
   // a field the schema already bounds".
   group('the receiver cap on the element index', () {
     test('an index at the cap is limitExceeded, and nothing is placed', () {
-      final out = <String>[];
+      final out = <sofab.InlineString>[];
       final st = run(
         (e) => e.writeString(4, 'x'),
         sofab.StringSeq(out, -1, -1, rcap: 4, relemMax: sofab.fixlenMax),
       );
       expect(st, sofab.DecodeStatus.limitExceeded);
-      expect(out, isEmpty, reason: 'rejected before the container grew');
+      expect(_v(out), isEmpty, reason: 'rejected before the container grew');
     });
 
     test('index cap-1 decodes', () {
-      final out = <String>[];
+      final out = <sofab.InlineString>[];
       final st = run(
         (e) => e.writeString(3, 'x'),
         sofab.StringSeq(out, -1, -1, rcap: 4, relemMax: sofab.fixlenMax),
       );
       expect(st, sofab.DecodeStatus.complete);
       expect(out.length, 4);
-      expect(out[3], 'x');
+      expect(_v(out[3]), 'x');
     });
 
     test('a schema-bounded array is governed by its count alone', () {
       // cap = 2, rcap = 1: the receiver cap must not touch a field the schema
       // bounds, so index 1 decodes and index 2 is INVALID, not limitExceeded.
-      final ok = <String>[];
+      final ok = <sofab.InlineString>[];
       expect(
         run(
           (e) => e.writeString(1, 'x'),
@@ -595,7 +585,7 @@ void main() {
         ),
         sofab.DecodeStatus.complete,
       );
-      final bad = <String>[];
+      final bad = <sofab.InlineString>[];
       expect(
         run(
           (e) => e.writeString(2, 'x'),
@@ -616,7 +606,7 @@ void main() {
       enc.flush();
       final whole = out.takeBytes();
       final cut = Uint8List.sublistView(whole, 0, whole.length - 4);
-      final dst = <String>[];
+      final dst = <sofab.InlineString>[];
       expect(
         sofab.Decoder.decode(
           cut,
@@ -629,19 +619,19 @@ void main() {
     });
 
     test('after a rejected index nothing is left partially extended', () {
-      final out = <String>[];
+      final out = <sofab.InlineString>[];
       final st = run((e) {
         e.writeString(0, 'a');
         e.writeString(9, 'z');
       }, sofab.StringSeq(out, -1, -1, rcap: 4, relemMax: sofab.fixlenMax));
       expect(st, sofab.DecodeStatus.limitExceeded);
-      expect(out, [
+      expect(_v(out), [
         'a',
       ], reason: 'the accepted element stands, the rest does not');
     });
 
     test('every collector carries the same bound', () {
-      final blobs = <Uint8List>[];
+      final blobs = <sofab.InlineBytes>[];
       expect(
         run(
           (e) => e.writeBlob(4, Uint8List.fromList([1])),
@@ -670,7 +660,7 @@ void main() {
       );
       expect(pts, isEmpty);
 
-      final rows = <List<int>>[];
+      final rows = <sofab.InlineInt64Array>[];
       expect(
         run(
           (e) => e.writeUnsignedArray(4, const [1, 2]),
@@ -688,13 +678,16 @@ void main() {
         sofab.DecodeStatus.limitExceeded,
       );
 
-      final flags = <List<bool>>[];
+      final flags = <sofab.InlineInt64Array>[];
       expect(
         run(
           (e) => e.writeUnsignedArray(4, const [1]),
-          sofab.BoolMatrixSeq(
+          sofab.IntMatrixSeq(
             flags,
             -1,
+            false,
+            0,
+            0,
             rcap: 4,
             rowCount: -1,
             rowCap: sofab.arrayMax,
@@ -703,14 +696,13 @@ void main() {
         sofab.DecodeStatus.limitExceeded,
       );
 
-      final mat = <List<double>>[];
+      final mat = <sofab.InlineFloat64Array>[];
       expect(
         run(
           (e) => e.writeFp64Array(4, const [1.5]),
-          sofab.DoubleMatrixSeq(
+          sofab.Float64MatrixSeq(
             mat,
             -1,
-            true,
             rcap: 4,
             rowCount: -1,
             rowCap: sofab.arrayMax,
@@ -719,7 +711,7 @@ void main() {
         sofab.DecodeStatus.limitExceeded,
       );
 
-      final nested = <List<String>>[];
+      final nested = <List<sofab.InlineString>>[];
       expect(
         run(
           (e) {
@@ -727,7 +719,7 @@ void main() {
             e.writeString(0, 'x');
             e.endSequenceKeep();
           },
-          sofab.NestedSeq<String>(
+          sofab.NestedSeq<sofab.InlineString>(
             nested,
             -1,
             (row) => sofab.StringSeq(
@@ -742,7 +734,7 @@ void main() {
         ),
         sofab.DecodeStatus.complete,
       );
-      final nested2 = <List<String>>[];
+      final nested2 = <List<sofab.InlineString>>[];
       expect(
         run(
           (e) {
@@ -750,7 +742,7 @@ void main() {
             e.writeString(0, 'x');
             e.endSequenceKeep();
           },
-          sofab.NestedSeq<String>(
+          sofab.NestedSeq<sofab.InlineString>(
             nested2,
             -1,
             (row) => sofab.StringSeq(
@@ -786,7 +778,7 @@ void main() {
       for (final bad in [-1, 0]) {
         expect(
           () => sofab.StringSeq(
-            <String>[],
+            <sofab.InlineString>[],
             -1,
             -1,
             rcap: bad,
@@ -803,7 +795,7 @@ void main() {
         );
         expect(
           () => sofab.StringSeq(
-            <String>[],
+            <sofab.InlineString>[],
             -1,
             -1,
             rcap: sofab.arrayMax,
@@ -824,7 +816,7 @@ void main() {
       // Where the SCHEMA bounds the field the cap is never consulted at all
       // (§6.2.1: it "MUST NOT be applied to a field the schema already
       // bounds"), so it is not the collector's business and is not policed.
-      final bounded = <String>[];
+      final bounded = <sofab.InlineString>[];
       expect(
         run(
           (e) => e.writeString(3, 'x'),
@@ -836,7 +828,7 @@ void main() {
       // A caller that genuinely wants the format ceiling as its policy may
       // still say so — and then the number is the caller's, which is the whole
       // point. ARRAY_MAX itself is past that ceiling, and is refused as such.
-      final far = <String>[];
+      final far = <sofab.InlineString>[];
       expect(
         run(
           (e) => e.writeString(sofab.arrayMax, 'x'),
@@ -850,7 +842,7 @@ void main() {
         ),
         sofab.DecodeStatus.limitExceeded,
       );
-      expect(far, isEmpty, reason: 'refused before the container grew');
+      expect(_v(far), isEmpty, reason: 'refused before the container grew');
     });
 
     test('every collector polices the cap it is handed', () {
@@ -865,11 +857,13 @@ void main() {
         ),
       );
       expect(
-        () => sofab.BlobSeq(<Uint8List>[], -1, -1, rcap: 0, relemMax: 16),
+        () =>
+            sofab.BlobSeq(<sofab.InlineBytes>[], -1, -1, rcap: 0, relemMax: 16),
         throwsInvalidArgument(),
       );
       expect(
-        () => sofab.BlobSeq(<Uint8List>[], -1, -1, rcap: 4, relemMax: 0),
+        () =>
+            sofab.BlobSeq(<sofab.InlineBytes>[], -1, -1, rcap: 4, relemMax: 0),
         throwsInvalidArgument(),
       );
       expect(
@@ -883,8 +877,8 @@ void main() {
         throwsInvalidArgument(),
       );
       expect(
-        () => sofab.NestedSeq<String>(
-          <List<String>>[],
+        () => sofab.NestedSeq<sofab.InlineString>(
+          <List<sofab.InlineString>>[],
           -1,
           (row) => sofab.StringSeq(
             row,
@@ -899,7 +893,7 @@ void main() {
       );
       expect(
         () => sofab.IntMatrixSeq(
-          <List<int>>[],
+          <sofab.InlineInt64Array>[],
           -1,
           true,
           0,
@@ -912,7 +906,7 @@ void main() {
       );
       expect(
         () => sofab.IntMatrixSeq(
-          <List<int>>[],
+          <sofab.InlineInt64Array>[],
           -1,
           true,
           0,
@@ -924,10 +918,9 @@ void main() {
         throwsInvalidArgument(),
       );
       expect(
-        () => sofab.DoubleMatrixSeq(
-          <List<double>>[],
+        () => sofab.Float64MatrixSeq(
+          <sofab.InlineFloat64Array>[],
           -1,
-          true,
           rcap: 4,
           rowCount: -1,
           rowCap: 0,
@@ -935,9 +928,12 @@ void main() {
         throwsInvalidArgument(),
       );
       expect(
-        () => sofab.BoolMatrixSeq(
-          <List<bool>>[],
+        () => sofab.IntMatrixSeq(
+          <sofab.InlineInt64Array>[],
           -1,
+          false,
+          0,
+          0,
           rcap: 0,
           rowCount: -1,
           rowCap: 4,
@@ -947,7 +943,7 @@ void main() {
       // ... and none of them objects where the schema bound governs instead.
       expect(
         () => sofab.IntMatrixSeq(
-          <List<int>>[],
+          <sofab.InlineInt64Array>[],
           8,
           true,
           0,
@@ -970,7 +966,7 @@ void main() {
   // only where the schema declared none and LimitExceeded, never both.
   group('the receiver cap on an element byte length', () {
     test('an element past the cap is limitExceeded, and nothing is placed', () {
-      final out = <String>[];
+      final out = <sofab.InlineString>[];
       expect(
         run(
           (e) => e.writeString(0, 'abcd'),
@@ -978,8 +974,8 @@ void main() {
         ),
         sofab.DecodeStatus.limitExceeded,
       );
-      expect(out, isEmpty, reason: 'refused at the length word');
-      final ok = <String>[];
+      expect(_v(out), isEmpty, reason: 'refused at the length word');
+      final ok = <sofab.InlineString>[];
       expect(
         run(
           (e) => e.writeString(0, 'abc'),
@@ -987,13 +983,13 @@ void main() {
         ),
         sofab.DecodeStatus.complete,
       );
-      expect(ok, ['abc']);
+      expect(_v(ok), ['abc']);
     });
 
     test('a schema-bounded element is governed by its maxlen alone', () {
       // emax = 3, relemMax = 1: the cap must not touch an element the schema
       // bounds, so 'abc' decodes and 'abcd' is INVALID, not limitExceeded.
-      final ok = <String>[];
+      final ok = <sofab.InlineString>[];
       expect(
         run(
           (e) => e.writeString(0, 'abc'),
@@ -1001,7 +997,7 @@ void main() {
         ),
         sofab.DecodeStatus.complete,
       );
-      final bad = <String>[];
+      final bad = <sofab.InlineString>[];
       expect(
         run(
           (e) => e.writeString(0, 'abcd'),
@@ -1023,7 +1019,7 @@ void main() {
       enc.flush();
       final whole = out.takeBytes();
       final cut = Uint8List.sublistView(whole, 0, whole.length - 4);
-      final dst = <String>[];
+      final dst = <sofab.InlineString>[];
       expect(
         sofab.Decoder.decode(
           cut,
@@ -1036,7 +1032,7 @@ void main() {
     });
 
     test('BlobSeq carries the same pair', () {
-      final over = <Uint8List>[];
+      final over = <sofab.InlineBytes>[];
       expect(
         run(
           (e) => e.writeBlob(0, Uint8List.fromList([1, 2, 3])),
@@ -1044,7 +1040,7 @@ void main() {
         ),
         sofab.DecodeStatus.limitExceeded,
       );
-      final bounded = <Uint8List>[];
+      final bounded = <sofab.InlineBytes>[];
       expect(
         run(
           (e) => e.writeBlob(0, Uint8List.fromList([1, 2, 3])),
@@ -1058,7 +1054,7 @@ void main() {
     test('an element of the other subtype is skipped, never measured', () {
       // §7.3 wins over both bounds: a blob is not a string array's element, so
       // neither its length nor its index is this array's business.
-      final out = <String>[];
+      final out = <sofab.InlineString>[];
       expect(
         run(
           (e) => e.writeBlob(0, Uint8List.fromList([1, 2, 3, 4, 5])),
@@ -1066,13 +1062,13 @@ void main() {
         ),
         sofab.DecodeStatus.complete,
       );
-      expect(out, isEmpty);
+      expect(_v(out), isEmpty);
     });
   });
 
   group('the matrix row\'s own element count', () {
     test('a row past its schema count is INVALID', () {
-      final rows = <List<int>>[];
+      final rows = <sofab.InlineInt64Array>[];
       expect(
         run(
           (e) => e.writeUnsignedArray(0, const [1, 2, 3]),
@@ -1089,11 +1085,11 @@ void main() {
         ),
         sofab.DecodeStatus.invalid,
       );
-      expect(rows, isEmpty);
+      expect(_v(rows), isEmpty);
     });
 
     test('a row past the receiver cap is limitExceeded', () {
-      final rows = <List<int>>[];
+      final rows = <sofab.InlineInt64Array>[];
       expect(
         run(
           (e) => e.writeUnsignedArray(0, const [1, 2, 3]),
@@ -1110,11 +1106,11 @@ void main() {
         ),
         sofab.DecodeStatus.limitExceeded,
       );
-      expect(rows, isEmpty, reason: 'refused at the count word');
+      expect(_v(rows), isEmpty, reason: 'refused at the count word');
     });
 
     test('a schema-bounded row is governed by its count alone', () {
-      final rows = <List<int>>[];
+      final rows = <sofab.InlineInt64Array>[];
       expect(
         run(
           (e) => e.writeUnsignedArray(0, const [1, 2, 3]),
@@ -1131,7 +1127,7 @@ void main() {
         ),
         sofab.DecodeStatus.complete,
       );
-      expect(rows, [
+      expect(_v(rows), [
         [1, 2, 3],
       ]);
     });
@@ -1140,7 +1136,7 @@ void main() {
       // Both breached: the id is the one §6.2.1 names first ("checked before
       // the container it indexes into is extended"), so a row at an over-cap
       // index never has its count looked at.
-      final rows = <List<int>>[];
+      final rows = <sofab.InlineInt64Array>[];
       expect(
         run(
           (e) => e.writeUnsignedArray(4, const [1, 2, 3]),
@@ -1161,7 +1157,7 @@ void main() {
     });
 
     test('a row of the other kind is skipped, never measured', () {
-      final rows = <List<int>>[];
+      final rows = <sofab.InlineInt64Array>[];
       expect(
         run(
           (e) => e.writeSignedArray(0, const [1, 2, 3]),
@@ -1178,7 +1174,7 @@ void main() {
         ),
         sofab.DecodeStatus.complete,
       );
-      expect(rows, isEmpty);
+      expect(_v(rows), isEmpty);
     });
 
     test('it is weighed at the count word, before the row arrives', () {
@@ -1192,7 +1188,7 @@ void main() {
       enc.flush();
       final whole = out.takeBytes();
       final cut = Uint8List.sublistView(whole, 0, whole.length - 3);
-      final rows = <List<int>>[];
+      final rows = <sofab.InlineInt64Array>[];
       expect(
         sofab.Decoder.decode(
           cut,
@@ -1214,13 +1210,16 @@ void main() {
     });
 
     test('the bool and float matrices carry the same pair', () {
-      final flags = <List<bool>>[];
+      final flags = <sofab.InlineInt64Array>[];
       expect(
         run(
           (e) => e.writeUnsignedArray(0, const [1, 0, 1]),
-          sofab.BoolMatrixSeq(
+          sofab.IntMatrixSeq(
             flags,
             -1,
+            false,
+            0,
+            0,
             rcap: sofab.arrayMax,
             rowCount: -1,
             rowCap: 2,
@@ -1229,14 +1228,13 @@ void main() {
         sofab.DecodeStatus.limitExceeded,
       );
 
-      final mat = <List<double>>[];
+      final mat = <sofab.InlineFloat64Array>[];
       expect(
         run(
           (e) => e.writeFp64Array(0, const [1.5, 2.5, 3.5]),
-          sofab.DoubleMatrixSeq(
+          sofab.Float64MatrixSeq(
             mat,
             -1,
-            true,
             rcap: sofab.arrayMax,
             rowCount: 2,
             rowCap: sofab.arrayMax,
@@ -1245,14 +1243,13 @@ void main() {
         sofab.DecodeStatus.invalid,
       );
 
-      final f32 = <List<double>>[];
+      final f32 = <sofab.InlineFloat32Array>[];
       expect(
         run(
           (e) => e.writeFp32Array(0, const [1.5, 2.5, 3.5]),
-          sofab.DoubleMatrixSeq(
+          sofab.Float32MatrixSeq(
             f32,
             -1,
-            false,
             rcap: sofab.arrayMax,
             rowCount: -1,
             rowCap: 2,
@@ -1262,33 +1259,6 @@ void main() {
       );
     });
   });
-
-  group('the payload-side bound', () {
-    test(
-      'an over-maxlen element is rejected even when the header word is not',
-      () {
-        // Reaches the guard in onStringBytes/onBlob rather than the one in
-        // onFixlenHeader: the header carries the WIRE length, and for a string
-        // they agree — so this drives the payload path with a collector whose
-        // emax the header check cannot have applied, i.e. a re-opened element.
-        final out = <String>[];
-        final st = run(
-          (e) {
-            e.writeString(0, 'abcdef');
-          },
-          sofab.StringSeq(
-            out,
-            -1,
-            3,
-            rcap: sofab.arrayMax,
-            relemMax: sofab.fixlenMax,
-          ),
-        );
-        expect(st, sofab.DecodeStatus.invalid);
-        expect(out, isEmpty);
-      },
-    );
-  });
 }
 
 /// A minimal generated-object stand-in for MessageSeq.
@@ -1297,7 +1267,7 @@ class _Point {
   int y = 0;
 }
 
-class _PointVisitor extends sofab.VisitorBase {
+class _PointVisitor extends sofab.MessageVisitor {
   _PointVisitor(this.o);
   final _Point o;
 
@@ -1309,10 +1279,21 @@ class _PointVisitor extends sofab.VisitorBase {
 }
 
 /// Routes the one sequence field to the collector under test.
-class _Root extends sofab.VisitorBase {
+class _Root extends sofab.MessageVisitor {
   _Root(this.child);
   final sofab.MessageVisitor child;
 
   @override
   sofab.MessageVisitor? onSequenceStart(int id) => id == 1 ? child : null;
 }
+
+/// A collector's container as plain values, read after the decode.
+Object? _v(Object? x) => switch (x) {
+  final sofab.InlineString s => '$s',
+  final sofab.InlineBytes b => b.toBytes().toList(),
+  final sofab.InlineInt64Array a => a.toList(),
+  final sofab.InlineFloat32Array a => a.toList(),
+  final sofab.InlineFloat64Array a => a.toList(),
+  final List<Object?> l => [for (final e in l) _v(e)],
+  _ => x,
+};

@@ -14,9 +14,10 @@ import 'package:test/test.dart';
 /// **Neither number is the codec's** (§6.2.1: *"The numbers and the allocation
 /// are not the codec's … the visitor decides. The codec never invents a limit of
 /// its own"*). Both are the consumer's, and both are stated in the same place —
-/// the header hook the decoder already calls before it asks for storage:
-/// [sofab.MessageVisitor.onFixlenHeader] for a `string`/`blob` length,
-/// [sofab.MessageVisitor.onArrayBegin] for an array count. The cap is the
+/// the header call that asks for the field's storage, before it is chosen:
+/// [sofab.MessageVisitor.onString]/[sofab.MessageVisitor.onBlob] for a length,
+/// [sofab.MessageVisitor.onUnsignedArray] and its siblings for a count. The
+/// cap is the
 /// **else** of the schema bound, which is what makes "never both" structural
 /// rather than a rule someone has to remember.
 ///
@@ -179,7 +180,8 @@ void main() {
   // the answer to "is this field mine".
   group('a skipped field is never capped', () {
     test('an id the consumer declines is never capped', () {
-      // shouldRead false → the payload is a length jump, never materialized.
+      // A `null` destination → the payload is a length jump, never
+      // materialized.
       final bytes = enc((e) => e.writeBlob(7, Uint8List(100)));
       expect(
         bothPaths(bytes, () => _Schema(maxBlobLen: 4)),
@@ -227,7 +229,7 @@ void main() {
     // enforcement point: it carries the count/length, it fires before the
     // destination is asked for, and it fires for every field being read —
     // whatever the consumer then decides.
-    test('onFixlenHeader carries the length that is then refused', () {
+    test('the header call carries the length that is then refused', () {
       final bytes = enc((e) => e.writeBlob(9, Uint8List(32)));
       final v = _Schema(maxBlobLen: 4);
       expect(sofab.Decoder.decode(bytes, v), sofab.DecodeStatus.limitExceeded);
@@ -247,12 +249,12 @@ void main() {
       expect(s.bytesDests, isEmpty);
     });
 
-    test('onArrayBegin carries the count that is then refused', () {
+    test('the header call carries the count that is then refused', () {
       final bytes = enc((e) => e.writeUnsignedArray(9, List.filled(20, 1)));
       final v = _Schema(maxArrayCount: 4);
       expect(sofab.Decoder.decode(bytes, v), sofab.DecodeStatus.limitExceeded);
       expect(v.arrayBegins, [
-        [9, sofab.ArrayKind.unsigned, 20],
+        [9, 'unsigned', 20],
       ]);
       expect(v.arrayDests, isEmpty, reason: 'refused before the allocation');
 
@@ -262,7 +264,7 @@ void main() {
         dec.feed([b]);
       }
       expect(s.arrayBegins, [
-        [9, sofab.ArrayKind.unsigned, 20],
+        [9, 'unsigned', 20],
       ]);
       expect(s.arrayDests, isEmpty);
     });
@@ -306,74 +308,94 @@ class _Schema extends sofab.MessageVisitor {
   final List<int> bytesDests = [];
   final List<int> arrayDests = [];
 
-  @override
-  bool shouldRead(int id, int type) => id != 7; // id 7 is declined outright
+  static const int _declined = 7; // not in the schema: declined outright
 
-  @override
-  void onFixlenHeader(int id, int subtype, int length) {
-    fixlenHeaders.add([id, subtype, length]);
-    // Every arm is gated on the DECLARED subtype: a contradicting header is a
-    // §7.3 skip and must not be measured against this field's bound — nor
-    // against the cap, which covers a field this schema declares and leaves
-    // unbounded, not one it does not declare at all.
-    if (subtype == sofab.FixlenType.blob) {
-      if (id == 1) {
-        if (length > 64) invalidate(); // schema maxlen
-        return;
-      }
-      if (id == 9) {
-        if (length > maxBlobLen) limitExceeded(); // no schema maxlen: the cap
-        return;
-      }
-      return;
+  // Every arm sits in the call for the DECLARED wire kind: a contradicting
+  // header reaches a different call, is a §7.3 skip there and is never measured
+  // against this field's bound — nor against the cap, which covers a field this
+  // schema declares and leaves unbounded, not one it does not declare at all.
+
+  void _blobBound(int id, int length) {
+    if (id == 1) {
+      if (length > 64) invalidate(); // schema maxlen
+    } else if (id == 9) {
+      if (length > maxBlobLen) limitExceeded(); // no schema maxlen: the cap
     }
-    if (subtype == sofab.FixlenType.string) {
-      if (id == 2) {
-        if (length > 8) invalidate();
-        return;
-      }
-      if (id == 9) {
-        if (length > maxStringLen) limitExceeded();
-        return;
-      }
+  }
+
+  void _stringBound(int id, int length) {
+    if (id == 2) {
+      if (length > 8) invalidate();
+    } else if (id == 9) {
+      if (length > maxStringLen) limitExceeded();
+    }
+  }
+
+  void _unsignedBound(int id, int count) {
+    if (id == 3) {
+      if (count > 8) invalidate(); // schema count
+    } else if (id == 9) {
+      if (count > maxArrayCount) limitExceeded();
+    }
+  }
+
+  void _fp32Bound(int id, int count) {
+    if (id == 4) {
+      if (count > 8) invalidate();
+    } else if (id == 9) {
+      if (count > maxArrayCount) limitExceeded();
     }
   }
 
   @override
-  void onArrayBegin(int id, sofab.ArrayKind kind, int count) {
-    arrayBegins.add([id, kind, count]);
-    if (kind == sofab.ArrayKind.unsigned) {
-      if (id == 3) {
-        if (count > 8) invalidate(); // schema count
-        return;
-      }
-      if (id == 9) {
-        if (count > maxArrayCount) limitExceeded();
-        return;
-      }
-      return;
-    }
-    if (kind == sofab.ArrayKind.fp32) {
-      if (id == 4) {
-        if (count > 8) invalidate();
-        return;
-      }
-      if (id == 9) {
-        if (count > maxArrayCount) limitExceeded();
-        return;
-      }
-    }
-  }
-
-  @override
-  Uint8List? onBytesDest(int id, int subtype, int total) {
+  sofab.InlineBytes? onBlob(int id, int length) {
+    if (id == _declined) return null;
+    fixlenHeaders.add([id, sofab.FixlenType.blob, length]);
+    _blobBound(id, length);
     bytesDests.add(id);
-    return super.onBytesDest(id, subtype, total);
+    return sofab.InlineBytes(length);
   }
 
   @override
-  TypedData? onArrayDest(int id, sofab.ArrayKind kind, int count) {
+  sofab.InlineString? onString(int id, int length) {
+    if (id == _declined) return null;
+    fixlenHeaders.add([id, sofab.FixlenType.string, length]);
+    _stringBound(id, length);
+    bytesDests.add(id);
+    return sofab.InlineString(length);
+  }
+
+  @override
+  sofab.InlineInt64Array? onUnsignedArray(int id, int count) {
+    if (id == _declined) return null;
+    arrayBegins.add([id, 'unsigned', count]);
+    _unsignedBound(id, count);
     arrayDests.add(id);
-    return super.onArrayDest(id, kind, count);
+    return sofab.InlineInt64Array(count);
+  }
+
+  @override
+  sofab.InlineInt64Array? onSignedArray(int id, int count) {
+    if (id == _declined) return null;
+    arrayBegins.add([id, 'signed', count]);
+    arrayDests.add(id);
+    return sofab.InlineInt64Array(count);
+  }
+
+  @override
+  sofab.InlineFloat32Array? onFp32Array(int id, int count) {
+    if (id == _declined) return null;
+    arrayBegins.add([id, 'fp32', count]);
+    _fp32Bound(id, count);
+    arrayDests.add(id);
+    return sofab.InlineFloat32Array(count);
+  }
+
+  @override
+  sofab.InlineFloat64Array? onFp64Array(int id, int count) {
+    if (id == _declined) return null;
+    arrayBegins.add([id, 'fp64', count]);
+    arrayDests.add(id);
+    return sofab.InlineFloat64Array(count);
   }
 }

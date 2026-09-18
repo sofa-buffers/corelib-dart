@@ -247,10 +247,11 @@ void main() {
   // -------------------------------------------------------------------------
 
   test('a schema-bound consumer is handed the whole payload, not a chunk', () {
-    // `onStringBytes` is the port's string path (§6.4). Whatever the chunking,
-    // it must fire exactly once with the *entire* reassembled payload — that is
-    // the mechanism that puts "an offset beyond what was fed" out of reach, and
-    // it is worth asserting directly rather than only through its consequence.
+    // The destination `onString` hands over is where the payload is joined
+    // (§6.4): whatever the chunking, it is asked for exactly once and ends up
+    // holding the *entire* payload, validated once it is whole — that is the
+    // mechanism that puts "an offset beyond what was fed" out of reach, and it
+    // is worth asserting directly rather than only through its consequence.
     final bad = seedPayload(seeds.first);
     final payload = Uint8List.fromList(prefix + bad + suffix);
     final wire = stringMessage(1, payload);
@@ -326,13 +327,16 @@ void main() {
   });
 }
 
-/// Captures the raw wire bytes of every materialized `string` field, taking a
-/// copy: the decoder's view is only valid for the duration of the call.
+/// Hands every `string` field an exactly-sized destination and keeps its
+/// storage, which holds the field's wire bytes once the decode has taken them.
 class _RawStringVisitor extends sofab.MessageVisitor {
   _RawStringVisitor(this.seen);
   final List<Uint8List> seen;
 
   @override
-  void onStringBytes(int id, Uint8List bytes) =>
-      seen.add(Uint8List.fromList(bytes));
+  sofab.InlineString? onString(int id, int length) {
+    final d = sofab.InlineString(length);
+    seen.add(d.storage);
+    return d;
+  }
 }

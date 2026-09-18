@@ -174,7 +174,11 @@ class _TopLevelIds extends sofab.MessageVisitor {
   @override
   void onSigned(int id, int value) => _note(id);
   @override
-  void onString(int id, String value) => _note(id);
+  sofab.InlineString? onString(int id, int length) {
+    _note(id);
+    return null; // the id is all this visitor wants
+  }
+
   @override
   sofab.MessageVisitor? onSequenceStart(int id) {
     _note(id);
@@ -188,12 +192,18 @@ class _TopLevelIds extends sofab.MessageVisitor {
 
 /// Collects the elements of the wrapper array in field 1.
 class _WrapperElements extends sofab.MessageVisitor {
-  final List<String> elements = <String>[];
+  final List<sofab.InlineString> _elements = <sofab.InlineString>[];
   bool _inWrapper = false;
 
+  /// The elements' text, read after the decode.
+  List<String> get elements => [for (final e in _elements) '$e'];
+
   @override
-  void onString(int id, String value) {
-    if (_inWrapper) elements.add(value);
+  sofab.InlineString? onString(int id, int length) {
+    if (!_inWrapper) return null;
+    final d = sofab.InlineString(length);
+    _elements.add(d);
+    return d;
   }
 
   @override
@@ -212,8 +222,9 @@ class _StringLengths extends sofab.MessageVisitor {
   int _depth = 0;
 
   @override
-  void onStringBytes(int id, Uint8List bytes) {
-    if (_depth == 0) byId[id] = bytes.length;
+  sofab.InlineString? onString(int id, int length) {
+    if (_depth == 0) byId[id] = length;
+    return null; // the announced length is all this visitor wants
   }
 
   @override

@@ -34,16 +34,13 @@ String _dartBlock(String doc, String heading) {
 void main() {
   group('the README Generator example', () {
     test('round-trips one-shot, and streams the same bytes', () {
-      final ada = Person()
-        ..name = 'Ada'
-        ..age = 36
-        ..tags = ['pioneer', 'mathematician'];
+      final ada = Person().set('Ada', 36, ['pioneer', 'mathematician']);
 
       final bytes = ada.encode();
       final back = Person.decode(bytes);
-      expect(back.name, 'Ada');
+      expect('${back.name}', 'Ada');
       expect(back.age, 36);
-      expect(back.tags, ['pioneer', 'mathematician']);
+      expect(back.tags.map((t) => '$t'), ['pioneer', 'mathematician']);
 
       // The streaming pair must produce exactly the one-shot bytes, through a
       // buffer far smaller than the message.
@@ -55,10 +52,7 @@ void main() {
     });
 
     test('decodes when fed one byte at a time', () {
-      final ada = Person()
-        ..name = 'Ada'
-        ..age = 36
-        ..tags = ['pioneer', 'mathematician'];
+      final ada = Person().set('Ada', 36, ['pioneer', 'mathematician']);
       final bytes = ada.encode();
 
       final dec = Person.decoder();
@@ -66,9 +60,9 @@ void main() {
         dec.feed(Uint8List.fromList([b]));
       }
       final person = dec.value;
-      expect(person.name, 'Ada');
+      expect('${person.name}', 'Ada');
       expect(person.age, 36);
-      expect(person.tags, ['pioneer', 'mathematician']);
+      expect(person.tags.map((t) => '$t'), ['pioneer', 'mathematician']);
     });
 
     test('every call it shows exists in example/person.dart', () {

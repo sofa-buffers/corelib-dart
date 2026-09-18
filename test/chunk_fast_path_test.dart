@@ -138,9 +138,8 @@ void main() {
 /// A schema-bound consumer declaring `u16` elements for array field 3.
 class _U16Visitor extends sofab.MessageVisitor {
   @override
-  sofab.ElemRange? onArrayElemBound(int id, sofab.ArrayKind kind) =>
-      id == 3 && kind == sofab.ArrayKind.unsigned
-      ? const sofab.ElemRange(0, 0xFFFF)
+  sofab.InlineInt64Array? onUnsignedArray(int id, int count) => id == 3
+      ? sofab.InlineInt64Array(count, range: const sofab.ElemRange(0, 0xFFFF))
       : null;
 }
 

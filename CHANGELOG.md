@@ -2,6 +2,75 @@
 
 ## Unreleased
 
+### Decode into inline destinations: one visitor call per field, nothing after it (CORELIB_PLAN §6.6.3 / §6.7)
+
+**Breaking, deliberately.** The decode half of `MessageVisitor` is rebuilt after
+corelib-c-cpp's `InlineVector` / `FixedString` / `FixedBytes` and its one
+`field_callback` per field.
+
+A Dart typed list has one length and no capacity, so a receiver that sizes its
+storage once — to the schema maximum — and reuses it for every message could
+only hand the old conveniences a *view* of its prefix (an allocation, and a
+second list type that stops AOT inlining every consumer's element access) or a
+*copy* (an allocation sized by the wire, which §6.6 forbids). Carrying the used
+length beside the storage removes both.
+
+* **New: the `Inline…` destinations.** `InlineString`, `InlineBytes`,
+  `InlineInt64Array`, `InlineFloat32Array`, `InlineFloat64Array`: storage of a
+  fixed capacity plus a `length`. The codec sets `length` at the field header —
+  where C++ calls `resize` — and writes the payload into `storage`. Sized once
+  and reused, they make a decode allocate nothing per message.
+  `ensureCapacity` grows one for a schema-unbounded field, after the visitor's
+  own cap check; `InlineInt64Array.range` carries the declared element width.
+* **One call per field, at its header.** A scalar arrives as its value
+  (`onUnsigned`, `onSigned`, `onFp32`/`onFp32Bits`, `onFp64`, unchanged). An
+  aggregate is announced by `onString(id, length)`, `onBlob(id, length)`,
+  `onUnsignedArray(id, count)`, `onSignedArray`, `onFp32Array`, `onFp64Array`,
+  which return the destination — or `null` to skip the field. That call is also
+  where its bounds are judged (`invalidate()` / `limitExceeded()`), before any
+  storage is chosen and ahead of a truncated payload (§5.2).
+* **Nothing is called when a field is whole.** Nobody reads a destination while
+  `feed` is still running; the object is complete when `decode`/`feed` reports
+  `complete`. After `incomplete` or `invalid` a destination's contents are
+  unspecified.
+* **Removed:** `shouldRead` (a skipped varint is read all the same, so it only
+  cost a second call per field), `onArrayBegin`, `onArrayElemBound`,
+  `onArrayDest`, `onArrayDone`, `onFixlenHeader`, `onBytesDest`, `onBytesDone`,
+  `onStringBytes`, the value-delivering `onString(id, String)` / `onBlob(id,
+  Uint8List)` / `on…Array(id, list)`, `ArrayKind`, `VisitorBase`,
+  `DoubleMatrixSeq` (now `Float32MatrixSeq` / `Float64MatrixSeq`),
+  `BoolMatrixSeq` (an `IntMatrixSeq` with no width) and `copyFp32`.
+* **Every default is "not interested".** Aggregates and sequences are skipped,
+  scalars ignored — `onSequenceStart` now defaults to `null` too, so
+  `VisitorBase` had nothing left to add.
+* **UTF-8 is the codec's.** A string written into a destination is validated
+  once its payload is whole, and invalid bytes are `INVALID` — one
+  implementation for every consumer (§5.3.1). A skipped string is never
+  inspected (§6.4.5).
+* **The collectors decode in place.** `StringSeq`, `BlobSeq`, `IntMatrixSeq`,
+  `Float32MatrixSeq` and `Float64MatrixSeq` collect into `List<Inline…>`, each
+  element decoded straight into its slot and its storage reused where it is
+  large enough.
+* **Encoding a destination:** `writeBlob`, `writeUnsignedArray`,
+  `writeSignedArray`, `writeFp32Array` and `writeFp64Array` take an optional
+  count, and `writeStringUtf8(id, bytes, [length])` writes a string from its
+  UTF-8 bytes (validated) — so `writeUnsignedArray(id, a.storage, a.length)`
+  goes out uncopied.
+* **One behaviour change to expect.** The one-shot surface used to skip asking
+  for a destination when the buffer could not back the announced count. With
+  the bound and the destination in one call it asks exactly where the streaming
+  surface always had to (§6.7.1); what keeps a hostile count from sizing
+  anything is the receiver's cap, on both surfaces (§6.2.1).
+
+Callgrind Ir/op (`bench/run_callgrind.sh`, AOT, before → after): decode
+`composite` 63 177 → 32 561 (−48.5 %), `typical message` 2 383 → 1 971
+(−17.3 %), `u64 array (1000)` 103 708 → 101 216 (−2.4 %), `composite skip-all`
+11 766 → 11 366 (−3.4 %); encode unchanged. The decode rows compare what a
+consumer of each API pays: before, default destinations allocated per field and
+a Dart `String` built per string; after, reused destinations and no `String`
+until one is asked for.
+
+
 ### Shared vectors: the `header_limits` block (CORELIB_PLAN §6.2.1 / §6.3, MESSAGE_SPEC §5.2)
 
 `assets/test_vectors.json` is re-copied verbatim from `corelib-c-cpp`

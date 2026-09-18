@@ -122,7 +122,12 @@ void main() {
 }
 
 class _Rec extends sofab.MessageVisitor {
-  String? value;
+  sofab.InlineString? _dest;
+
+  /// The string, read from its destination after the decode.
+  String? get value => _dest?.toString();
+
   @override
-  void onString(int id, String v) => value = v;
+  sofab.InlineString? onString(int id, int length) =>
+      _dest = sofab.InlineString(length);
 }

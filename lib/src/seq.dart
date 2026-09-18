@@ -1,8 +1,7 @@
 import 'dart:typed_data';
 
 import 'decoder.dart';
-import 'utf8.dart';
-import 'visitor_base.dart';
+import 'inline.dart';
 import 'wire.dart';
 
 // The element collectors a schema-bound (generated) consumer needs for a
@@ -80,7 +79,7 @@ import 'wire.dart';
 ///   governs instead. The bytes are well-formed and decode under a looser cap,
 ///   so the breach is a policy rejection: `LimitExceeded`, never `INVALID`
 ///   (§6.2.1, §6.3), reported through [MessageVisitor.limitExceeded].
-bool _overCapacity(VisitorBase v, int id, int cap, int rcap) {
+bool _overCapacity(MessageVisitor v, int id, int cap, int rcap) {
   if (cap >= 0) {
     if (id >= cap) {
       v.invalidate();
@@ -102,7 +101,7 @@ bool _overCapacity(VisitorBase v, int id, int cap, int rcap) {
 /// (negative: the schema declared none) and `rmax` the receiver's, consulted
 /// only where the schema declared nothing. Checked at the length/count
 /// **header**, before the payload the number sizes (§6.2.1).
-bool _overLength(VisitorBase v, int n, int max, int rmax) {
+bool _overLength(MessageVisitor v, int n, int max, int rmax) {
   if (max >= 0) {
     if (n > max) {
       v.invalidate();
@@ -149,35 +148,21 @@ int _requireCap(int rcap, int bound, String what) {
   return rcap;
 }
 
-/// Grows `out` so that index `id` exists, filling the gap with `fill()`.
-///
-/// Gaps are ordinary: a conformant encoder omits an interior element equal to
-/// the element default (§2), and only the last element is guaranteed present —
-/// which is what makes the decoded length "highest present id + 1" exact.
-///
-/// Growth **geometry** is `List.add`'s: Dart's growable list doubles its
-/// backing store, so filling a gap of *n* costs O(n) copies amortised rather
-/// than O(n²) (CORELIB_PLAN §7.2 item 8). The language offers no allocation
-/// counter to assert that from a test, which the README states rather than
-/// reporting the case as covered.
-void _reserve<T>(List<T> out, int id, T Function() fill) {
-  while (out.length <= id) {
-    out.add(fill());
-  }
-}
-
 /// Collects the elements of a `string` wrapper array into `out`.
 ///
 /// `cap` is the schema `count` (or -1 when the array is unbounded) and `emax`
 /// the declared element `maxlen` (or -1); `rcap` and `relemMax` are the
 /// receiver's caps on the same two numbers, used only where the schema declared
-/// none. All four are checked at the fixlen header, before the payload arrives
-/// and before the destination is sized, so a message truncated right behind an
-/// out-of-bound element is still INVALID rather than INCOMPLETE (§5.2).
+/// none. All four are checked at the element's header, before its payload
+/// arrives and before its storage is chosen, so a message truncated right
+/// behind an out-of-bound element is still INVALID rather than INCOMPLETE
+/// (§5.2).
 ///
-/// The payload's UTF-8 is validated here because here is where the element is
-/// **materialized**; a skipped payload never reaches a collector at all (§6.4).
-class StringSeq extends VisitorBase {
+/// Each element is decoded straight into its slot of `out` — grown with empty
+/// strings up to the element's id (a gap is an omitted default, §2), and
+/// reused when a slot already holds enough storage. The codec validates the
+/// UTF-8 (§6.4); a skipped payload never reaches a collector at all.
+class StringSeq extends MessageVisitor {
   StringSeq(
     this.out,
     this.cap,
@@ -187,7 +172,7 @@ class StringSeq extends VisitorBase {
   }) : rcap = _requireCap(rcap, cap, 'StringSeq.rcap'),
        relemMax = _requireCap(relemMax, emax, 'StringSeq.relemMax');
 
-  final List<String> out;
+  final List<InlineString> out;
 
   /// The schema `count:` — the element index bound (-1: none declared).
   final int cap;
@@ -208,43 +193,23 @@ class StringSeq extends VisitorBase {
   final int relemMax;
 
   @override
-  void onFixlenHeader(int id, int subtype, int length) {
-    // A contradicting subtype is not this array's element (§7.3): it is skipped,
-    // so neither bound must be applied to it.
-    if (subtype != FixlenType.string) return;
-    if (_overCapacity(this, id, cap, rcap)) return;
-    _overLength(this, length, emax, relemMax);
-  }
-
-  @override
-  void onStringBytes(int id, Uint8List bytes) {
-    if (_overCapacity(this, id, cap, rcap)) return;
-    // A backstop, and coverage says so: [onFixlenHeader] already rejected these
-    // bounds at the length word and [invalidate]/[limitExceeded] stopped the
-    // decode there, so neither engine can reach it. It stays for a caller
-    // driving the collector by hand, and because a guard that reads the
-    // payload's own length is the one that cannot be wrong.
-    if (_overLength(this, bytes.length, emax, relemMax)) return;
-    final s = decodeUtf8Strict(bytes);
-    if (s == null) {
-      invalidate();
-      return;
-    }
-    // Inline rather than `_reserve(out, id, () => '')`: the closure is
-    // allocated per element and the generic helper is not specialised.
+  InlineString? onString(int id, int length) {
+    if (_overCapacity(this, id, cap, rcap)) return null;
+    if (_overLength(this, length, emax, relemMax)) return null;
     while (out.length <= id) {
-      out.add('');
+      out.add(InlineString(0));
     }
-    out[id] = s;
+    final e = out[id];
+    if (e.storage.length < length) e.storage = Uint8List(length);
+    return e;
   }
 }
 
 /// Collects the elements of a `blob` wrapper array into `out`.
 ///
-/// The bounds behave exactly as [StringSeq]'s. A blob is never validated as
-/// text; the bytes are copied, so a decoded message outlives the buffer it was
-/// decoded from.
-class BlobSeq extends VisitorBase {
+/// The bounds and the slots behave exactly as [StringSeq]'s. A blob is never
+/// validated as text.
+class BlobSeq extends MessageVisitor {
   BlobSeq(
     this.out,
     this.cap,
@@ -254,7 +219,7 @@ class BlobSeq extends VisitorBase {
   }) : rcap = _requireCap(rcap, cap, 'BlobSeq.rcap'),
        relemMax = _requireCap(relemMax, emax, 'BlobSeq.relemMax');
 
-  final List<Uint8List> out;
+  final List<InlineBytes> out;
 
   /// The schema `count:` — the element index bound (-1: none declared).
   final int cap;
@@ -270,21 +235,15 @@ class BlobSeq extends VisitorBase {
   final int relemMax;
 
   @override
-  void onFixlenHeader(int id, int subtype, int length) {
-    if (subtype != FixlenType.blob) return;
-    if (_overCapacity(this, id, cap, rcap)) return;
-    _overLength(this, length, emax, relemMax);
-  }
-
-  @override
-  void onBlob(int id, Uint8List value) {
-    if (_overCapacity(this, id, cap, rcap)) return;
-    // The same backstop as StringSeq's, unreachable for the same reason.
-    if (_overLength(this, value.length, emax, relemMax)) return;
+  InlineBytes? onBlob(int id, int length) {
+    if (_overCapacity(this, id, cap, rcap)) return null;
+    if (_overLength(this, length, emax, relemMax)) return null;
     while (out.length <= id) {
-      out.add(Uint8List(0));
+      out.add(InlineBytes(0));
     }
-    out[id] = Uint8List.fromList(value);
+    final e = out[id];
+    if (e.storage.length < length) e.storage = Uint8List(length);
+    return e;
   }
 }
 
@@ -296,7 +255,7 @@ class BlobSeq extends VisitorBase {
 ///
 /// An element is filled in place at its id rather than appended, so a re-opened
 /// element id merges into what an earlier opening set (§7.4).
-class MessageSeq<T> extends VisitorBase {
+class MessageSeq<T> extends MessageVisitor {
   MessageSeq(this.out, this.cap, this.make, this.vis, {required int rcap})
     : rcap = _requireCap(rcap, cap, 'MessageSeq.rcap');
 
@@ -313,7 +272,9 @@ class MessageSeq<T> extends VisitorBase {
   @override
   MessageVisitor? onSequenceStart(int id) {
     if (_overCapacity(this, id, cap, rcap)) return null;
-    _reserve(out, id, make);
+    while (out.length <= id) {
+      out.add(make());
+    }
     return vis(out[id]);
   }
 }
@@ -324,7 +285,7 @@ class MessageSeq<T> extends VisitorBase {
 /// [NestedSeq] — the recursion the depth-3 shapes need. The row's own bounds,
 /// schema and receiver alike, are the row collector's; this one bounds the row
 /// **index** only.
-class NestedSeq<T> extends VisitorBase {
+class NestedSeq<T> extends MessageVisitor {
   NestedSeq(this.out, this.cap, this.make, {required int rcap})
     : rcap = _requireCap(rcap, cap, 'NestedSeq.rcap');
 
@@ -344,9 +305,9 @@ class NestedSeq<T> extends VisitorBase {
   /// merging: the wrapper *is* the value of its field, so a later occurrence of
   /// the element id REPLACES it whole, where a re-opened struct/union element
   /// continues its scope and merges ([MessageSeq], which must therefore not do
-  /// this). [_reserve] only extends the list UP TO the index, so a repeated
-  /// element id used to find the previous occurrence's elements still in place
-  /// and write on top of them — measured on a generated
+  /// this). Growing the list only extends it UP TO the index, so without the
+  /// clear a repeated element id would find the previous occurrence's elements
+  /// still in place and write on top of them — measured on a generated
   /// `matstr: array<array<string>>` carrying element id 0 twice, `["a","z"]`
   /// then `["y"]`: `[["y", "z"]]` before, `[["y"]]` after.
   ///
@@ -362,39 +323,43 @@ class NestedSeq<T> extends VisitorBase {
   @override
   MessageVisitor? onSequenceStart(int id) {
     if (_overCapacity(this, id, cap, rcap)) return null;
-    _reserve(out, id, () => <T>[]);
+    while (out.length <= id) {
+      out.add(<T>[]);
+    }
     out[id].clear();
     return make(out[id]);
   }
 }
 
 /// Collects the rows of an integer matrix — an array whose elements are compact
-/// integer arrays, so each row arrives whole on one of the array callbacks.
+/// integer arrays — each row decoded straight into its slot of `out`.
 ///
-/// `signed` selects which callback is this array's: a row arriving on the other
-/// one contradicts the declared element type and is skipped (§7.3), not
+/// `signed` selects which wire kind is this array's: a row arriving as the
+/// other one contradicts the declared element type and is skipped (§7.3), not
 /// rejected. `lo`/`hi` bound each element to its declared width (§7.1); equal
-/// values mean "nothing narrower than the wire to check".
+/// values mean "nothing narrower than the wire to check". A `bool` matrix is an
+/// unsigned one with no width (any non-zero element is `true`, §4.4).
 ///
 /// A row here is a real compact array with a real `element_count` on the wire,
 /// so it carries a second pair of bounds beside the row index: `rowCount`, the
 /// row's declared `count:`, and `rowCap`, the receiver's cap where the schema
-/// declared none. They are weighed in [onArrayBegin] — at the count word,
-/// before the row's destination is sized (§6.2.1).
-class IntMatrixSeq extends VisitorBase {
+/// declared none. Both are weighed at the row's header, before its storage is
+/// chosen (§6.2.1).
+class IntMatrixSeq extends MessageVisitor {
   IntMatrixSeq(
     this.out,
     this.cap,
     this.signed,
-    this.lo,
-    this.hi, {
+    int lo,
+    int hi, {
     required int rcap,
     required this.rowCount,
     required int rowCap,
   }) : rcap = _requireCap(rcap, cap, 'IntMatrixSeq.rcap'),
-       rowCap = _requireCap(rowCap, rowCount, 'IntMatrixSeq.rowCap');
+       rowCap = _requireCap(rowCap, rowCount, 'IntMatrixSeq.rowCap'),
+       range = lo == hi ? null : ElemRange(lo, hi);
 
-  final List<List<int>> out;
+  final List<InlineInt64Array> out;
 
   /// The schema `count:` of the matrix — the row index bound (-1: none).
   final int cap;
@@ -411,129 +376,47 @@ class IntMatrixSeq extends VisitorBase {
   final int rowCap;
 
   final bool signed;
-  final int lo;
-  final int hi;
 
-  ArrayKind get _kind => signed ? ArrayKind.signed : ArrayKind.unsigned;
+  /// The declared element width every row carries, or `null` for none.
+  final ElemRange? range;
 
   @override
-  void onArrayBegin(int id, ArrayKind kind, int count) {
-    // A row of the other kind is not this array's element (§7.3): skipped, so
-    // no bound of this field's applies to it.
-    if (kind != _kind) return;
-    if (_overCapacity(this, id, cap, rcap)) return;
-    _overLength(this, count, rowCount, rowCap);
-  }
+  InlineInt64Array? onUnsignedArray(int id, int count) =>
+      signed ? null : _row(id, count);
 
-  void _row(int id, Int64List v) {
-    if (_overCapacity(this, id, cap, rcap)) return;
-    // The backstop to [onArrayBegin]'s row-count guard, reachable only by a
-    // caller driving the collector by hand — see [StringSeq.onStringBytes].
-    if (_overLength(this, v.length, rowCount, rowCap)) return;
-    if (lo != hi) {
-      for (final e in v) {
-        if (e < lo || e > hi) {
-          invalidate();
-          return;
-        }
-      }
+  @override
+  InlineInt64Array? onSignedArray(int id, int count) =>
+      signed ? _row(id, count) : null;
+
+  InlineInt64Array? _row(int id, int count) {
+    if (_overCapacity(this, id, cap, rcap)) return null;
+    if (_overLength(this, count, rowCount, rowCap)) return null;
+    while (out.length <= id) {
+      out.add(InlineInt64Array(0, range: range));
     }
-    _reserve(out, id, () => <int>[]);
-    out[id] = List<int>.from(v);
-  }
-
-  @override
-  void onUnsignedArray(int id, Int64List values) {
-    if (!signed) _row(id, values);
-  }
-
-  @override
-  void onSignedArray(int id, Int64List values) {
-    if (signed) _row(id, values);
+    final r = out[id];
+    if (r.storage.length < count) r.storage = Int64List(count);
+    return r;
   }
 }
 
-/// Collects the rows of a floating-point matrix. `f64` selects which of the two
-/// element kinds is this array's; the other is skipped (§7.3).
-///
-/// An fp32 row is copied through [copyFp32] rather than element by element, so a
-/// signaling or payload NaN survives bit-for-bit (§4.6/§6.5) — widening each
-/// element through a Dart `double` would quiet it.
+/// Collects the rows of an fp32 matrix, each row decoded straight into its slot
+/// of `out`. A row of fp64 elements contradicts the declared element type and
+/// is skipped (§7.3).
 ///
 /// `rowCount`/`rowCap` bound a row's element count exactly as [IntMatrixSeq]'s
 /// do.
-class DoubleMatrixSeq extends VisitorBase {
-  DoubleMatrixSeq(
-    this.out,
-    this.cap,
-    this.f64, {
-    required int rcap,
-    required this.rowCount,
-    required int rowCap,
-  }) : rcap = _requireCap(rcap, cap, 'DoubleMatrixSeq.rcap'),
-       rowCap = _requireCap(rowCap, rowCount, 'DoubleMatrixSeq.rowCap');
-
-  final List<List<double>> out;
-
-  /// The schema `count:` of the matrix — the row index bound (-1: none).
-  final int cap;
-
-  /// The **receiver cap** on the row index — see [StringSeq.rcap].
-  final int rcap;
-
-  /// The schema `count:` of a **row** — its element count bound (-1: none).
-  final int rowCount;
-
-  /// The **receiver cap** on a row's element count — see [IntMatrixSeq.rowCap].
-  final int rowCap;
-
-  final bool f64;
-
-  ArrayKind get _kind => f64 ? ArrayKind.fp64 : ArrayKind.fp32;
-
-  @override
-  void onArrayBegin(int id, ArrayKind kind, int count) {
-    if (kind != _kind) return;
-    if (_overCapacity(this, id, cap, rcap)) return;
-    _overLength(this, count, rowCount, rowCap);
-  }
-
-  @override
-  void onFp32Array(int id, Float32List values) {
-    if (f64) return;
-    if (_overCapacity(this, id, cap, rcap)) return;
-    if (_overLength(this, values.length, rowCount, rowCap)) return;
-    _reserve(out, id, () => <double>[]);
-    out[id] = copyFp32(values, values.length);
-  }
-
-  @override
-  void onFp64Array(int id, Float64List values) {
-    if (!f64) return;
-    if (_overCapacity(this, id, cap, rcap)) return;
-    if (_overLength(this, values.length, rowCount, rowCap)) return;
-    _reserve(out, id, () => <double>[]);
-    out[id] = List<double>.from(values);
-  }
-}
-
-/// Collects the rows of a boolean matrix. Booleans travel as the unsigned
-/// integer wire type, so a row arrives on [onUnsignedArray] and any non-zero
-/// element is `true`.
-///
-/// `rowCount`/`rowCap` bound a row's element count exactly as [IntMatrixSeq]'s
-/// do.
-class BoolMatrixSeq extends VisitorBase {
-  BoolMatrixSeq(
+class Float32MatrixSeq extends MessageVisitor {
+  Float32MatrixSeq(
     this.out,
     this.cap, {
     required int rcap,
     required this.rowCount,
     required int rowCap,
-  }) : rcap = _requireCap(rcap, cap, 'BoolMatrixSeq.rcap'),
-       rowCap = _requireCap(rowCap, rowCount, 'BoolMatrixSeq.rowCap');
+  }) : rcap = _requireCap(rcap, cap, 'Float32MatrixSeq.rcap'),
+       rowCap = _requireCap(rowCap, rowCount, 'Float32MatrixSeq.rowCap');
 
-  final List<List<bool>> out;
+  final List<InlineFloat32Array> out;
 
   /// The schema `count:` of the matrix — the row index bound (-1: none).
   final int cap;
@@ -548,31 +431,52 @@ class BoolMatrixSeq extends VisitorBase {
   final int rowCap;
 
   @override
-  void onArrayBegin(int id, ArrayKind kind, int count) {
-    if (kind != ArrayKind.unsigned) return;
-    if (_overCapacity(this, id, cap, rcap)) return;
-    _overLength(this, count, rowCount, rowCap);
-  }
-
-  @override
-  void onUnsignedArray(int id, Int64List values) {
-    if (_overCapacity(this, id, cap, rcap)) return;
-    if (_overLength(this, values.length, rowCount, rowCap)) return;
-    _reserve(out, id, () => <bool>[]);
-    out[id] = [for (final v in values) v != 0];
+  InlineFloat32Array? onFp32Array(int id, int count) {
+    if (_overCapacity(this, id, cap, rcap)) return null;
+    if (_overLength(this, count, rowCount, rowCap)) return null;
+    while (out.length <= id) {
+      out.add(InlineFloat32Array(0));
+    }
+    final r = out[id];
+    if (r.capacity < count) r.storage = Float32List(count);
+    return r;
   }
 }
 
-/// Bit-exact fp32 array copy into a fresh [Float32List] of length at least `n`.
-///
-/// A raw byte copy, not a per-element assignment: a signaling or payload NaN
-/// read out of a `Float32List` into a Dart `double` is quieted by the widening,
-/// and `writeFp32Array` re-emits a `Float32List`'s bytes verbatim — so the bits
-/// have to survive the copy for a round trip to be bit-exact (§4.6/§6.5).
-Float32List copyFp32(Float32List v, int n) {
-  final out = Float32List(n < v.length ? v.length : n);
-  Uint8List.sublistView(
-    out,
-  ).setRange(0, v.length * 4, Uint8List.sublistView(v));
-  return out;
+/// Collects the rows of an fp64 matrix — the twin of [Float32MatrixSeq].
+class Float64MatrixSeq extends MessageVisitor {
+  Float64MatrixSeq(
+    this.out,
+    this.cap, {
+    required int rcap,
+    required this.rowCount,
+    required int rowCap,
+  }) : rcap = _requireCap(rcap, cap, 'Float64MatrixSeq.rcap'),
+       rowCap = _requireCap(rowCap, rowCount, 'Float64MatrixSeq.rowCap');
+
+  final List<InlineFloat64Array> out;
+
+  /// The schema `count:` of the matrix — the row index bound (-1: none).
+  final int cap;
+
+  /// The **receiver cap** on the row index — see [StringSeq.rcap].
+  final int rcap;
+
+  /// The schema `count:` of a **row** — its element count bound (-1: none).
+  final int rowCount;
+
+  /// The **receiver cap** on a row's element count — see [IntMatrixSeq.rowCap].
+  final int rowCap;
+
+  @override
+  InlineFloat64Array? onFp64Array(int id, int count) {
+    if (_overCapacity(this, id, cap, rcap)) return null;
+    if (_overLength(this, count, rowCount, rowCap)) return null;
+    while (out.length <= id) {
+      out.add(InlineFloat64Array(0));
+    }
+    final r = out[id];
+    if (r.capacity < count) r.storage = Float64List(count);
+    return r;
+  }
 }

@@ -3,8 +3,9 @@ import 'dart:typed_data';
 import 'package:sofa_buffers_corelib/sofa_buffers_corelib.dart' as sofab;
 import 'package:test/test.dart';
 
-/// The layer a schema-bound (generated) consumer builds on: `VisitorBase`,
-/// `decodeUtf8Strict`, `utf8Length` and `elementsEqual`.
+/// The layer a schema-bound (generated) consumer builds on: the skipping
+/// `MessageVisitor` defaults, `decodeUtf8Strict`, `utf8Length` and
+/// `elementsEqual`.
 ///
 /// None of it is wire-visible — two ports can disagree about whether a skipped
 /// string is validated, or about what a list-vs-default comparison says of a
@@ -12,21 +13,21 @@ import 'package:test/test.dart';
 /// therefore cannot cover any of it, which is what CORELIB_PLAN §7 makes these
 /// unit tests mandatory for.
 void main() {
-  group('VisitorBase · an undeclared id is skipped, not inspected', () {
+  group('the defaults skip: an undeclared id is never inspected', () {
     // id 0, fixlen/string, length 2, payload C0 80 — the overlong "Modified
     // UTF-8" NUL, invalid per RFC 3629.
     final invalidString = Uint8List.fromList([0x02, 0x12, 0xC0, 0x80]);
 
-    test('the base MessageVisitor validates a materialized string', () {
-      // The contrast case: a hand-written visitor reads everything, so this
-      // port's always-strict rule fires and the decode is INVALID.
+    test('a string bound to a destination is validated', () {
+      // The contrast case: a visitor that binds every string gets this port's
+      // always-strict rule, and the decode is INVALID.
       expect(
         sofab.Decoder.decode(invalidString, _PlainVisitor()),
         sofab.DecodeStatus.invalid,
       );
     });
 
-    test('VisitorBase does not validate a string it does not declare', () {
+    test('a string no call binds is not validated', () {
       // Whether a string may be inspected at all is a schema question
       // (MESSAGE_SPEC §7.3 + CORELIB_PLAN §6.4): an id this scope does not
       // declare is a skipped field and its bytes are jumped over.
@@ -38,7 +39,7 @@ void main() {
       expect(vis.events, isEmpty);
     });
 
-    test('an override binds its own id and falls through for the rest', () {
+    test('an override binds its own id and skips the rest', () {
       final bytes = sofab.Encoder.encodeToBytes((e) {
         e.writeString(1, 'bound');
         e.writeString(2, 'unbound');
@@ -46,22 +47,19 @@ void main() {
       final vis = _OneStringField();
       expect(sofab.Decoder.decode(bytes, vis), sofab.DecodeStatus.complete);
       expect(vis.value, 'bound');
-      expect(vis.invalid, isFalse);
     });
 
-    test('a bound id with invalid UTF-8 is the consumer own INVALID', () {
-      // The callbacks return void, so a schema-bound rejection is recorded on
-      // the consumer's sticky flag; the corelib itself sees nothing wrong.
+    test('a bound id with invalid UTF-8 is INVALID, from the codec', () {
+      // Validation is the codec's, done once the bound payload is whole — one
+      // implementation for every consumer (CORELIB_PLAN §5.3.1).
       final vis = _OneStringField();
       expect(
         sofab.Decoder.decode(
           Uint8List.fromList([0x0A, 0x12, 0xC0, 0x80]), // id 1, same payload
           vis,
         ),
-        sofab.DecodeStatus.complete,
+        sofab.DecodeStatus.invalid,
       );
-      expect(vis.value, isNull);
-      expect(vis.invalid, isTrue);
     });
 
     test('a sequence is skipped whole, children and grandchildren', () {
@@ -169,9 +167,9 @@ void main() {
       }
     });
 
-    test('it is the same verdict the default string path reaches', () {
-      // Same bytes, same answer, whether a hand-written visitor lets the
-      // default onStringBytes run or a generated arm calls this directly.
+    test('it is the same verdict the codec reaches on a bound string', () {
+      // Same bytes, same answer, whether the codec validates a bound string or
+      // a caller runs this on bytes of its own.
       for (final payload in <List<int>>[
         [0x61],
         [0xC3, 0xA9],
@@ -324,45 +322,48 @@ void main() {
   });
 }
 
-/// A hand-written visitor: every default intact, so strings are validated and
-/// sequences descended.
+/// Binds every string, so every string is validated.
 class _PlainVisitor extends sofab.MessageVisitor {
-  final List<String> strings = [];
+  final List<sofab.InlineString> _strings = [];
+
+  /// The strings' text, read after the decode.
+  List<String> get strings => [for (final d in _strings) '$d'];
 
   @override
-  void onString(int id, String value) => strings.add(value);
+  sofab.InlineString? onString(int id, int length) {
+    final d = sofab.InlineString(length);
+    _strings.add(d);
+    return d;
+  }
 }
 
-/// A generated scope that declares nothing: every id skips.
-class _NoDestinations extends sofab.VisitorBase {
+/// A generated scope that declares nothing: every aggregate and sequence skips
+/// (the defaults), and scalars are recorded.
+class _NoDestinations extends sofab.MessageVisitor {
   final List<String> events = [];
 
   @override
   void onUnsigned(int id, int value) => events.add('U:$id:$value');
-
-  @override
-  void onString(int id, String value) => events.add('S:$id:$value');
 }
 
 /// A generated scope with one string destination, at id 1.
-class _OneStringField extends sofab.VisitorBase {
-  String? value;
-  bool invalid = false;
+class _OneStringField extends sofab.MessageVisitor {
+  final sofab.InlineString _name = sofab.InlineString(16);
+  bool _bound = false;
+
+  /// The field's value, or `null` while it is at its default.
+  String? get value => _bound ? '$_name' : null;
 
   @override
-  void onStringBytes(int id, Uint8List bytes) {
-    if (id != 1) return; // falls through to the base's skip
-    final s = sofab.decodeUtf8Strict(bytes);
-    if (s == null) {
-      invalid = true;
-      return;
-    }
-    value = s;
+  sofab.InlineString? onString(int id, int length) {
+    if (id != 1) return null; // not declared: skipped
+    _bound = true;
+    return _name;
   }
 }
 
 /// A generated scope with one sequence destination, at id 1.
-class _OneSequenceField extends sofab.VisitorBase {
+class _OneSequenceField extends sofab.MessageVisitor {
   final _NoDestinations child = _NoDestinations();
 
   @override

@@ -10,7 +10,7 @@
 //   this list."
 //
 // The second half of this file used to assert the **opposite** — that
-// `Decoder.decode` hands `onBlob`/`onStringBytes` a view onto the caller's
+// `Decoder.decode` hands the blob/string callbacks a view onto the caller's
 // buffer — under the older §9.6, which let a port choose view-or-copy and state
 // its choice. §6.7.1 removed the choice: "decode(buffer) copies too … otherwise
 // a port's memory behaviour would depend on which entry point was used". Every
@@ -29,33 +29,35 @@ Uint8List blobAbc() =>
 /// `string` field id 1, payload 'abc': `fixlen_word` `(3<<3)|2`.
 Uint8List stringAbc() => Uint8List.fromList([0x0a, 0x1a, 0x61, 0x62, 0x63]);
 
-/// Retains exactly what the decoder hands over — no copy — which is what a
-/// caller does when the README tells it the value outlives the callback.
+/// Hands out exactly-sized destinations and retains their storage — the
+/// caller's own memory, which is where every decoded value lands.
 class _Keeper extends sofab.MessageVisitor {
-  Uint8List? blob;
-  Uint8List? stringBytes;
-  String? string;
+  sofab.InlineBytes? _blob;
+  sofab.InlineString? _string;
+  sofab.InlineInt64Array? _ints;
+  sofab.InlineFloat64Array? _fp64;
+
+  Uint8List? get blob => _blob?.storage;
+  Uint8List? get stringBytes => _string?.storage;
+  String? get string => _string?.toString();
+  Int64List? get ints => _ints?.storage;
+  Float64List? get fp64 => _fp64?.storage;
 
   @override
-  void onBlob(int id, Uint8List value) => blob = value;
+  sofab.InlineBytes? onBlob(int id, int length) =>
+      _blob = sofab.InlineBytes(length);
 
   @override
-  void onStringBytes(int id, Uint8List bytes) {
-    stringBytes = bytes;
-    super.onStringBytes(id, bytes);
-  }
+  sofab.InlineString? onString(int id, int length) =>
+      _string = sofab.InlineString(length);
 
   @override
-  void onString(int id, String value) => string = value;
-
-  Int64List? ints;
-  Float64List? fp64;
+  sofab.InlineInt64Array? onUnsignedArray(int id, int count) =>
+      _ints = sofab.InlineInt64Array(count);
 
   @override
-  void onUnsignedArray(int id, Int64List values) => ints = values;
-
-  @override
-  void onFp64Array(int id, Float64List values) => fp64 = values;
+  sofab.InlineFloat64Array? onFp64Array(int id, int count) =>
+      _fp64 = sofab.InlineFloat64Array(count);
 }
 
 void main() {
