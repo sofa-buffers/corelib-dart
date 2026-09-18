@@ -175,16 +175,6 @@ class Encoder {
     _fscratchBytes = _fscratch.buffer.asUint8List();
   }
 
-  /// Validates a buffer handover (CORELIB_PLAN §5.1) — the constructor, the
-  /// sink-less [Encoder.overBuffer] and every mid-stream [installBuffer] pass
-  /// through here, so a buffer the encoder cannot use is refused **where it is
-  /// handed over** rather than partway through a message.
-  ///
-  /// [streaming] is true exactly when a flush sink is present. Only then does
-  /// [minOutputBuffer] bind: without a sink no flush can occur, no atomic unit
-  /// can be split, and the buffer either holds the message or reports
-  /// buffer-full — so a message that encodes to two bytes may be encoded into a
-  /// two-byte buffer.
   /// Validates a caller-declared nesting bound (the `depth` constructor
   /// parameter): `1..maxDepth`. It sizes the held-back sequence run **at
   /// construction** (§6.6) — nothing grows afterwards.
@@ -198,6 +188,16 @@ class Encoder {
     return depth;
   }
 
+  /// Validates a buffer handover (CORELIB_PLAN §5.1) — the constructor, the
+  /// sink-less [Encoder.overBuffer] and every mid-stream [installBuffer] pass
+  /// through here, so a buffer the encoder cannot use is refused **where it is
+  /// handed over** rather than partway through a message.
+  ///
+  /// [streaming] is true exactly when a flush sink is present. Only then does
+  /// [minOutputBuffer] bind: without a sink no flush can occur, no atomic unit
+  /// can be split, and the buffer either holds the message or reports
+  /// buffer-full — so a message that encodes to two bytes may be encoded into a
+  /// two-byte buffer.
   static void _checkHandover(
     int buflen,
     int offset, {
@@ -238,7 +238,7 @@ class Encoder {
   late final Uint8List _fscratchBytes;
 
   /// Encoder-side nesting depth guard (CORELIB_PLAN §4.9): must not open more
-  /// than [maxDepth] sequences.
+  /// sequences than the constructor's `depth` ([maxDepth] by default).
   int _depth = 0;
 
   /// Ids of the innermost open sequences whose header has **not been written
@@ -247,26 +247,24 @@ class Encoder {
   /// whole run at once — which is what lets [endSequence] simply pop the last
   /// entry.
   ///
-  /// The run reaches the full [maxDepth], so the hold-back covers every legal
-  /// nesting level and this port is canonical at every depth (CORELIB_PLAN
-  /// §6.0.1, "How deep the hold-back reaches" — only a constrained profile may
-  /// bound the run and frame eagerly beyond the bound, and this port takes no
-  /// such bound). There is therefore no eager fallback, and one fewer way to
-  /// break the contiguous-suffix invariant.
+  /// The run reaches the whole nesting bound — the constructor's `depth`,
+  /// [maxDepth] by default — so the hold-back covers every nesting level the
+  /// encoder accepts and this port is canonical at every depth (CORELIB_PLAN
+  /// §6.0.1, "How deep the hold-back reaches"). A smaller `depth` shrinks the
+  /// run *and* the accepted nesting together, so there is still no eager
+  /// fallback, and one fewer way to break the contiguous-suffix invariant.
   ///
   /// **Sized at construction**, to that full extent: §6.0.1 makes the pending
   /// run fixed-size state and §6.6 requires such state to be "sized to its full
   /// extent when the codec is constructed" — "a pending run that doubles as
   /// nesting deepens allocates on a `write` path, and that is what this section
-  /// forbids". One `Int32List(255)` per encoder, ~1 KiB, and nothing after it.
+  /// forbids". At the default, one `Int32List(255)` per encoder, ~1 KiB, zeroed
+  /// on every construction; a caller that knows its schema's static nesting —
+  /// generated code does — passes `depth` and the run shrinks to a few words.
   ///
   /// These are **encoder state, not buffer content**: a flush can never split a
   /// pending run, which is why a tiny output buffer produces exactly the
   /// one-shot bytes.
-  //
-  // Sized by the constructor's `depth` (default [maxDepth]). A caller that
-  // knows its schema's static nesting — generated code does — passes it, and
-  // the run shrinks from ~1 KiB (zeroed on every construction) to a few words.
   final Int32List _pendingSeq;
 
   /// Number of valid entries in [_pendingSeq].
@@ -882,11 +880,13 @@ class Encoder {
   /// a contentless one survives: [endSequence] drops it, [endSequenceKeep]
   /// forces the frame out.
   ///
-  /// There is **no depth window**: the pending run grows on demand and holds
-  /// back to the full [maxDepth], so a contentless nest is dropped at every
-  /// legal depth and the output is canonical everywhere (CORELIB_PLAN §6).
-  /// Nesting itself is still bounded — opening more than [maxDepth] sequences
-  /// throws [SofabError.invalidMessage].
+  /// There is **no depth window**: the pending run holds back to the full
+  /// nesting bound — the constructor's `depth`, [maxDepth] unless the caller
+  /// declared less — so a contentless nest is dropped at every legal depth and
+  /// the output is canonical everywhere (CORELIB_PLAN §6). Nesting past that
+  /// bound throws: [SofabError.invalidArgument] past a declared `depth` below
+  /// [maxDepth] (the caller's own promise broken), and
+  /// [SofabError.invalidMessage] past [maxDepth] itself.
   void beginSequenceLazy(int id) {
     if (_depth >= _pendingSeq.length) _depthExceeded();
     if (id < 0 || id > idMax) {
@@ -895,8 +895,9 @@ class Encoder {
         'field id out of range 0..2^31-1',
       );
     }
-    // The run holds [maxDepth] entries and the depth check above has already
-    // refused the one that would overflow it, so there is nothing to grow.
+    // The run was sized to the nesting bound at construction and the depth
+    // check above has already refused the one that would overflow it, so there
+    // is nothing to grow.
     _pendingSeq[_nPendingSeq++] = id;
     _depth++;
   }
