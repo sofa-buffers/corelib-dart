@@ -133,9 +133,11 @@ class Encoder {
     FlushCallback this._flush, {
     required Uint8List buffer,
     int offset = 0,
+    int depth = maxDepth,
   }) : _buf = buffer,
        _pos = offset,
-       _flushStart = offset {
+       _flushStart = offset,
+       _pendingSeq = Int32List(_checkDepth(depth)) {
     _checkHandover(buffer.length, offset, streaming: true);
     _bufData = ByteData.sublistView(buffer);
     _fscratchBytes = _fscratch.buffer.asUint8List();
@@ -162,11 +164,15 @@ class Encoder {
   /// enc.flush();
   /// socket.add(enc.written);                 // the whole message, zero-copy
   /// ```
-  Encoder.overBuffer(Uint8List buffer, {int offset = 0})
-    : _flush = null,
-      _buf = buffer,
-      _pos = offset,
-      _flushStart = offset {
+  Encoder.overBuffer(
+    Uint8List buffer, {
+    int offset = 0,
+    int depth = maxDepth,
+  }) : _flush = null,
+       _buf = buffer,
+       _pos = offset,
+       _flushStart = offset,
+       _pendingSeq = Int32List(_checkDepth(depth)) {
     _checkHandover(buffer.length, offset, streaming: false);
     _bufData = ByteData.sublistView(buffer);
     _fscratchBytes = _fscratch.buffer.asUint8List();
@@ -182,6 +188,19 @@ class Encoder {
   /// can be split, and the buffer either holds the message or reports
   /// buffer-full — so a message that encodes to two bytes may be encoded into a
   /// two-byte buffer.
+  /// Validates a caller-declared nesting bound (the `depth` constructor
+  /// parameter): `1..maxDepth`. It sizes the held-back sequence run **at
+  /// construction** (§6.6) — nothing grows afterwards.
+  static int _checkDepth(int depth) {
+    if (depth < 1 || depth > maxDepth) {
+      throw const SofabException(
+        SofabError.invalidArgument,
+        'depth out of range 1..$maxDepth',
+      );
+    }
+    return depth;
+  }
+
   static void _checkHandover(
     int buflen,
     int offset, {
@@ -247,7 +266,11 @@ class Encoder {
   /// These are **encoder state, not buffer content**: a flush can never split a
   /// pending run, which is why a tiny output buffer produces exactly the
   /// one-shot bytes.
-  final Int32List _pendingSeq = Int32List(maxDepth);
+  //
+  // Sized by the constructor's `depth` (default [maxDepth]). A caller that
+  // knows its schema's static nesting — generated code does — passes it, and
+  // the run shrinks from ~1 KiB (zeroed on every construction) to a few words.
+  final Int32List _pendingSeq;
 
   /// Number of valid entries in [_pendingSeq].
   int _nPendingSeq = 0;
@@ -868,12 +891,7 @@ class Encoder {
   /// Nesting itself is still bounded — opening more than [maxDepth] sequences
   /// throws [SofabError.invalidMessage].
   void beginSequenceLazy(int id) {
-    if (_depth >= maxDepth) {
-      throw const SofabException(
-        SofabError.invalidMessage,
-        'nesting exceeds MAX_DEPTH (255)',
-      );
-    }
+    if (_depth >= _pendingSeq.length) _depthExceeded();
     if (id < 0 || id > idMax) {
       throw const SofabException(
         SofabError.invalidArgument,
@@ -884,6 +902,23 @@ class Encoder {
     // refused the one that would overflow it, so there is nothing to grow.
     _pendingSeq[_nPendingSeq++] = id;
     _depth++;
+  }
+
+  @pragma('vm:never-inline')
+  Never _depthExceeded() {
+    if (_pendingSeq.length < maxDepth) {
+      // The caller's own declared bound, not the format's: a mistake in the
+      // call (§6.3), like a buffer too short.
+      throw SofabException(
+        SofabError.invalidArgument,
+        'nesting exceeds the depth this encoder was built for '
+        '(${_pendingSeq.length})',
+      );
+    }
+    throw const SofabException(
+      SofabError.invalidMessage,
+      'nesting exceeds MAX_DEPTH (255)',
+    );
   }
 
   /// Closes the current sequence, letting it **vanish** if it received no
