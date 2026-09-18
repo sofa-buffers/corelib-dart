@@ -230,7 +230,11 @@ class StringSeq extends VisitorBase {
       invalidate();
       return;
     }
-    _reserve(out, id, () => '');
+    // Inline rather than `_reserve(out, id, () => '')`: the closure is
+    // allocated per element and the generic helper is not specialised.
+    while (out.length <= id) {
+      out.add('');
+    }
     out[id] = s;
   }
 }
@@ -277,7 +281,9 @@ class BlobSeq extends VisitorBase {
     if (_overCapacity(this, id, cap, rcap)) return;
     // The same backstop as StringSeq's, unreachable for the same reason.
     if (_overLength(this, value.length, emax, relemMax)) return;
-    _reserve(out, id, () => Uint8List(0));
+    while (out.length <= id) {
+      out.add(Uint8List(0));
+    }
     out[id] = Uint8List.fromList(value);
   }
 }
