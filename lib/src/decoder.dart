@@ -266,6 +266,11 @@ abstract class MessageVisitor {
   /// with its first [count] elements written.
   ///
   /// The default forwards to the whole-aggregate convenience for [kind]. A
+  /// destination longer than [count] (only a caller-supplied one can be) is
+  /// delivered as a **copy** of its prefix, never a view: a view would make the
+  /// conveniences' argument polymorphic (`_Int64List` | `_Int64ArrayView`), and
+  /// AOT then stops inlining `[]`/`length`/iteration in every consumer — the
+  /// common exact-size path pays for the rare one. A
   /// consumer that supplied its own destination overrides this (often to a
   /// no-op: the elements are already where it wanted them).
   void onArrayDone(int id, ArrayKind kind, TypedData dest, int count) {
@@ -274,25 +279,25 @@ abstract class MessageVisitor {
         final v = dest as Int64List;
         onUnsignedArray(
           id,
-          v.length == count ? v : Int64List.sublistView(v, 0, count),
+          v.length == count ? v : v.sublist(0, count),
         );
       case ArrayKind.signed:
         final v = dest as Int64List;
         onSignedArray(
           id,
-          v.length == count ? v : Int64List.sublistView(v, 0, count),
+          v.length == count ? v : v.sublist(0, count),
         );
       case ArrayKind.fp32:
         final v = dest as Float32List;
         onFp32Array(
           id,
-          v.length == count ? v : Float32List.sublistView(v, 0, count),
+          v.length == count ? v : v.sublist(0, count),
         );
       case ArrayKind.fp64:
         final v = dest as Float64List;
         onFp64Array(
           id,
-          v.length == count ? v : Float64List.sublistView(v, 0, count),
+          v.length == count ? v : v.sublist(0, count),
         );
     }
   }
