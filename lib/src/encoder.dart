@@ -164,15 +164,12 @@ class Encoder {
   /// enc.flush();
   /// socket.add(enc.written);                 // the whole message, zero-copy
   /// ```
-  Encoder.overBuffer(
-    Uint8List buffer, {
-    int offset = 0,
-    int depth = maxDepth,
-  }) : _flush = null,
-       _buf = buffer,
-       _pos = offset,
-       _flushStart = offset,
-       _pendingSeq = Int32List(_checkDepth(depth)) {
+  Encoder.overBuffer(Uint8List buffer, {int offset = 0, int depth = maxDepth})
+    : _flush = null,
+      _buf = buffer,
+      _pos = offset,
+      _flushStart = offset,
+      _pendingSeq = Int32List(_checkDepth(depth)) {
     _checkHandover(buffer.length, offset, streaming: false);
     _bufData = ByteData.sublistView(buffer);
     _fscratchBytes = _fscratch.buffer.asUint8List();
