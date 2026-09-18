@@ -277,28 +277,16 @@ abstract class MessageVisitor {
     switch (kind) {
       case ArrayKind.unsigned:
         final v = dest as Int64List;
-        onUnsignedArray(
-          id,
-          v.length == count ? v : v.sublist(0, count),
-        );
+        onUnsignedArray(id, v.length == count ? v : v.sublist(0, count));
       case ArrayKind.signed:
         final v = dest as Int64List;
-        onSignedArray(
-          id,
-          v.length == count ? v : v.sublist(0, count),
-        );
+        onSignedArray(id, v.length == count ? v : v.sublist(0, count));
       case ArrayKind.fp32:
         final v = dest as Float32List;
-        onFp32Array(
-          id,
-          v.length == count ? v : v.sublist(0, count),
-        );
+        onFp32Array(id, v.length == count ? v : v.sublist(0, count));
       case ArrayKind.fp64:
         final v = dest as Float64List;
-        onFp64Array(
-          id,
-          v.length == count ? v : v.sublist(0, count),
-        );
+        onFp64Array(id, v.length == count ? v : v.sublist(0, count));
     }
   }
 
