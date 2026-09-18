@@ -61,7 +61,7 @@ The public surface lives under the fixed `sofab` namespace; import it aliased.
 | Streaming input | `Decoder.feed()` accepts any-size chunks; an explicit byte-state machine resumes across boundaries and returns the three-valued `DecodeStatus` — no finalize step. |
 | Zero unnecessary copies | Flush hands out a `Uint8List.sublistView` of the live buffer; a payload is written once, straight into the destination its reader supplied — including a string transcoded on encode, which goes into the output buffer rather than through one of its own; an `fp32`/`fp64` array is decoded *in* the typed list it is delivered as. |
 | No allocation on the hot path | Header/varint/array writes go straight to the caller's buffer; every decoded payload goes straight into the caller's destination; `Encoder.reset()` reuses buffer + encoder across messages; a decoded `fp32`/`fp64` scalar stages in a reusable per-decoder slot, and an open sequence costs no object at all. |
-| Small, predictable footprint | Codec state is one `MAX_DEPTH` run plus an 8-byte landing zone per side, sized in the constructor and never grown; no reflection, no codegen at runtime. |
+| Small, predictable footprint | Codec state is one nesting-depth run (`MAX_DEPTH` by default; an `Encoder` takes a smaller `depth:`) plus an 8-byte landing zone per side, sized in the constructor and never grown; no reflection, no codegen at runtime. |
 | Type safety | Typed `write*` methods and a typed `MessageVisitor`; `SofabException` carries a `SofabError` code, `Decoder` reports `DecodeStatus`. |
 | Cross-language compatibility | Validated against the shared `assets/test_vectors.json` for encode, decode, chunked, skip and roundtrip. |
 
@@ -114,8 +114,9 @@ not written as an empty `begin`/`end` frame (MESSAGE_SPEC §2). `beginSequenceLa
 buffered — the held-back ids are encoder state, so a tiny output buffer still
 produces the one-shot bytes.
 
-The hold-back is **unbounded**: it reaches the format's full `MAX_DEPTH` of 255,
-growing on demand and allocating nothing until the first sequence is opened.
+The hold-back reaches the whole nesting bound — the format's `MAX_DEPTH` of 255,
+or the smaller `depth:` an encoder was built with — and is sized once, at
+construction; nothing grows while a message is written.
 
 ```dart
 sofab.Encoder.encodeToBytes((e) {
@@ -394,8 +395,9 @@ and both are caller-owned. The library owns neither, on either decode surface.
   for you — transcoding to a Dart `String` always copies — and it is
   unconditionally yours.
 - **The library's own state is sized once, in the constructor.** An `Encoder`
-  holds a `MAX_DEPTH`-entry pending-sequence run and an 8-byte float landing
-  zone; a `Decoder` holds a `MAX_DEPTH`-entry parse stack and its own 8-byte
+  holds a pending-sequence run as deep as its nesting bound (`MAX_DEPTH`
+  entries unless the caller passes a smaller `depth:`) and an 8-byte float
+  landing zone; a `Decoder` holds a `MAX_DEPTH`-entry parse stack and its own 8-byte
   landing zone. None of them grows, and none of them is sized by anything on the
   wire. An open sequence costs no object at all, and an `fp32`/`fp64` scalar
   stages in that landing zone rather than in a per-field buffer.
