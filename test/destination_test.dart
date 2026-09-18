@@ -43,10 +43,9 @@ void main() {
       bothSurfaces(bytes, () => _Dest(), (st, v) {
         final d = v as _Dest;
         expect(st, sofab.DecodeStatus.complete);
-        expect(d.handedOut, isNotNull);
-        expect(identical(d.gotBytes, d.handedOut), isTrue);
-        expect(d.gotBytes!.sublist(0, 5), orderedEquals('hello'.codeUnits));
-        expect(d.total, 5);
+        expect(identical(d.string!.storage, d.handedOut), isTrue);
+        expect(d.string!.length, 5);
+        expect('${d.string}', 'hello');
       });
     });
 
@@ -55,12 +54,9 @@ void main() {
       bothSurfaces(bytes, () => _Dest(), (st, v) {
         final d = v as _Dest;
         expect(st, sofab.DecodeStatus.complete);
-        expect(identical(d.gotArray, d.arrayHandedOut), isTrue);
-        expect(
-          (d.gotArray as Int64List).sublist(0, 3),
-          orderedEquals([7, 8, 9]),
-        );
-        expect(d.count, 3);
+        expect(identical(d.ints!.storage, d.arrayHandedOut), isTrue);
+        expect(d.ints!.length, 3);
+        expect(d.ints!.toList(), orderedEquals([7, 8, 9]));
       });
     });
 
@@ -69,24 +65,21 @@ void main() {
       bothSurfaces(bytes, () => _Dest(), (st, v) {
         final d = v as _Dest;
         expect(st, sofab.DecodeStatus.complete);
-        expect(identical(d.gotArray, d.arrayHandedOut), isTrue);
-        expect(
-          (d.gotArray as Float64List).sublist(0, 2),
-          orderedEquals([1.5, -2.25]),
-        );
+        expect(identical(d.doubles!.storage, d.arrayHandedOut), isTrue);
+        expect(d.doubles!.toList(), orderedEquals([1.5, -2.25]));
       });
     });
 
     test('a destination longer than the payload keeps the extra room', () {
       // The caller hands over a 64-byte scratch for a 5-byte string: the codec
-      // writes 5 bytes and reports 5, and never resizes anything.
+      // writes 5 bytes, sets `length` to 5, and never resizes anything.
       final bytes = enc((e) => e.writeString(1, 'hello'));
       bothSurfaces(bytes, () => _Dest(slack: 64), (st, v) {
         final d = v as _Dest;
         expect(st, sofab.DecodeStatus.complete);
-        expect(d.handedOut!.length, 64);
-        expect(d.total, 5);
-        expect(d.stringSeen, 'hello');
+        expect(d.string!.capacity, 64);
+        expect(d.string!.length, 5);
+        expect('${d.string}', 'hello');
       });
     });
 
@@ -95,10 +88,45 @@ void main() {
       bothSurfaces(bytes, () => _Dest(slack: 16), (st, v) {
         final d = v as _Dest;
         expect(st, sofab.DecodeStatus.complete);
-        expect((d.gotArray as Int64List).length, 16);
-        expect(d.count, 3);
-        expect(d.arraySeen, orderedEquals([7, 8, 9]));
+        expect(d.ints!.capacity, 16);
+        expect(d.ints!.length, 3);
+        expect(d.ints!.toList(), orderedEquals([7, 8, 9]));
       });
+    });
+
+    test('nothing past the announced count is touched', () {
+      // The codec writes `count` elements and sets `length`; the rest of the
+      // caller's storage is the caller's, and keeps what it held.
+      final bytes = enc((e) => e.writeUnsignedArray(1, const [7, 8, 9]));
+      final dest = sofab.InlineInt64Array(8)..storage.fillRange(0, 8, -1);
+      final v = _Reuse(dest);
+      expect(sofab.Decoder.decode(bytes, v), sofab.DecodeStatus.complete);
+      expect(dest.storage, orderedEquals([7, 8, 9, -1, -1, -1, -1, -1]));
+    });
+
+    test('a destination reused across messages is refilled in place', () {
+      // The whole point of a capacity beside a length: storage sized once, to
+      // the schema maximum, serves every message — nothing is allocated, and a
+      // shorter message simply leaves a shorter `length`.
+      final dest = sofab.InlineInt64Array(8);
+      final storage = dest.storage;
+      final v = _Reuse(dest);
+      for (final values in const [
+        [1, 2, 3, 4, 5],
+        [9],
+        <int>[],
+        [6, 7],
+      ]) {
+        final bytes = enc((e) => e.writeUnsignedArray(1, values));
+        final dec = sofab.Decoder(v);
+        for (final byte in bytes) {
+          dec.feed([byte]);
+        }
+        expect(dest.toList(), values);
+        expect(sofab.Decoder.decode(bytes, v), sofab.DecodeStatus.complete);
+        expect(dest.toList(), values);
+        expect(identical(dest.storage, storage), isTrue);
+      }
     });
   });
 
@@ -162,18 +190,6 @@ void main() {
       );
     });
 
-    test('a destination of the wrong element type', () {
-      final bytes = enc((e) => e.writeFp64Array(1, const [1.0]));
-      expect(
-        () => sofab.Decoder.decode(bytes, _WrongType()),
-        throwsInvalidArgument(),
-      );
-      expect(
-        () => sofab.Decoder(_WrongType()).feed(bytes),
-        throwsInvalidArgument(),
-      );
-    });
-
     test('it is not folded into INVALID or limitExceeded', () {
       // The same bytes decode for a caller that hands over enough room.
       final bytes = enc((e) => e.writeString(1, 'hello'));
@@ -228,110 +244,83 @@ void main() {
   });
 }
 
-/// Hands out its own storage and remembers what came back.
+/// Hands out its own storage — `slack` elements/bytes of it where that is more
+/// than announced — and remembers what it handed out.
 class _Dest extends sofab.MessageVisitor {
   _Dest({this.slack = 0});
   final int slack;
 
+  int _size(int n) => slack > n ? slack : n;
+
+  sofab.InlineString? string;
+  sofab.InlineInt64Array? ints;
+  sofab.InlineFloat64Array? doubles;
+
+  /// The storage handed out, to check it is the very list that gets filled.
   Uint8List? handedOut;
-  Uint8List? gotBytes;
-  int total = -1;
-  String? stringSeen;
-
   TypedData? arrayHandedOut;
-  TypedData? gotArray;
-  int count = -1;
-  List<int>? arraySeen;
 
   @override
-  Uint8List? onBytesDest(int id, int subtype, int total) =>
-      handedOut = Uint8List(slack > total ? slack : total);
-
-  @override
-  void onBytesDone(int id, int subtype, Uint8List dest, int total) {
-    gotBytes = dest;
-    this.total = total;
-    super.onBytesDone(id, subtype, dest, total);
+  sofab.InlineString? onString(int id, int length) {
+    final d = sofab.InlineString(_size(length));
+    handedOut = d.storage;
+    return string = d;
   }
 
   @override
-  void onString(int id, String value) => stringSeen = value;
+  sofab.InlineBytes? onBlob(int id, int length) =>
+      sofab.InlineBytes(_size(length));
 
   @override
-  TypedData? onArrayDest(int id, sofab.ArrayKind kind, int count) {
-    final n = slack > count ? slack : count;
-    switch (kind) {
-      case sofab.ArrayKind.unsigned:
-      case sofab.ArrayKind.signed:
-        return arrayHandedOut = Int64List(n);
-      case sofab.ArrayKind.fp32:
-        return arrayHandedOut = Float32List(n);
-      case sofab.ArrayKind.fp64:
-        return arrayHandedOut = Float64List(n);
-    }
+  sofab.InlineInt64Array? onUnsignedArray(int id, int count) {
+    final d = sofab.InlineInt64Array(_size(count));
+    arrayHandedOut = d.storage;
+    return ints = d;
   }
 
   @override
-  void onArrayDone(int id, sofab.ArrayKind kind, TypedData dest, int count) {
-    gotArray = dest;
-    this.count = count;
-    super.onArrayDone(id, kind, dest, count);
+  sofab.InlineFloat64Array? onFp64Array(int id, int count) {
+    final d = sofab.InlineFloat64Array(_size(count));
+    arrayHandedOut = d.storage;
+    return doubles = d;
   }
+}
+
+/// Hands the same destination to every unsigned array.
+class _Reuse extends sofab.MessageVisitor {
+  _Reuse(this.dest);
+  final sofab.InlineInt64Array dest;
 
   @override
-  void onUnsignedArray(int id, Int64List values) => arraySeen = values.toList();
+  sofab.InlineInt64Array? onUnsignedArray(int id, int count) => dest;
 }
 
 /// Always one element/byte short of what was announced.
 class _Short extends sofab.MessageVisitor {
-  @override
-  Uint8List? onBytesDest(int id, int subtype, int total) =>
-      Uint8List(total > 0 ? total - 1 : 0);
+  static int _less(int n) => n > 0 ? n - 1 : 0;
 
   @override
-  TypedData? onArrayDest(int id, sofab.ArrayKind kind, int count) {
-    final n = count > 0 ? count - 1 : 0;
-    switch (kind) {
-      case sofab.ArrayKind.unsigned:
-      case sofab.ArrayKind.signed:
-        return Int64List(n);
-      case sofab.ArrayKind.fp32:
-        return Float32List(n);
-      case sofab.ArrayKind.fp64:
-        return Float64List(n);
-    }
-  }
+  sofab.InlineString? onString(int id, int length) =>
+      sofab.InlineString(_less(length));
+
+  @override
+  sofab.InlineBytes? onBlob(int id, int length) =>
+      sofab.InlineBytes(_less(length));
+
+  @override
+  sofab.InlineInt64Array? onUnsignedArray(int id, int count) =>
+      sofab.InlineInt64Array(_less(count));
+
+  @override
+  sofab.InlineFloat64Array? onFp64Array(int id, int count) =>
+      sofab.InlineFloat64Array(_less(count));
 }
 
-/// Hands back a list of the wrong element type.
-class _WrongType extends sofab.MessageVisitor {
-  @override
-  TypedData? onArrayDest(int id, sofab.ArrayKind kind, int count) =>
-      Int64List(count);
-}
-
-/// Declines every aggregate; scalars still arrive.
+/// Declines every aggregate — the `MessageVisitor` default; scalars still
+/// arrive.
 class _Decline extends sofab.MessageVisitor {
   final List<String> delivered = [];
 
   @override
-  Uint8List? onBytesDest(int id, int subtype, int total) => null;
-
-  @override
-  TypedData? onArrayDest(int id, sofab.ArrayKind kind, int count) => null;
-
-  @override
-  void onString(int id, String value) => delivered.add('S:$id:$value');
-
-  @override
-  void onBlob(int id, Uint8List value) => delivered.add('B:$id');
-
-  @override
   void onUnsigned(int id, int value) => delivered.add('U:$id:$value');
-
-  @override
-  void onUnsignedArray(int id, Int64List values) => delivered.add('AU:$id');
-
-  @override
-  void onFp64Array(int id, Float64List values) => delivered.add('AF:$id');
 }

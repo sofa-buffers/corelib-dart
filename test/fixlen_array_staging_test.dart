@@ -113,14 +113,13 @@ void main() {
       out.add(_fp32Array(3, const [0x3F800000, 0x40000000]));
       final msg = out.takeBytes();
 
-      final kept = <List<int>>[];
-      final v = _Keep(kept);
+      final v = _Keep();
       var st = sofab.DecodeStatus.incomplete;
       for (final b in msg) {
         st = v.dec.feed([b]);
       }
       expect(st, sofab.DecodeStatus.complete);
-      expect(kept, [
+      expect(v.kept, [
         [0x3FF0000000000000, 0x4000000000000000],
         [0x4008000000000000, 0x4010000000000000],
         [0x3F800000, 0x40000000],
@@ -174,33 +173,59 @@ void main() {
 const int _capMiB = 40;
 const String _supportScript = 'test/support/stream_fp64_array.dart';
 
+/// Decodes each fp32/fp64 array into an exactly-sized destination of its own;
+/// [f64]/[f32] are the storage of the last one.
 class _Collect extends sofab.MessageVisitor {
-  Float64List? f64;
-  Float32List? f32;
+  sofab.InlineFloat64Array? _f64;
+  sofab.InlineFloat32Array? _f32;
+  Float64List? get f64 => _f64?.storage;
+  Float32List? get f32 => _f32?.storage;
   @override
-  void onFp64Array(int id, Float64List value) => f64 = value;
+  sofab.InlineFloat64Array? onFp64Array(int id, int count) =>
+      _f64 = sofab.InlineFloat64Array(count);
   @override
-  void onFp32Array(int id, Float32List value) => f32 = value;
+  sofab.InlineFloat32Array? onFp32Array(int id, int count) =>
+      _f32 = sofab.InlineFloat32Array(count);
 }
 
-/// Keeps every delivered array, as raw bit patterns, so a later field writing
-/// into an earlier field's storage would show up as a changed earlier row.
+/// Keeps every array's destination and reads them as raw bit patterns after the
+/// decode, so a later field writing into an earlier field's storage would show
+/// up as a changed earlier row.
 class _Keep extends sofab.MessageVisitor {
-  _Keep(this.kept) {
+  _Keep() {
     dec = sofab.Decoder(this);
   }
-  final List<List<int>> kept;
+  final List<Object> _dests = [];
   late final sofab.Decoder dec;
+
+  List<List<int>> get kept => [
+    for (final d in _dests)
+      d is sofab.InlineFloat64Array
+          ? _bitsOf(d.storage)
+          : _bitsOf((d as sofab.InlineFloat32Array).storage),
+  ];
+
   @override
-  void onFp64Array(int id, Float64List value) => kept.add(_bitsOf(value));
+  sofab.InlineFloat64Array? onFp64Array(int id, int count) {
+    final d = sofab.InlineFloat64Array(count);
+    _dests.add(d);
+    return d;
+  }
+
   @override
-  void onFp32Array(int id, Float32List value) => kept.add(_bitsOf(value));
+  sofab.InlineFloat32Array? onFp32Array(int id, int count) {
+    final d = sofab.InlineFloat32Array(count);
+    _dests.add(d);
+    return d;
+  }
 }
 
-/// Declares no fields at all, so every field is skipped (`_read == false`).
+/// Declares no fields at all, so every field is skipped (a `null` destination).
 class _Skip extends _Collect {
   @override
-  bool shouldRead(int id, int type) => false;
+  sofab.InlineFloat64Array? onFp64Array(int id, int count) => null;
+  @override
+  sofab.InlineFloat32Array? onFp32Array(int id, int count) => null;
 }
 
 sofab.DecodeStatus _feedInChunks(

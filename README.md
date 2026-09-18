@@ -59,7 +59,7 @@ The public surface lives under the fixed `sofab` namespace; import it aliased.
 |-------------|--------------------------------|
 | Streaming output | `Encoder` writes into a fixed `Uint8List` and invokes a `FlushCallback` when it fills; the buffer can be smaller than the message and swapped mid-stream (`installBuffer`). `Encoder.overBuffer` takes the same caller buffer **without** a sink: it holds the whole message (`written`) or reports `BufferFull`. |
 | Streaming input | `Decoder.feed()` accepts any-size chunks; an explicit byte-state machine resumes across boundaries and returns the three-valued `DecodeStatus` — no finalize step. |
-| Zero unnecessary copies | Flush hands out a `Uint8List.sublistView` of the live buffer; a payload is written once, straight into the destination its reader supplied — including a string transcoded on encode, which goes into the output buffer rather than through one of its own; an `fp32`/`fp64` array is decoded *in* the typed list it is delivered as. |
+| Zero unnecessary copies | Flush hands out a `Uint8List.sublistView` of the live buffer; a payload is written once, straight into the destination its reader supplied — an `Inline…` wrapper the visitor hands back at the field header — and a string transcoded on encode goes into the output buffer rather than through one of its own. Nothing is delivered afterwards: the destination already holds the field. |
 | No allocation on the hot path | Header/varint/array writes go straight to the caller's buffer; every decoded payload goes straight into the caller's destination; `Encoder.reset()` reuses buffer + encoder across messages; a decoded `fp32`/`fp64` scalar stages in a reusable per-decoder slot, and an open sequence costs no object at all. |
 | Small, predictable footprint | Codec state is one nesting-depth run (`MAX_DEPTH` by default; an `Encoder` takes a smaller `depth:`) plus an 8-byte landing zone per side, sized in the constructor and never grown; no reflection, no codegen at runtime. |
 | Type safety | Typed `write*` methods and a typed `MessageVisitor`; `SofabException` carries a `SofabError` code, `Decoder` reports `DecodeStatus`. |
@@ -89,22 +89,56 @@ final bytes = sofab.Encoder.encodeToBytes((e) {
 
 ```dart
 class MyVisitor extends sofab.MessageVisitor {
+  int magic = 0;
+  final name = sofab.InlineString(32);         // sized once, to the schema max
+  final samples = sofab.InlineInt64Array(64);
+
   @override
-  void onUnsigned(int id, int value) => print('u[$id] = $value');
+  void onUnsigned(int id, int value) {        // a scalar arrives as its value
+    if (id == 1) magic = value;
+  }
+
   @override
-  void onString(int id, String value) => print('s[$id] = $value');
+  sofab.InlineString? onString(int id, int length) {
+    if (id != 5) return null;                 // not ours: skipped, never read
+    if (length > 32) invalidate();            // schema maxlen → INVALID
+    return name;                              // decoded in place
+  }
+
+  @override
+  sofab.InlineInt64Array? onUnsignedArray(int id, int count) {
+    if (id != 6) return null;
+    if (count > 64) invalidate();             // schema count → INVALID
+    return samples;
+  }
 }
 
-final status = sofab.Decoder.decode(bytes, MyVisitor());
+final v = MyVisitor();
+final status = sofab.Decoder.decode(bytes, v);
 assert(status == sofab.DecodeStatus.complete);
+print('${v.name} ${v.samples.toList()}');     // 'sofab' [10, 20, 30, 40]
 ```
+
+**One call per field, made at its header.** A scalar arrives as its value. A
+`string`, `blob` or array is announced with its byte length or element count,
+and the visitor answers with the destination to decode it into — an
+`InlineString`, `InlineBytes`, `InlineInt64Array`, `InlineFloat32Array` or
+`InlineFloat64Array`: storage of a fixed capacity plus a `length`, the Dart
+counterpart of corelib-c-cpp's `InlineVector`/`FixedString`/`FixedBytes` — or
+`null` to skip the field. The codec sets `length` right there and writes the
+payload into `storage`; **nothing is called when the field is whole**, because
+the object is complete when `decode`/`feed` reports `complete`. A sequence is
+entered through `onSequenceStart` (return a visitor, `this` for a flat one, or
+`null` to skip it). Every default is "not interested": scalars are ignored,
+everything else is skipped.
 
 Dart's only floating type is `double`, so an `fp32` **NaN** arrives as raw bits:
 `onFp32Bits(id, bits)` carries the 32-bit IEEE-754 pattern, and its default
 widens to `onFp32`. Re-emit those bits with `Encoder.writeFp32Bits` — widening
 quiets a signaling NaN, and the wire bytes must round-trip unchanged
-(CORELIB_PLAN §6.5). An `fp32` **array** needs nothing extra: it is delivered as
-a `Float32List` and `writeFp32Array` re-emits that list's bytes verbatim.
+(CORELIB_PLAN §6.5). An `fp32` **array** needs nothing extra: it is decoded into
+an `InlineFloat32Array`, whose `Float32List` storage holds the raw bits, and
+`writeFp32Array(id, a.storage, a.length)` re-emits them verbatim.
 
 ### Sequences: lazy framing
 
@@ -263,10 +297,7 @@ the chunk reader. See [`example/person.dart`](example/person.dart) for a
 complete, runnable illustration:
 
 ```dart
-final ada = Person()
-  ..name = 'Ada'
-  ..age = 36
-  ..tags = ['pioneer', 'mathematician'];
+final ada = Person().set('Ada', 36, ['pioneer', 'mathematician']);
 
 final bytes = ada.encode();                 // one-shot
 final back  = Person.decode(bytes);
@@ -283,38 +314,33 @@ final person = dec.value;                   // assembled incrementally
 
 #### What generated code builds on
 
-Four pieces of that layer live here rather than in every generated file — none
+These pieces of that layer live here rather than in every generated file — none
 of them knows a schema.
 
 | symbol | what it is for |
 |---|---|
-| `sofab.VisitorBase` | the visitor base a generated scope extends: an id the scope does not declare is *skipped*, not inspected, for strings (`onStringBytes`) and sub-sequences (`onSequenceStart`) alike |
-| `sofab.decodeUtf8Strict` | materializes a `string` payload, or `null` if it is not valid UTF-8 — one scan with an ASCII fast path, the decode-side twin of `encodeUtf8Strict` |
+| `sofab.InlineString`, `InlineBytes`, `InlineInt64Array`, `InlineFloat32Array`, `InlineFloat64Array` | the decode destinations: a field's storage, sized once to its schema maximum and reused for every message — `ensureCapacity` grows one for a schema-unbounded field, after the visitor's own cap check |
+| `sofab.StringSeq`, `BlobSeq`, `MessageSeq`, `NestedSeq`, `IntMatrixSeq`, `Float32MatrixSeq`, `Float64MatrixSeq` | the wrapper-array collectors: each element or row decoded straight into its slot, with the index and length bounds applied at the header |
 | `sofab.utf8Length` | the exact UTF-8 byte length of a `String`, without allocating the transcode buffer |
 | `sofab.elementsEqual` | pairwise list comparison, which is how a generated encoder asks whether a list field still equals its declared default (`==` on two Dart `List`s is identity) |
 
 ```dart
 // A generated scope: one string destination at id 1, everything else skipped.
-class _Scope extends sofab.VisitorBase {
-  String? name;
-  bool invalid = false;
+class _Scope extends sofab.MessageVisitor {
+  final name = sofab.InlineString(16);      // schema maxlen: 16
 
   @override
-  void onStringBytes(int id, Uint8List bytes) {
-    if (id != 1) return;                    // falls through to the base's skip
-    final s = sofab.decodeUtf8Strict(bytes);
-    if (s == null) {
-      invalid = true;                       // the consumer's sticky INVALID
-      return;
-    }
-    name = s;
+  sofab.InlineString? onString(int id, int length) {
+    if (id != 1) return null;               // not declared: skipped, never read
+    if (length > 16) invalidate();          // schema bound, at the header
+    return name;                            // the codec validates the UTF-8
   }
 }
 ```
 
-`MessageVisitor`'s own defaults are the opposite — read everything, descend
-every sequence. A payload a visitor does not bind is a skipped field, and a
-skipped field is never UTF-8-validated.
+A field no arm answers is skipped: its payload is stepped over by its length,
+never copied and never UTF-8-validated (CORELIB_PLAN §6.4), and no bound
+applies to it (§6.2.1).
 
 ## Memory handling
 
@@ -373,27 +399,27 @@ and both are caller-owned. The library owns neither, on either decode surface.
   exactly as on the streaming one. There is **no library-owned accumulator for
   a chunk-straddling field**: a `string` or `blob` split across `feed` calls is
   joined in *your* destination, one piece per call.
-- **Every decoded value lands in a destination you supply.** The decoder asks
-  for it at the header that announces the size — `onBytesDest(id, subtype,
-  total)` for a `string`/`blob`, `onArrayDest(id, kind, count)` for an array —
-  and writes into what you hand back. Returning a list shorter than announced,
-  or of the wrong element type, fails the decode with
-  `SofabException(invalidArgument, …)`: the decoder never grows what it was
-  given. Returning `null` declines the field, which is then walked like a
-  skipped one.
+- **Every decoded aggregate lands in a destination you supply.** The decoder
+  asks for it at the header that announces the size — `onString(id, length)`,
+  `onBlob(id, length)`, `onUnsignedArray(id, count)` and its three siblings —
+  sets the destination's `length` there, and writes the payload into its
+  `storage`. A destination whose capacity is short of what was announced fails
+  the decode with `SofabException(invalidArgument, …)`: the decoder never grows
+  what it was given. Returning `null` declines the field, which is then walked
+  like a skipped one — and that is every default, so a visitor pays only for
+  the fields it answers.
 
-  The `MessageVisitor` defaults allocate an exactly-sized destination per field
-  and forward it to `onString`, `onStringBytes`, `onBlob` and the four
-  whole-array callbacks, so a hand-written visitor needs none of this. That
-  allocation is **yours**, made inside a callback: override the two `…Dest`
-  hooks with storage you own — a record's own list, a pooled buffer — and the
-  decode allocates nothing at all.
+  A destination sized once to the schema maximum and reused for every message
+  makes the decode allocate **nothing** per message. One allocated inside a
+  callback is **yours** — a visitor's decision, after its own bound check —
+  never the codec's.
 - **Nothing outlives the callback.** What a callback receives is valid until it
   returns; a value you keep, you keep because the storage was yours to begin
   with. There is no payload-position getter and no "valid until the next feed"
-  value, on either surface. `onString` is the one value the library materializes
-  for you — transcoding to a Dart `String` always copies — and it is
-  unconditionally yours.
+  value, on either surface. Whether a destination holds its field is decided by
+  the outcome: once `decode`/`feed` reports `complete`, every destination it
+  bound is whole; after `incomplete` or `invalid`, their contents are
+  unspecified.
 - **The library's own state is sized once, in the constructor.** An `Encoder`
   holds a pending-sequence run as deep as its nesting bound (`MAX_DEPTH`
   entries unless the caller passes a smaller `depth:`) and an 8-byte float
@@ -412,7 +438,7 @@ and both are caller-owned. The library owns neither, on either decode surface.
   | `ByteData.sublistView` of the output buffer | once per buffer installation |
   | `String.codeUnits` | once per non-ASCII `writeString` |
   | `ByteData.sublistView` of a fed chunk | at most once per `feed`, and only for a chunk carrying integer-array elements |
-  | `Uint8List.sublistView` of an array destination | once per `fp32`/`fp64` array field |
+  | `Uint8List.view` of an `InlineFloat32Array`/`InlineFloat64Array`'s storage (`byteView`) | once per destination storage, kept by the destination — so never again for one reused across messages |
   | `ByteData.view` of the input buffer | once per `Decoder.decode` that reads an array |
 
   `bench/alloc_profile.dart` measures what is left, and
@@ -420,8 +446,9 @@ and both are caller-owned. The library owns neither, on either decode surface.
   the same field shape must cost the same.
 - **The collectors beside the codec are the generated layer's, and they
   allocate.** `StringSeq`, `BlobSeq`, `MessageSeq`, `NestedSeq`, `IntMatrixSeq`,
-  `DoubleMatrixSeq` and `BoolMatrixSeq` build a wrapper array's container as its
-  elements arrive — the one place where growing is right, because a wrapper
+  `Float32MatrixSeq` and `Float64MatrixSeq` build a wrapper array's container as
+  its elements arrive — growing the list up to an element's id, and an
+  element's storage only where it is short of the announced length — the one place where growing is right, because a wrapper
   array has no count on the wire and its length is *highest present id + 1*.
   They are helpers the generated layer reaches through the visitor, not part of
   the codec. Their growth is `List.add`'s, which doubles, so filling a gap of
@@ -436,38 +463,40 @@ and both are caller-owned. The library owns neither, on either decode surface.
   from generated code, which knows the schema and the target."* So there is no
   `DecoderLimits` and no `max_dyn_*` default constant here to fall back on. What
   the decoder guarantees is that you are told **in time**: the count or length
-  reaches you at the header, before a destination is asked for.
+  reaches you at the header, in the very call that asks for the destination,
+  before a payload byte is consumed.
 
   A cap and a schema bound are different statements — capacity vs. validity — and
   §6.2.1 forbids a cap on a field the schema already bounds. Stating both in one
-  hook, the cap as the *else* of the bound, is what makes "never both"
+  header call, the cap as the *else* of the bound, is what makes "never both"
   structural:
 
   ```dart
   @override
-  void onArrayBegin(int id, sofab.ArrayKind kind, int count) {
-    if (id == 3 && kind == sofab.ArrayKind.unsigned) {
-      if (count > 8) invalidate();               // schema count: 8 → INVALID
-    } else if (id == 9 && kind == sofab.ArrayKind.unsigned) {
-      if (count > maxDynArrayCount) limitExceeded();  // unbounded → policy
+  sofab.InlineInt64Array? onUnsignedArray(int id, int count) {
+    switch (id) {
+      case 3:                                    // schema count: 8
+        if (count > 8) invalidate();             //   → INVALID
+        return readings;                         //   capacity 8, reused
+      case 9:                                    // schema-unbounded
+        if (count > maxDynArrayCount) limitExceeded();  // → policy
+        return samples..ensureCapacity(count);   //   grown by YOU, capped
     }
+    return null;                                 // anything else: skipped
   }
 
   @override
-  void onFixlenHeader(int id, int subtype, int length) {
-    if (id == 1 && subtype == sofab.FixlenType.blob) {
-      if (length > 64) invalidate();             // schema maxlen: 64
-    } else if (id == 9 && subtype == sofab.FixlenType.blob) {
-      if (length > maxDynBlobLen) limitExceeded();
-    }
+  sofab.InlineBytes? onBlob(int id, int length) {
+    if (id != 1) return null;
+    if (length > 64) invalidate();               // schema maxlen: 64
+    return key;
   }
   ```
 
-  `kind`/`subtype` are what the **wire** declares — an arm gated on the declared
-  one is what keeps a MESSAGE_SPEC §7.3 mismatch out of both statements, since
-  such a field is skipped and *"a skipped field is never capped"* (§6.2.1). A
-  field with no arm at all is bounded more tightly still: return `null` from
-  [`onArrayDest`]/[`onBytesDest`] and nothing is allocated for it whatsoever.
+  Which call fires is what the **wire** declares — a signed array arrives on
+  `onSignedArray`, an fp64 array on `onFp64Array` — so a MESSAGE_SPEC §7.3
+  mismatch reaches a call the schema has no arm in, answers `null`, and is
+  skipped: *"a skipped field is never capped"* (§6.2.1).
 
   A wrapper array has no count header — its length is *highest present id + 1* —
   so there the index **is** the length, and the collectors take both numbers as
@@ -556,8 +585,8 @@ dart run bench/alloc_profile.dart
     instructions, not as MB/s — read it in `run_callgrind.sh`. There is no
     `blob 1MB passthrough` row: this port implements no pass-through, so every
     `string`/`blob` run goes through the output buffer.
-  - **`decode: composite skip-all`** refuses every field at header time
-    (`shouldRead` → `false`, `onSequenceStart` → `null`). Its distance from
+  - **`decode: composite skip-all`** answers every header call with `null`
+    and ignores every scalar — the `MessageVisitor` defaults. Its distance from
     `decode: composite` is what not-decoding is worth.
 - **`perf`** — per-op cost of serialize/deserialize. The Dart VM exposes no
   hardware cycle counter, so `cycles/op` is reported as unavailable and CPU

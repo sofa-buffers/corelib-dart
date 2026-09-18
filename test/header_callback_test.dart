@@ -1,5 +1,3 @@
-import 'dart:typed_data';
-
 import 'package:sofa_buffers_corelib/sofa_buffers_corelib.dart' as sofab;
 import 'package:test/test.dart';
 
@@ -7,10 +5,11 @@ import 'vector_support.dart';
 
 /// Header-callback tests for MESSAGE_SPEC §5.2 anti-folding (Crucible F-0032).
 ///
-/// The corelib exposes [sofab.MessageVisitor.onArrayBegin] /
-/// [sofab.MessageVisitor.onFixlenHeader], fired at header time — *before* the
+/// Every aggregate's one visitor call — [sofab.MessageVisitor.onUnsignedArray]
+/// and its siblings, [sofab.MessageVisitor.onString],
+/// [sofab.MessageVisitor.onBlob] — is made at header time: *before* the
 /// element / payload and *before* the truncation check. (For a fixlen *array*
-/// the hook waits for the `fixlen_word` as well, so it can name the element kind;
+/// the call waits for the `fixlen_word` as well, so it names the element kind;
 /// that ordering is CORELIB_PLAN §4.8 and is covered by
 /// `fixlen_array_subtype_test.dart`.) A schema-bound visitor (as the generator emits) rejects
 /// `count > N` / `length > maxlen` there, so the resulting INVALID **dominates**
@@ -20,15 +19,14 @@ import 'vector_support.dart';
 /// here by [_verdict].
 void main() {
   // A stand-in for a generated, schema-bound visitor: rejects over-count arrays
-  // and over-maxlen strings/blobs at the header, and records call order so we can
-  // assert the header fires before the assembled-value callback.
+  // and over-maxlen strings/blobs at the header, and records every call.
   //
   // arrayMax/strMax: id -> schema bound N / maxlen L.
   SchemaVisitor mk({
     Map<int, int> arrayMax = const {},
     Map<int, int> strMax = const {},
     Set<int> skipIds = const {},
-    Map<int, sofab.ArrayKind> declared = const {},
+    Map<int, String> declared = const {},
   }) => SchemaVisitor(
     arrayMax: arrayMax,
     strMax: strMax,
@@ -119,17 +117,20 @@ void main() {
     },
   );
 
-  test('onArrayBegin fires before the assembled-array callback', () {
-    final v = mk(arrayMax: {15: 99});
-    sofab.Decoder.decode(
-      hexToBytes(
-        '7b04'
-        '01020304',
-      ),
-      v,
-    );
-    expect(v.order, ['begin:15:unsigned:4', 'arr:15']);
-  });
+  test(
+    'an array makes exactly one call, at its header, with kind and count',
+    () {
+      final v = mk(arrayMax: {15: 99});
+      sofab.Decoder.decode(
+        hexToBytes(
+          '7b04'
+          '01020304',
+        ),
+        v,
+      );
+      expect(v.order, ['begin:15:unsigned:4']);
+    },
+  );
 
   group('string over-maxlen (id 5 = header 0x2a, subtype 2)', () {
     // maxlen 3. length word for a string of L bytes = (L<<3)|2.
@@ -171,7 +172,7 @@ void main() {
     });
   });
 
-  test('onFixlenHeader carries the exact subtype and length', () {
+  test('a string makes exactly one call, carrying its exact length', () {
     final v = mk(strMax: {5: 99});
     sofab.Decoder.decode(
       hexToBytes(
@@ -180,7 +181,7 @@ void main() {
       ),
       v,
     ); // string, len 3
-    expect(v.order, ['fix:5:${sofab.FixlenType.string}:3', 'str:5']);
+    expect(v.order, ['fix:5:${sofab.FixlenType.string}:3']);
   });
 
   group('fixlen (fp32) array over-count (id 7 = header 0x3d, subtype 0)', () {
@@ -213,9 +214,9 @@ void main() {
     });
   });
 
-  test('skipped over-count field never fires the header hook', () {
-    // id 15 skipped: shouldRead=false, so no onArrayBegin, no INVALID — a skipped
-    // subtree is not schema-validated (CORELIB_PLAN §6.4).
+  test('a skipped over-count field is never bounded', () {
+    // id 15 skipped: its header call answers `null` before any bound, so no
+    // INVALID — a skipped field is not schema-validated (CORELIB_PLAN §6.4).
     final v = mk(arrayMax: {15: 4}, skipIds: {15});
     final st = sofab.Decoder.decode(
       hexToBytes(
@@ -241,44 +242,53 @@ class SchemaVisitor extends sofab.MessageVisitor {
     this.declared = const {},
   });
   final Map<int, int> arrayMax; // id -> schema element-count bound N
-  final Map<int, sofab.ArrayKind> declared; // id -> declared element kind
+  final Map<int, String> declared; // id -> declared element kind
   final Map<int, int> strMax; // id -> schema byte-length bound (maxlen)
   final Set<int> skipIds;
   bool inv = false; // sticky INVALID flag, as the generated visitor keeps
   final List<String> order = <String>[];
 
-  @override
-  bool shouldRead(int id, int type) => !skipIds.contains(id);
-
-  @override
-  void onArrayBegin(int id, sofab.ArrayKind kind, int count) {
-    order.add('begin:$id:${kind.name}:$count');
-    // Model the generated guard: the schema bound applies only to a header whose
-    // element kind matches the declared one (CORELIB_PLAN §4.8 step 3/4). `null`
-    // in [declared] means "any kind", which is what the pre-F-0042 tests assume.
+  // Model the generated guard: the schema bound applies only to a header whose
+  // element kind matches the declared one (CORELIB_PLAN §4.8 step 3/4). `null`
+  // in [declared] means "any kind", which is what the pre-F-0042 tests assume.
+  bool _array(int id, String kind, int count) {
+    if (skipIds.contains(id)) return false;
+    order.add('begin:$id:$kind:$count');
     final want = declared[id];
-    if (want != null && want != kind) return; // §7.3 skip — no bound applies
+    if (want != null && want != kind) return true; // §7.3 skip — no bound
     final n = arrayMax[id];
     if (n != null && count > n) inv = true;
+    return true;
   }
 
-  @override
-  void onFixlenHeader(int id, int subtype, int length) {
+  bool _fixlen(int id, int subtype, int length) {
+    if (skipIds.contains(id)) return false;
     order.add('fix:$id:$subtype:$length');
     final l = strMax[id];
     if (l != null && length > l) inv = true;
+    return true;
   }
 
   @override
-  void onUnsignedArray(int id, Int64List values) => order.add('arr:$id');
+  sofab.InlineInt64Array? onUnsignedArray(int id, int count) =>
+      _array(id, 'unsigned', count) ? sofab.InlineInt64Array(count) : null;
   @override
-  void onSignedArray(int id, Int64List values) => order.add('arr:$id');
+  sofab.InlineInt64Array? onSignedArray(int id, int count) =>
+      _array(id, 'signed', count) ? sofab.InlineInt64Array(count) : null;
   @override
-  void onFp32Array(int id, Float32List values) => order.add('arr:$id');
+  sofab.InlineFloat32Array? onFp32Array(int id, int count) =>
+      _array(id, 'fp32', count) ? sofab.InlineFloat32Array(count) : null;
   @override
-  void onFp64Array(int id, Float64List values) => order.add('arr:$id');
+  sofab.InlineFloat64Array? onFp64Array(int id, int count) =>
+      _array(id, 'fp64', count) ? sofab.InlineFloat64Array(count) : null;
   @override
-  void onString(int id, String value) => order.add('str:$id');
+  sofab.InlineString? onString(int id, int length) =>
+      _fixlen(id, sofab.FixlenType.string, length)
+      ? sofab.InlineString(length)
+      : null;
   @override
-  void onBlob(int id, Uint8List value) => order.add('blb:$id');
+  sofab.InlineBytes? onBlob(int id, int length) =>
+      _fixlen(id, sofab.FixlenType.blob, length)
+      ? sofab.InlineBytes(length)
+      : null;
 }

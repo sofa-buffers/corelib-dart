@@ -40,9 +40,9 @@ import 'vector_support.dart';
 ///
 /// Neither ceiling is the codec's here, exactly as in `schema_bound_limit_test`:
 /// both are stated by [_Ceiling] below, standing in for what the generator
-/// emits, in the header hooks the decoder already calls before it asks for
-/// storage — [sofab.MessageVisitor.onFixlenHeader] for a `string`/`blob` length,
-/// [sofab.MessageVisitor.onArrayBegin] for an array count.
+/// emits, in the header call that asks for the field's storage —
+/// [sofab.MessageVisitor.onString]/[sofab.MessageVisitor.onBlob] for a length,
+/// [sofab.MessageVisitor.onUnsignedArray] and its siblings for a count.
 void main() {
   final root =
       decodeVectorJson(File('assets/test_vectors.json').readAsStringSync())
@@ -283,8 +283,8 @@ sofab.DecodeStatus _outcome(String name) => switch (name) {
 /// MESSAGE_SPEC §7.1) or a §6.2.1 receiver cap (breach →
 /// [sofab.MessageVisitor.limitExceeded]) — never both on the same field, which
 /// is what the two constructor shapes make structural rather than a rule someone
-/// has to remember. Both statements are made in the header hook, which fires at
-/// the length/count word, before storage is asked for and before truncation is
+/// has to remember. Both statements are made in the header call, which is made
+/// at the length/count word, before storage is chosen and before truncation is
 /// known.
 class _Ceiling extends sofab.MessageVisitor {
   _Ceiling(
@@ -309,46 +309,61 @@ class _Ceiling extends sofab.MessageVisitor {
   /// verdict.
   int? headerValue;
 
-  @override
-  void onFixlenHeader(int id, int subtype, int length) {
+  /// The ceilings, applied in the header call before any storage is chosen.
+  void _judge(int id, int n, int cap) {
     if (id != fieldId) return;
-    headerValue = length;
+    headerValue = n;
     if (schemaMaxlen >= 0) {
-      if (length > schemaMaxlen) invalidate();
+      if (n > schemaMaxlen) invalidate();
       return;
     }
-    if (subtype == sofab.FixlenType.string) {
-      if (length > maxStringLen) limitExceeded();
-    } else if (subtype == sofab.FixlenType.blob) {
-      if (length > maxBlobLen) limitExceeded();
-    }
-  }
-
-  @override
-  void onArrayBegin(int id, sofab.ArrayKind kind, int count) {
-    if (id != fieldId) return;
-    headerValue = count;
-    if (schemaMaxlen >= 0) {
-      if (count > schemaMaxlen) invalidate();
-      return;
-    }
-    if (count > maxArrayCount) limitExceeded();
+    if (n > cap) limitExceeded();
   }
 
   /// Storage for anything this block could actually deliver, and a decline above
-  /// that. Generated code would hand over the caller's own list here; the
+  /// that. Generated code would hand over the caller's own storage here; the
   /// difference matters only for the amplification case, whose header claims a
-  /// gigabyte that no message in the block carries — and this hook fires *after*
-  /// the ceiling above, so declining changes no verdict, only what an
+  /// gigabyte that no message in the block carries — and the decline comes
+  /// *after* the ceiling above, so it changes no verdict, only what an
   /// implementation whose ceiling is momentarily broken (the failing-first
   /// proof) is asked to allocate.
   static const int _willingToHold = 1 << 20;
 
-  @override
-  Uint8List? onBytesDest(int id, int subtype, int total) =>
-      total > _willingToHold ? null : super.onBytesDest(id, subtype, total);
+  bool _hold(int n) => n <= _willingToHold;
 
   @override
-  TypedData? onArrayDest(int id, sofab.ArrayKind kind, int count) =>
-      count > _willingToHold ? null : super.onArrayDest(id, kind, count);
+  sofab.InlineString? onString(int id, int length) {
+    _judge(id, length, maxStringLen);
+    return _hold(length) ? sofab.InlineString(length) : null;
+  }
+
+  @override
+  sofab.InlineBytes? onBlob(int id, int length) {
+    _judge(id, length, maxBlobLen);
+    return _hold(length) ? sofab.InlineBytes(length) : null;
+  }
+
+  @override
+  sofab.InlineInt64Array? onUnsignedArray(int id, int count) {
+    _judge(id, count, maxArrayCount);
+    return _hold(count) ? sofab.InlineInt64Array(count) : null;
+  }
+
+  @override
+  sofab.InlineInt64Array? onSignedArray(int id, int count) {
+    _judge(id, count, maxArrayCount);
+    return _hold(count) ? sofab.InlineInt64Array(count) : null;
+  }
+
+  @override
+  sofab.InlineFloat32Array? onFp32Array(int id, int count) {
+    _judge(id, count, maxArrayCount);
+    return _hold(count) ? sofab.InlineFloat32Array(count) : null;
+  }
+
+  @override
+  sofab.InlineFloat64Array? onFp64Array(int id, int count) {
+    _judge(id, count, maxArrayCount);
+    return _hold(count) ? sofab.InlineFloat64Array(count) : null;
+  }
 }

@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import 'inline.dart' show InlineBytes, InlineInt64Array, InlineString;
 import 'utf8.dart';
 import 'wire.dart';
 
@@ -733,23 +734,57 @@ class Encoder {
     }
   }
 
-  /// Writes an opaque blob (fixlen subtype blob, CORELIB_PLAN §4.6).
-  void writeBlob(int id, Uint8List value) {
-    _writeHeaderAndVarint(
-      id,
-      WireType.fixlen,
-      (value.length << 3) | FixlenType.blob,
-    );
-    _writeRaw(value, 0, value.length);
+  /// Writes an opaque blob (fixlen subtype blob, CORELIB_PLAN §4.6): the first
+  /// [length] bytes of [value], all of them when omitted — so an
+  /// [InlineBytes]' `storage` and `length` go out as they are, uncopied.
+  void writeBlob(int id, Uint8List value, [int? length]) {
+    final n = _countOf(length, value.length);
+    _writeHeaderAndVarint(id, WireType.fixlen, (n << 3) | FixlenType.blob);
+    _writeRaw(value, 0, n);
+  }
+
+  /// Writes a `string` field from its **UTF-8 bytes** — the first [length] of
+  /// [utf8], all of them when omitted — so an [InlineString]'s `storage` and
+  /// `length` go out as they are, uncopied and untranscoded.
+  ///
+  /// The bytes are validated first (CORELIB_PLAN §6.4): a string the encoder
+  /// emits is valid UTF-8 whichever way it was handed over, and invalid bytes
+  /// are refused with [SofabError.invalidArgument] before anything is written.
+  void writeStringUtf8(int id, Uint8List utf8, [int? length]) {
+    final n = _countOf(length, utf8.length);
+    if (!utf8Valid(utf8, 0, n)) {
+      throw const SofabException(
+        SofabError.invalidArgument,
+        'string bytes are not valid UTF-8',
+      );
+    }
+    _writeHeaderAndVarint(id, WireType.fixlen, (n << 3) | FixlenType.string);
+    _writeRaw(utf8, 0, n);
+  }
+
+  /// The element count a writer takes from its optional argument: [count] when
+  /// given, else the whole list. A count past the list is a mistake in the call
+  /// (§6.3), refused before anything is written.
+  static int _countOf(int? count, int have) {
+    if (count == null) return have;
+    if (count < 0 || count > have) {
+      throw SofabException(
+        SofabError.invalidArgument,
+        'count $count out of range 0..$have',
+      );
+    }
+    return count;
   }
 
   // ---- arrays ------------------------------------------------------------
 
-  /// Writes an array of unsigned integers (CORELIB_PLAN §4.7). The declared
-  /// element width (u8..u64) is an API concern only; the wire carries varints.
-  void writeUnsignedArray(int id, List<int> values) {
+  /// Writes an array of unsigned integers (CORELIB_PLAN §4.7) — the first
+  /// [count] of [values], all of them when omitted, so an [InlineInt64Array]'s
+  /// `storage` and `length` go out as they are. The declared element width
+  /// (u8..u64) is an API concern only; the wire carries varints.
+  void writeUnsignedArray(int id, List<int> values, [int? count]) {
     _writeHeader(id, WireType.arrayUnsigned);
-    final n = values.length;
+    final n = _countOf(count, values.length);
     _writeVarint(n);
     var p = _pos;
     // Bulk fast path: one capacity check for the whole array, then a word-wise
@@ -778,10 +813,11 @@ class Encoder {
     }
   }
 
-  /// Writes an array of signed integers via zig-zag (CORELIB_PLAN §4.7).
-  void writeSignedArray(int id, List<int> values) {
+  /// Writes an array of signed integers via zig-zag (CORELIB_PLAN §4.7) — the
+  /// first [count] of [values], all of them when omitted.
+  void writeSignedArray(int id, List<int> values, [int? count]) {
     _writeHeader(id, WireType.arraySigned);
-    final n = values.length;
+    final n = _countOf(count, values.length);
     _writeVarint(n);
     var p = _pos;
     final buf = _buf;
@@ -807,13 +843,14 @@ class Encoder {
     }
   }
 
-  /// Writes an array of fp32 values (CORELIB_PLAN §4.8) — a single shared
-  /// `fixlen_word`, then `count × 4` little-endian bytes. The word is present
+  /// Writes an array of fp32 values (CORELIB_PLAN §4.8) — the first [count] of
+  /// [values], all of them when omitted: a single shared `fixlen_word`, then
+  /// `count × 4` little-endian bytes. The word is present
   /// even when empty so an empty fp32 array stays distinct from an empty fp64
   /// array on the wire.
-  void writeFp32Array(int id, List<double> values) {
+  void writeFp32Array(int id, List<double> values, [int? count]) {
     _writeHeader(id, WireType.arrayFixlen);
-    final n = values.length;
+    final n = _countOf(count, values.length);
     _writeVarint(n);
     _writeVarint((4 << 3) | FixlenType.fp32);
     // Bit-exact fast path: a Float32List already holds the raw 32-bit elements,
@@ -839,10 +876,11 @@ class Encoder {
     }
   }
 
-  /// Writes an array of fp64 values (CORELIB_PLAN §4.8).
-  void writeFp64Array(int id, List<double> values) {
+  /// Writes an array of fp64 values (CORELIB_PLAN §4.8) — the first [count] of
+  /// [values], all of them when omitted.
+  void writeFp64Array(int id, List<double> values, [int? count]) {
     _writeHeader(id, WireType.arrayFixlen);
-    final n = values.length;
+    final n = _countOf(count, values.length);
     _writeVarint(n);
     _writeVarint((8 << 3) | FixlenType.fp64);
     var p = _pos;

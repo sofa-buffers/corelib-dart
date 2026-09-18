@@ -16,16 +16,24 @@
 // `beginSequenceLazy`, …) is corelib API (§6) and keeps its own names.
 //
 // Schema (conceptually):
-//   message Person { string name = 0; u32 age = 1; array<string> tags = 2; }
+//   message Person {
+//     string(maxlen: 64) name = 0;
+//     u32 age = 1;
+//     array<string(maxlen: 32), count: 8> tags = 2;
+//   }
+//
+// Every bounded aggregate is an `Inline…` destination sized once, to its schema
+// maximum: decoding writes straight into it — no copy, no allocation per
+// message (CORELIB_PLAN §6.6.3) — and `length` says how much of it is in use.
 
 import 'dart:typed_data';
 
 import 'package:sofa_buffers_corelib/sofa_buffers_corelib.dart' as sofab;
 
 class Person {
-  String name = '';
+  final sofab.InlineString name = sofab.InlineString(64);
   int age = 0;
-  List<String> tags = <String>[];
+  final List<sofab.InlineString> tags = <sofab.InlineString>[];
 
   static const int _idName = 0;
   static const int _idAge = 1;
@@ -43,7 +51,9 @@ class Person {
   /// reconstructs exactly that, which is why omitting is value-preserving.
   void serialize(sofab.Encoder enc) {
     // Leaf fields: the plain ≠-default test.
-    if (name != '') enc.writeString(_idName, name);
+    if (name.length != 0) {
+      enc.writeStringUtf8(_idName, name.storage, name.length);
+    }
     if (age != 0) enc.writeUnsigned(_idAge, age);
     // array<string> lowers to a wrapper sequence: element id = array index
     // (MESSAGE_SPEC §5.1). A sequence-typed field is no exception to the rule —
@@ -60,7 +70,8 @@ class Person {
       // with `endSequenceKeep`, because element presence is what carries the
       // array's length (highest present id + 1) and dropping an all-default
       // element would change that length, not just the bytes.
-      if (tags[i] != '') enc.writeString(i, tags[i]);
+      final t = tags[i];
+      if (t.length != 0) enc.writeStringUtf8(i, t.storage, t.length);
     }
     enc.endSequence();
   }
@@ -100,6 +111,16 @@ class Person {
 
   @override
   String toString() => 'Person(name: $name, age: $age, tags: $tags)';
+
+  /// Test/demo helper: sets the fields from plain Dart values.
+  Person set(String name, int age, List<String> tags) {
+    this.name.assignString(name);
+    this.age = age;
+    this.tags
+      ..clear()
+      ..addAll(tags.map(sofab.InlineString.of));
+    return this;
+  }
 }
 
 /// The generated streaming decoder: feed it arbitrarily small chunks; the
@@ -121,8 +142,10 @@ class _PersonVisitor extends sofab.MessageVisitor {
   final Person p;
 
   @override
-  void onString(int id, String value) {
-    if (id == Person._idName) p.name = value;
+  sofab.InlineString? onString(int id, int length) {
+    if (id != Person._idName) return null; // not ours: skipped, never read
+    if (length > 64) invalidate(); // schema `maxlen` (MESSAGE_SPEC §7.1)
+    return p.name; // decoded in place: `length` and bytes land in p.name
   }
 
   @override
@@ -132,38 +155,26 @@ class _PersonVisitor extends sofab.MessageVisitor {
 
   @override
   sofab.MessageVisitor? onSequenceStart(int id) {
-    if (id == Person._idTags) return _TagsVisitor(p.tags);
+    // Element id == array index (MESSAGE_SPEC §5.1). The encoder omits an
+    // element equal to its default, so ids arrive with gaps; the collector
+    // restores each missing one as an empty string, bounds the index by the
+    // schema `count` and each element by its `maxlen`.
+    if (id == Person._idTags) {
+      p.tags.clear(); // an array field is replaced whole, never merged (§7.4)
+      return sofab.StringSeq(p.tags, 8, 32, rcap: 0, relemMax: 0);
+    }
     return null; // skip anything unknown
   }
 }
 
-class _TagsVisitor extends sofab.MessageVisitor {
-  _TagsVisitor(this.tags);
-  final List<String> tags;
-
-  @override
-  void onString(int id, String value) {
-    // Element id == array index (MESSAGE_SPEC §5.1). The encoder omits an
-    // element equal to its default, so ids arrive with gaps; the decode side of
-    // the same rule is to restore each missing `dest[id]` from that default.
-    while (tags.length <= id) {
-      tags.add('');
-    }
-    tags[id] = value;
-  }
-}
-
 void main() {
-  final ada = Person()
-    ..name = 'Ada'
-    ..age = 36
-    ..tags = ['pioneer', 'mathematician'];
+  final ada = Person().set('Ada', 36, ['pioneer', 'mathematician']);
 
   // --- one-shot ---
   final bytes = ada.encode();
   final back = Person.decode(bytes);
   print('one-shot : $back  (${bytes.length} bytes)');
-  assert(back.name == 'Ada' && back.age == 36 && back.tags.length == 2);
+  assert('${back.name}' == 'Ada' && back.age == 36 && back.tags.length == 2);
 
   // --- streaming out (tiny buffer) + streaming in (1 byte at a time) ---
   // No chunked convenience method exists, and none is wanted: build the encoder
@@ -183,7 +194,7 @@ void main() {
   }
   print('streamed : ${dec.value}  (status: ${status.name})');
   assert(status == sofab.DecodeStatus.complete);
-  assert(dec.value.tags[1] == 'mathematician');
+  assert('${dec.value.tags[1]}' == 'mathematician');
 
   // --- the sparse rule, taken to its conclusion ---
   // Every field at its default → every field omitted → the empty byte string
@@ -193,13 +204,13 @@ void main() {
   print('all-default: ${empty.length} bytes  → ${Person.decode(empty)}');
   assert(empty.isEmpty);
   final blank = Person.decode(empty);
-  assert(blank.name == '' && blank.age == 0 && blank.tags.isEmpty);
+  assert(blank.name.length == 0 && blank.age == 0 && blank.tags.isEmpty);
 
   // A default-valued element is omitted too, so it leaves an id gap and a
   // trailing default element collapses: ['x', ''] encodes exactly like ['x'],
   // and round-trips losslessly against a default-initialised destination.
-  final gapped = (Person()..tags = ['', 'b', '']).encode();
-  assert(_hex(gapped) == _hex((Person()..tags = ['', 'b']).encode()));
+  final gapped = Person().set('', 0, ['', 'b', '']).encode();
+  assert(_hex(gapped) == _hex(Person().set('', 0, ['', 'b']).encode()));
   assert(Person.decode(gapped).tags.join(',') == ',b');
   print('OK — one-shot and streaming produce identical bytes and objects.');
 }

@@ -1,4 +1,3 @@
-import 'dart:convert' show utf8;
 import 'dart:typed_data';
 
 import 'package:sofa_buffers_corelib/sofa_buffers_corelib.dart' as sofab;
@@ -12,12 +11,12 @@ import 'package:test/test.dart';
 /// because the header's wire type/subtype contradicts the schema
 /// (MESSAGE_SPEC §7.3, which routes to the same skip).
 ///
-/// The corelib half of the fix is [sofab.MessageVisitor.onStringBytes]: the
-/// decoder hands the **raw wire bytes** to the destination instead of
-/// validating and transcoding them itself, because a Dart `String` cannot carry
-/// invalid bytes without the lossy U+FFFD substitution §6.4 forbids outright.
-/// The schema half lives in generated code, which resolves the destination
-/// first and validates only inside a matched arm.
+/// The corelib validates a string only where it writes one: into the
+/// destination a header call ([sofab.MessageVisitor.onString]) returned. A
+/// field answered with `null` — an id the schema does not declare, or a slot
+/// whose declared type is not a string — is a length jump whose bytes are never
+/// inspected. The schema half lives in generated code, which resolves the
+/// destination first and answers `null` for anything it does not declare.
 ///
 /// So these tests drive the decoder through [_Probe] — a hand-written stand-in
 /// for that generated code, modelling Crucible's `probe` schema (declared ids
@@ -75,9 +74,9 @@ void main() {
       expectVerdict(
         '56 12 0a 8a 07',
         sofab.DecodeStatus.invalid,
-        // The sticky schema flag does not abort the walk — the sequence still
-        // closes normally; only the reported verdict changes.
-        events: ['SEQ:10', 'END'],
+        // The codec's verdict stops the walk at the payload: the sequence is
+        // never seen to close.
+        events: ['SEQ:10'],
       );
     });
 
@@ -158,7 +157,7 @@ void main() {
       expectVerdict(
         '56 12 12 c0 80 07',
         sofab.DecodeStatus.invalid,
-        events: ['SEQ:10', 'END'],
+        events: ['SEQ:10'],
       );
     });
 
@@ -167,7 +166,7 @@ void main() {
       expectVerdict(
         '56 12 1a ed a0 80 07',
         sofab.DecodeStatus.invalid,
-        events: ['SEQ:10', 'END'],
+        events: ['SEQ:10'],
       );
     });
 
@@ -180,7 +179,7 @@ void main() {
       expectVerdict(
         '56 12 22 f5 80 80 80 07',
         sofab.DecodeStatus.invalid,
-        events: ['SEQ:10', 'END'],
+        events: ['SEQ:10'],
       );
     });
 
@@ -202,7 +201,7 @@ void main() {
       expectVerdict(
         'c6 0c 02 0a 8a 07',
         sofab.DecodeStatus.invalid,
-        events: ['SEQ:200', 'END'],
+        events: ['SEQ:200'],
       );
       // ... and still materializes a valid one.
       expectVerdict(
@@ -224,7 +223,7 @@ void main() {
         expectVerdict(
           'c6 0c 2a 0a 8a 07',
           sofab.DecodeStatus.invalid,
-          events: ['SEQ:200', 'END'],
+          events: ['SEQ:200'],
         );
       },
     );
@@ -235,7 +234,7 @@ void main() {
       expectVerdict(
         'd6 0c 06 0a 0a 8a 07 07',
         sofab.DecodeStatus.invalid,
-        events: ['SEQ:202', 'SEQ:0', 'END', 'END'],
+        events: ['SEQ:202', 'SEQ:0'],
       );
       expectVerdict(
         'd6 0c 06 0a 0a 41 07 07',
@@ -262,20 +261,19 @@ void main() {
     });
   });
 
-  group('F-0038 · the default MessageVisitor stays always-strict', () {
-    // A hand-written visitor that does not override `onStringBytes` keeps the
-    // pre-fix behaviour exactly: the default hook validates strictly (never
-    // U+FFFD) and forwards the decoded value to `onString`.
-    test('materialized invalid UTF-8 → INVALID via the default hook', () {
+  group('F-0038 · a string that is read is always validated', () {
+    // The codec validates every string it writes into a destination, once the
+    // payload is whole (§6.4) — there is no raw-bytes route around it, because
+    // a read field is always validated (§6.7.2) — and never one it skips.
+    test('materialized invalid UTF-8 → INVALID', () {
       final v = _Recorder();
       expect(
         sofab.Decoder.decode(_b('56 12 0a 8a 07'), v),
         sofab.DecodeStatus.invalid,
       );
-      expect(v.strings, isEmpty);
     });
 
-    test('materialized valid UTF-8 still arrives at onString', () {
+    test('materialized valid UTF-8 lands in the destination', () {
       final v = _Recorder();
       expect(
         sofab.Decoder.decode(_b('56 12 0a 41 07'), v),
@@ -284,7 +282,7 @@ void main() {
       expect(v.strings, ['2:A']);
     });
 
-    test('shouldRead=false still skips without validating', () {
+    test('a null destination skips without validating', () {
       final v = _Recorder(skip: {2});
       expect(
         sofab.Decoder.decode(_b('56 12 0a 8a 07'), v),
@@ -299,33 +297,25 @@ void main() {
         sofab.Decoder.decode(_b('56 12 0a 8a 07'), v),
         sofab.DecodeStatus.invalid,
       );
+      final w = _Recorder();
       expect(
-        sofab.Decoder.decode(_b('56 12 0a 41 07'), v),
+        sofab.Decoder.decode(_b('56 12 0a 41 07'), w),
         sofab.DecodeStatus.complete,
       );
-      expect(v.strings, ['2:A']);
-    });
-  });
-
-  group('F-0038 · onStringBytes hands over the raw wire bytes', () {
-    test('an override sees the un-validated payload verbatim', () {
-      final v = _RawGrabber();
-      expect(
-        sofab.Decoder.decode(_b('56 12 12 ff fe 07'), v),
-        sofab.DecodeStatus.complete,
-      );
-      expect(v.seen, ['2:ff fe']);
+      expect(w.strings, ['2:A']);
     });
 
-    test('the same bytes arrive through the streaming decoder', () {
+    test('the verdict is the same on every chunk split', () {
       final bytes = _b('56 12 12 ff fe 07');
+      expect(
+        sofab.Decoder.decode(bytes, _Recorder()),
+        sofab.DecodeStatus.invalid,
+      );
       for (var split = 0; split <= bytes.length; split++) {
-        final v = _RawGrabber();
-        final d = sofab.Decoder(v);
+        final d = sofab.Decoder(_Recorder());
         d.feed(bytes.sublist(0, split));
         final st = d.feed(bytes.sublist(split));
-        expect(st, sofab.DecodeStatus.complete, reason: 'split $split');
-        expect(v.seen, ['2:ff fe'], reason: 'split $split');
+        expect(st, sofab.DecodeStatus.invalid, reason: 'split $split');
       }
     });
   });
@@ -387,50 +377,62 @@ sofab.DecodeStatus _verdict(sofab.DecodeStatus st, _Sink s) =>
 
 // ---------------------------------------------------------------------------
 // A stand-in for generated, schema-bound code over Crucible's `probe` schema.
-// The shape that matters: the destination switch comes FIRST, and `utf8Valid`
-// runs only inside a matched arm.
+// The shape that matters: the destination switch comes FIRST, and a string is
+// handed a destination — and so validated — only inside a matched arm.
 // ---------------------------------------------------------------------------
 
 class _Sink {
   bool inv = false;
-  final List<String> events = <String>[];
+  final List<Object> _events = <Object>[];
+
+  /// The events, a string's text read from its destination after the decode.
+  /// A string the decode rejected never became a value, so it is left out.
+  List<String> get events => [
+    for (final e in _events)
+      if (e is String) e else ?(e as String? Function())(),
+  ];
+
+  void add(Object e) => _events.add(e);
+
+  /// A destination for a declared string, recorded as `STR:id:text` once its
+  /// bytes are valid UTF-8.
+  sofab.InlineString string(int id, int length) {
+    final d = sofab.InlineString(length);
+    add(() => sofab.utf8Valid(d.storage, 0, d.length) ? 'STR:$id:$d' : null);
+    return d;
+  }
 }
 
 /// Root of `probe`: scalars 0-7, `nested` 10, `string_array` 200,
-/// `struct_array` 202. No `string` destination sits directly on the root.
+/// `struct_array` 202. No `string` destination sits directly on the root, so
+/// the default `onString` — `null`, skip — is exactly right.
 class _Probe extends sofab.MessageVisitor {
   _Probe(this.s);
   final _Sink s;
 
   @override
   void onUnsigned(int id, int value) {
-    if (id <= 7) s.events.add('U:$id:$value');
-  }
-
-  @override
-  void onStringBytes(int id, Uint8List bytes) {
-    // No declared `string` at the root — nothing to materialize, nothing to
-    // validate. An unknown id lands here and must fall straight through.
+    if (id <= 7) s.add('U:$id:$value');
   }
 
   @override
   sofab.MessageVisitor? onSequenceStart(int id) {
     switch (id) {
       case 10:
-        s.events.add('SEQ:10');
+        s.add('SEQ:10');
         return _Nested(s);
       case 200:
-        s.events.add('SEQ:200');
+        s.add('SEQ:200');
         return _StringSeq(s);
       case 202:
-        s.events.add('SEQ:202');
+        s.add('SEQ:202');
         return _StructSeq(s);
     }
     return null; // unknown wrapper: skip the whole sub-sequence
   }
 
   @override
-  void onSequenceEnd() => s.events.add('END');
+  void onSequenceEnd() => s.add('END');
 }
 
 /// `nested` (id 10): `str` is id 2, maxlen 32.
@@ -439,32 +441,16 @@ class _Nested extends sofab.MessageVisitor {
   final _Sink s;
 
   @override
-  void onFixlenHeader(int id, int subtype, int length) {
+  sofab.InlineString? onString(int id, int length) {
+    if (id != 2) return null;
     // The schema bound is checked at the LENGTH WORD, before a payload byte is
     // buffered, so INVALID dominates a truncated payload (§5.2 / §7.1).
-    if (id == 2 && subtype == sofab.FixlenType.string && length > 32) {
-      s.inv = true;
-    }
+    if (length > 32) invalidate();
+    return s.string(id, length);
   }
 
   @override
-  void onStringBytes(int id, Uint8List bytes) {
-    switch (id) {
-      case 2:
-        if (!sofab.utf8Valid(bytes)) {
-          s.inv = true;
-          return;
-        }
-        s.events.add('STR:2:${utf8.decode(bytes)}');
-        return;
-    }
-  }
-
-  @override
-  sofab.MessageVisitor? onSequenceStart(int id) => null;
-
-  @override
-  void onSequenceEnd() => s.events.add('END');
+  void onSequenceEnd() => s.add('END');
 }
 
 /// `string_array` (id 200): element id = index, count 5, maxlen 64.
@@ -478,49 +464,32 @@ class _StringSeq extends sofab.MessageVisitor {
   final _Sink s;
 
   @override
-  void onFixlenHeader(int id, int subtype, int length) {
-    if (subtype == sofab.FixlenType.string && length > 64) {
-      s.inv = true;
-    }
+  sofab.InlineString? onString(int id, int length) {
+    if (length > 64) invalidate();
+    return s.string(id, length);
   }
 
   @override
-  void onStringBytes(int id, Uint8List bytes) {
-    if (!sofab.utf8Valid(bytes)) {
-      s.inv = true;
-      return;
-    }
-    s.events.add('STR:$id:${utf8.decode(bytes)}');
-  }
-
-  @override
-  sofab.MessageVisitor? onSequenceStart(int id) => null;
-
-  @override
-  void onSequenceEnd() => s.events.add('END');
+  void onSequenceEnd() => s.add('END');
 }
 
 /// `struct_array` (id 202): each element is itself a sequence. A `string`
-/// arriving at an element slot is the §7.3 mistyped case — no destination.
+/// arriving at an element slot is the §7.3 mistyped case — no destination, so
+/// the default `onString` (`null`) skips it.
 class _StructSeq extends sofab.MessageVisitor {
   _StructSeq(this.s);
   final _Sink s;
 
   @override
-  void onStringBytes(int id, Uint8List bytes) {
-    // Element slots declare a struct, never a string: fall through untouched.
-  }
-
-  @override
   sofab.MessageVisitor? onSequenceStart(int id) {
     // Same wildcard as above: every element index opens the element scope, so
     // the `v` destination inside it binds regardless of the declared count.
-    s.events.add('SEQ:$id');
+    s.add('SEQ:$id');
     return _StructElem(s);
   }
 
   @override
-  void onSequenceEnd() => s.events.add('END');
+  void onSequenceEnd() => s.add('END');
 }
 
 /// A `struct_array` element: `k` is id 0 (u32), `v` is id 1 (string, maxlen 16).
@@ -530,34 +499,18 @@ class _StructElem extends sofab.MessageVisitor {
 
   @override
   void onUnsigned(int id, int value) {
-    if (id == 0) s.events.add('U:0:$value');
+    if (id == 0) s.add('U:0:$value');
   }
 
   @override
-  void onFixlenHeader(int id, int subtype, int length) {
-    if (id == 1 && subtype == sofab.FixlenType.string && length > 16) {
-      s.inv = true;
-    }
+  sofab.InlineString? onString(int id, int length) {
+    if (id != 1) return null;
+    if (length > 16) invalidate();
+    return s.string(id, length);
   }
 
   @override
-  void onStringBytes(int id, Uint8List bytes) {
-    switch (id) {
-      case 1:
-        if (!sofab.utf8Valid(bytes)) {
-          s.inv = true;
-          return;
-        }
-        s.events.add('STR:1:${utf8.decode(bytes)}');
-        return;
-    }
-  }
-
-  @override
-  sofab.MessageVisitor? onSequenceStart(int id) => null;
-
-  @override
-  void onSequenceEnd() => s.events.add('END');
+  void onSequenceEnd() => s.add('END');
 }
 
 // ---------------------------------------------------------------------------
@@ -567,20 +520,22 @@ class _StructElem extends sofab.MessageVisitor {
 class _Recorder extends sofab.MessageVisitor {
   _Recorder({this.skip = const <int>{}});
   final Set<int> skip;
-  final List<String> strings = <String>[];
+  final _dests = <(int, sofab.InlineString)>[];
+
+  /// `id:text` of every string read, taken from its destination after the
+  /// decode.
+  List<String> get strings => [for (final (id, d) in _dests) '$id:$d'];
 
   @override
-  bool shouldRead(int id, int type) => !skip.contains(id);
+  sofab.InlineString? onString(int id, int length) {
+    if (skip.contains(id)) return null;
+    final d = sofab.InlineString(length);
+    _dests.add((id, d));
+    return d;
+  }
 
   @override
-  void onString(int id, String value) => strings.add('$id:$value');
-}
-
-class _RawGrabber extends sofab.MessageVisitor {
-  final List<String> seen = <String>[];
-
-  @override
-  void onStringBytes(int id, Uint8List bytes) => seen.add('$id:${_hex(bytes)}');
+  sofab.MessageVisitor? onSequenceStart(int id) => this;
 }
 
 // ---------------------------------------------------------------------------

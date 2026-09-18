@@ -100,58 +100,67 @@ const Set<String> _containerClasses = {
 /// measuring its own allocation (§6.6.1 — the destination is the caller's).
 class _OwnDest extends sofab.MessageVisitor {
   _OwnDest(int bytesCap, int elemCap)
-    : _bytes = Uint8List(bytesCap),
-      _ints = Int64List(elemCap),
-      _f64 = Float64List(elemCap),
-      _f32 = Float32List(elemCap);
+    : _string = sofab.InlineString(bytesCap),
+      _blob = sofab.InlineBytes(bytesCap),
+      _ints = sofab.InlineInt64Array(elemCap),
+      _f64 = sofab.InlineFloat64Array(elemCap),
+      _f32 = sofab.InlineFloat32Array(elemCap);
 
-  final Uint8List _bytes;
-  final Int64List _ints;
-  final Float64List _f64;
-  final Float32List _f32;
+  final sofab.InlineString _string;
+  final sofab.InlineBytes _blob;
+  final sofab.InlineInt64Array _ints;
+  final sofab.InlineFloat64Array _f64;
+  final sofab.InlineFloat32Array _f32;
 
   /// This consumer's receiver caps (CORELIB_PLAN §6.2.1). The decoder holds
   /// none — *"the codec never invents a limit of its own"* — so a hostile count
-  /// or length is refused **here**, at the header the codec reports it on,
-  /// before any destination is asked for. This consumer's number is simply the
+  /// or length is refused **here**, in the header call the codec reports it
+  /// in, before any storage is chosen. This consumer's number is simply the
   /// storage it owns: it cannot take more than it allocated once, at
   /// construction, so its capacity IS its cap.
-  @override
-  void onArrayBegin(int id, sofab.ArrayKind kind, int count) {
-    if (count > _f64.length) limitExceeded();
-  }
-
-  @override
-  void onFixlenHeader(int id, int subtype, int length) {
-    if (length > _bytes.length) limitExceeded();
+  void _cap(int n, int capacity) {
+    if (n > capacity) limitExceeded();
+    seen += n;
   }
 
   /// Folded so nothing measured can be optimised away.
   int seen = 0;
 
   @override
-  Uint8List? onBytesDest(int id, int subtype, int total) => _bytes;
-
-  @override
-  void onBytesDone(int id, int subtype, Uint8List dest, int total) =>
-      seen += total;
-
-  @override
-  TypedData? onArrayDest(int id, sofab.ArrayKind kind, int count) {
-    switch (kind) {
-      case sofab.ArrayKind.unsigned:
-      case sofab.ArrayKind.signed:
-        return _ints;
-      case sofab.ArrayKind.fp32:
-        return _f32;
-      case sofab.ArrayKind.fp64:
-        return _f64;
-    }
+  sofab.InlineString? onString(int id, int length) {
+    _cap(length, _string.capacity);
+    return _string;
   }
 
   @override
-  void onArrayDone(int id, sofab.ArrayKind kind, TypedData dest, int count) =>
-      seen += count;
+  sofab.InlineBytes? onBlob(int id, int length) {
+    _cap(length, _blob.capacity);
+    return _blob;
+  }
+
+  @override
+  sofab.InlineInt64Array? onUnsignedArray(int id, int count) {
+    _cap(count, _ints.capacity);
+    return _ints;
+  }
+
+  @override
+  sofab.InlineInt64Array? onSignedArray(int id, int count) {
+    _cap(count, _ints.capacity);
+    return _ints;
+  }
+
+  @override
+  sofab.InlineFloat32Array? onFp32Array(int id, int count) {
+    _cap(count, _f32.capacity);
+    return _f32;
+  }
+
+  @override
+  sofab.InlineFloat64Array? onFp64Array(int id, int count) {
+    _cap(count, _f64.capacity);
+    return _f64;
+  }
 
   @override
   void onUnsigned(int id, int value) => seen++;
@@ -242,7 +251,7 @@ void _worker(SendPort out) {
 
   // The hostile row §6.6.4 asks for: seven bytes announcing ARRAY_MAX fp64
   // elements. It must cost what any other rejected header costs — the visitor
-  // refuses the count at [_OwnDest.onArrayBegin], before anything is sized.
+  // refuses the count in [_OwnDest.onFp64Array], before anything is sized.
   // A control that touches no SofaBuffers code at all: one `setRange` of the
   // large payload, which allocates nothing by construction. Whatever it reads
   // is what this measurement charges a row for *moving* that many bytes, and

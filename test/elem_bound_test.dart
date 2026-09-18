@@ -1,5 +1,3 @@
-import 'dart:typed_data';
-
 import 'package:sofa_buffers_corelib/sofa_buffers_corelib.dart' as sofab;
 import 'package:test/test.dart';
 
@@ -10,10 +8,10 @@ import 'vector_support.dart';
 /// MESSAGE_SPEC §7.1 makes an element outside its declared width invalid, and
 /// §5.2 makes INVALID dominate INCOMPLETE: such an element is established by its
 /// own bytes, so truncating the array behind it cannot downgrade the verdict.
-/// The whole-array callbacks cannot express that — a guard over the assembled
-/// `onSignedArray`/`onUnsignedArray` list only runs for an array that arrives —
-/// so the bound travels into the decoder as
-/// [sofab.MessageVisitor.onArrayElemBound] (generator#267, Crucible F-0043).
+/// A guard over the assembled list could not express that — it only runs for an
+/// array that arrives — so the bound travels into the decoder with the
+/// destination, as its [sofab.InlineInt64Array.range], and the decoder applies
+/// it as the elements go past (generator#267, Crucible F-0043).
 ///
 /// Every case here pairs with a control one step away, so what is pinned is the
 /// ORDERING, not a blanket reject.
@@ -88,12 +86,10 @@ void main() {
   });
 
   group('an array that COMPLETES is decided by the same bound', () {
-    // The hook's contract is "the decoder then applies the range as the
-    // elements go past": an element outside its declared width is INVALID
-    // wherever it sits (§7.1), not only where a truncation follows it. The
-    // whole-array callbacks return `void`, so a visitor that answered the bound
-    // has no channel left to reject through — leaving the completing array to
-    // them made the two surfaces disagree on the same bytes (#38).
+    // The range's contract is "the decoder applies it as the elements go
+    // past": an element outside its declared width is INVALID wherever it sits
+    // (§7.1), not only where a truncation follows it — on both surfaces, which
+    // once disagreed on exactly this (#38).
     test('unsigned over-width, array complete → INVALID on both paths', () {
       expect(
         bothPaths('03018004', _WidthVisitor.new),
@@ -109,20 +105,12 @@ void main() {
       );
     });
 
-    test('the rejected array is not handed to the visitor', () {
-      final c = _WidthVisitor();
-      expect(
-        sofab.Decoder.decode(hexToBytes('03018004'), c),
-        sofab.DecodeStatus.invalid,
-      );
-      expect(c.arrays, isEmpty);
-
-      final s = _WidthVisitor();
-      expect(
-        sofab.Decoder(s).feed(hexToBytes('03018004')),
-        sofab.DecodeStatus.invalid,
-      );
-      expect(s.arrays, isEmpty);
+    test('the rejection is terminal on the streaming surface', () {
+      // The destination was bound at the header; the verdict is what says its
+      // contents never became a value, and it does not come undone.
+      final dec = sofab.Decoder(_WidthVisitor());
+      expect(dec.feed(hexToBytes('03018004')), sofab.DecodeStatus.invalid);
+      expect(dec.feed(hexToBytes('0001')), sofab.DecodeStatus.invalid);
     });
 
     test('an over-width element in the word-wise loop is caught', () {
@@ -194,7 +182,7 @@ void main() {
 
   test('a visitor that declares no bound at all is unaffected', () {
     // The additive contract: the vector that is INVALID above stays INCOMPLETE
-    // for a visitor that does not override onArrayElemBound.
+    // for a destination that carries no range.
     final v = _PlainVisitor();
     expect(
       sofab.Decoder.decode(hexToBytes('0c05b051'), v),
@@ -202,16 +190,13 @@ void main() {
     );
   });
 
-  test('an over-width element outranks even an impossible count', () {
-    // Contiguous path only: the count here is ARRAY_MAX, which the streaming
-    // decoder has no way to refute (it cannot know how many bytes still
-    // follow) — a receiver cap in the consumer is the instrument for that side,
-    // and the next case pins it. On the one-shot surface the input itself
-    // refutes the count, but a decoder that bailed on the count alone would
-    // lose the over-width element that §5.2 says decides first.
-    final v = _WidthVisitor();
+  test('an impossible count is refused at its header by the schema count', () {
+    // The count here is ARRAY_MAX against a declared `count: 5`. The header
+    // call is where that is judged — on both surfaces, before a destination is
+    // chosen and before the element behind it is read — so the schema bound
+    // decides first, as INVALID (§7.1), and nothing is sized from the count.
     expect(
-      _verdict(v, sofab.Decoder.decode(hexToBytes('0cffffffff07b051'), v)),
+      bothPaths('0cffffffff07b051', _CountedWidthVisitor.new),
       sofab.DecodeStatus.invalid,
     );
   });
@@ -227,11 +212,7 @@ void main() {
       sofab.Decoder.decode(hexToBytes('0cffffffff07b051'), v),
       sofab.DecodeStatus.limitExceeded,
     );
-    expect(
-      v.reachedElements,
-      isFalse,
-      reason: 'the width guard was never reached',
-    );
+    expect(v.reachedElements, isFalse, reason: 'no destination was handed out');
   });
 
   test('the bound is asked once per array, never per element', () {
@@ -246,35 +227,53 @@ void main() {
 sofab.DecodeStatus _verdict(_PlainVisitor v, sofab.DecodeStatus st) =>
     v.inv ? sofab.DecodeStatus.invalid : st;
 
+/// Hands every integer array an exactly-sized destination with no range.
 class _PlainVisitor extends sofab.MessageVisitor {
   bool inv = false;
-  final List<List<int>> arrays = [];
+  final List<sofab.InlineInt64Array> _dests = [];
+
+  /// The arrays' contents, read after the decode.
+  List<List<int>> get arrays => [for (final d in _dests) d.toList()];
+
+  /// The declared element width for field [id] of the given wire kind, or
+  /// `null` for none.
+  sofab.ElemRange? range(int id, {required bool signed}) => null;
+
+  sofab.InlineInt64Array? _dest(int id, int count, bool signed) {
+    final d = sofab.InlineInt64Array(count, range: range(id, signed: signed));
+    _dests.add(d);
+    return d;
+  }
 
   @override
-  void onUnsignedArray(int id, Int64List values) => arrays.add(values.toList());
+  sofab.InlineInt64Array? onUnsignedArray(int id, int count) =>
+      _dest(id, count, false);
 
   @override
-  void onSignedArray(int id, Int64List values) => arrays.add(values.toList());
+  sofab.InlineInt64Array? onSignedArray(int id, int count) =>
+      _dest(id, count, true);
 }
 
 /// A stand-in for generated code: `array<u8, count 5>` at id 0 and
-/// `array<i8, count 5>` at id 1, nothing at id 2.
+/// `array<i8, count 5>` at id 1, nothing at id 2. The width is the one the WIRE
+/// kind selects: an array of the other kind is not this field's value (§7.3)
+/// and carries no range.
 class _WidthVisitor extends _PlainVisitor {
   @override
-  sofab.ElemRange? onArrayElemBound(int id, sofab.ArrayKind kind) {
-    switch (id) {
-      case 0:
-        if (kind == sofab.ArrayKind.unsigned) {
-          return const sofab.ElemRange(0, 255);
-        }
-        return null;
-      case 1:
-        if (kind == sofab.ArrayKind.signed) {
-          return const sofab.ElemRange(-128, 127);
-        }
-        return null;
-    }
+  sofab.ElemRange? range(int id, {required bool signed}) {
+    if (id == 0 && !signed) return const sofab.ElemRange(0, 255);
+    if (id == 1 && signed) return const sofab.ElemRange(-128, 127);
     return null;
+  }
+}
+
+/// [_WidthVisitor] with the schema `count: 5` applied at the header, as
+/// generated code applies it.
+class _CountedWidthVisitor extends _WidthVisitor {
+  @override
+  sofab.InlineInt64Array? onSignedArray(int id, int count) {
+    if (id == 1 && count > 5) invalidate();
+    return super.onSignedArray(id, count);
   }
 }
 
@@ -284,19 +283,15 @@ class _CappedWidthVisitor extends _WidthVisitor {
   _CappedWidthVisitor(this.cap);
   final int cap;
 
-  /// Set when the element-width bound is asked for — i.e. when the cap let the
-  /// array through.
+  /// Set when a destination is handed out — i.e. when the cap let the array
+  /// through.
   bool reachedElements = false;
 
   @override
-  void onArrayBegin(int id, sofab.ArrayKind kind, int count) {
+  sofab.InlineInt64Array? onSignedArray(int id, int count) {
     if (count > cap) limitExceeded();
-  }
-
-  @override
-  sofab.ElemRange? onArrayElemBound(int id, sofab.ArrayKind kind) {
     reachedElements = true;
-    return super.onArrayElemBound(id, kind);
+    return super.onSignedArray(id, count);
   }
 }
 
@@ -304,7 +299,7 @@ class _CountingVisitor extends _PlainVisitor {
   int asked = 0;
 
   @override
-  sofab.ElemRange? onArrayElemBound(int id, sofab.ArrayKind kind) {
+  sofab.ElemRange? range(int id, {required bool signed}) {
     asked++;
     return const sofab.ElemRange(-128, 127);
   }

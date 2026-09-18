@@ -26,11 +26,14 @@ class _DoubleVisitor extends sofab.MessageVisitor {
   void onFp32(int id, double v) => values.add(v);
 }
 
-/// Captures the fp32 array (a `Float32List`, whose storage holds raw bits).
+/// Decodes the fp32 array into an exactly-sized destination, whose `Float32List`
+/// storage holds the raw bits.
 class _ArrayVisitor extends sofab.MessageVisitor {
-  Float32List? arr;
+  sofab.InlineFloat32Array? _dest;
+  Float32List? get arr => _dest?.storage;
   @override
-  void onFp32Array(int id, Float32List v) => arr = v;
+  sofab.InlineFloat32Array? onFp32Array(int id, int count) =>
+      _dest = sofab.InlineFloat32Array(count);
 }
 
 int _reencodeBits(int bits) {
