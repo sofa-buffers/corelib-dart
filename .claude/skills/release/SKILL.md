@@ -137,6 +137,12 @@ git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
 
+**The tag must start with a lowercase `v`** — `v1.2.3`, never `1.2.3` or
+`V1.2.3`. `version-consistency.yml`'s trigger is `tags: ['v*']`, which is a
+case-sensitive glob: a tag not matching it exactly doesn't fire the workflow
+at all, so a wrong-cased or unprefixed tag silently skips the one check that
+verifies `pubspec.yaml` agrees with it.
+
 This trips `version-consistency.yml` — check the run went green (confirms
 `pubspec.yaml` matches the tag you just pushed; if it fails, the merge went
 wrong and the tag needs deleting and redoing, not patching around).
