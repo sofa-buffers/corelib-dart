@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.11.0 - 2026-09-24
 
 ### Decode into inline destinations: one visitor call per field, nothing after it (CORELIB_PLAN §6.6.3 / §6.7)
 

@@ -8,7 +8,7 @@ name: sofa_buffers_corelib
 description: >-
   SofaBuffers — a compact, self-describing, fully streamable binary
   serialization format. High-speed Dart core library (corelib-dart).
-version: 0.10.0
+version: 0.11.0
 repository: https://github.com/sofa-buffers/corelib-dart
 homepage: https://github.com/sofa-buffers
 
