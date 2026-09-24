@@ -133,10 +133,20 @@ gh pr create --title "chore(release): X.Y.Z" --body "<same summary as the commit
 
 Wait for CI to go green (`version-consistency.yml` does **not** run on this
 PR — it only fires on the tag push later, so a manifest/tag mismatch won't
-be caught until step 8; double-check the version by eye). Get it merged
-(ask the user, or merge yourself if they said to proceed unattended) —
-past releases merged via a normal merge commit (`gh pr merge --merge`), not
-squash or rebase.
+be caught until step 8; double-check the version by eye). Confirm with the
+user before merging — merging here is what sets up the tag/GitHub-release
+steps that follow, and those are outward-facing and awkward to undo.
+
+```
+gh pr merge <n> --rebase --delete-branch
+```
+
+The two 2026 releases (`#26`) merged via a plain merge commit, but as of
+the `0.11.0` release (`#100`) the repo only allows rebase merges —
+`gh api repos/sofa-buffers/corelib-dart -q '{merge:.allow_merge_commit,
+squash:.allow_squash_merge,rebase:.allow_rebase_merge}'` confirms which
+methods are currently enabled; re-check it if `--rebase` ever starts
+failing the same way `--merge` did here.
 
 ## 7. Tag
 
