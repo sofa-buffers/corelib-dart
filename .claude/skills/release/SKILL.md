@@ -9,7 +9,18 @@ This repo has no CLAUDE.md/CONTRIBUTING.md describing a release process. This
 skill was reconstructed by reading:
 
 - `pubspec.yaml` — the **only** manifest carrying a version (single Dart
-  package, no workspace/sub-packages).
+  package, no workspace/sub-packages). Verified 2026-09-24 by grepping the
+  whole tree for `version:`/`"version"` — the one other hit,
+  `assets/test_vectors.json`'s `"version": 1`, is the shared test-vector
+  schema version (tracks `corelib-c-cpp`'s vector format, not a release) and
+  must **not** be touched by a release. Compare `corelib-c-cpp`'s
+  `version-consistency.yaml`, which checks 4 files (`conanfile.py`,
+  `library.json`, `library.properties`, `CMakeLists.txt`) because that repo
+  publishes into 4 packaging ecosystems — Dart has one, so one file is the
+  whole story here. **If a second version-carrying file ever appears**
+  (e.g. a manifest for a tool that ships from this repo), extend
+  `version-consistency.yml` with an additional check step for it, mirroring
+  the C++ workflow's per-file pattern, and update this list.
 - `.github/workflows/version-consistency.yml` — fires on `push: tags: ['v*']`
   and fails the run if `pubspec.yaml`'s `version:` doesn't match the pushed
   tag. **This is the closest thing to an authoritative spec of the release
