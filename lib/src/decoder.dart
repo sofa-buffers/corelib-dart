@@ -61,7 +61,9 @@ class _LimitExceeded implements Exception {
 ///
 /// Every default is "not interested": scalars are ignored, aggregates and
 /// sequences skipped. A visitor overrides the calls for the fields it has a
-/// place for. Booleans arrive via [onUnsigned] (any non-zero is `true`, §4.4).
+/// place for. Booleans arrive via [onUnsigned] (any non-zero is `true`, §4.4);
+/// a boolean array's destination carries [ElemRange.boolean], and the codec
+/// holds its elements as `0`/`1`.
 abstract class MessageVisitor {
   /// Reject the running decode as `INVALID` from inside a callback.
   ///
@@ -164,7 +166,8 @@ abstract class MessageVisitor {
 }
 
 /// The inclusive range an integer array's elements may take under the schema —
-/// the `range` of an [InlineInt64Array].
+/// the `range` of an [InlineInt64Array] — or, as [ElemRange.boolean], the rule
+/// of a `boolean` array.
 ///
 /// Both bounds are `int`, which is what the decoder produces: a signed element
 /// arrives zig-zag-decoded, an unsigned one raw, and Dart's `int` is the same
@@ -178,7 +181,20 @@ abstract class MessageVisitor {
 class ElemRange {
   final int min;
   final int max;
-  const ElemRange(this.min, this.max);
+
+  /// Whether this is [ElemRange.boolean].
+  final bool isBoolean;
+
+  const ElemRange(this.min, this.max) : isBoolean = false;
+
+  const ElemRange._boolean() : min = 0, max = 0, isBoolean = true;
+
+  /// The rule of a `boolean` array (CORELIB_PLAN §4.4): every element is in
+  /// range, and every one other than `0` is held as `1` — so a decoded `2`
+  /// reads back as the `true` it is and re-encodes canonically. It rides the
+  /// `range` channel so an array with neither a width nor booleans pays nothing
+  /// for it.
+  static const ElemRange boolean = ElemRange._boolean();
 }
 
 /// A destination whose capacity is short of the announced length or count —
@@ -364,9 +380,12 @@ int _varintRun(
   return (i << 32) | p;
 }
 
-/// Whether any of `out[from..to)` falls outside [range]. See [ElemRange] for why
-/// the unsigned arm also rejects a negative: Dart has no unsigned compare, and a
-/// wire value above 2^63 is above every bound that can exist here.
+/// Applies [range] to `out[from..to)`: whether any element falls outside it —
+/// or, for [ElemRange.boolean], rewrites every non-zero element as `1` and
+/// answers `false`, since no value is out of a boolean's range (§4.4). See
+/// [ElemRange] for why the unsigned arm also rejects a negative: Dart has no
+/// unsigned compare, and a wire value above 2^63 is above every bound that can
+/// exist here.
 bool _elemOutOfRange(
   Int64List out,
   int from,
@@ -374,6 +393,12 @@ bool _elemOutOfRange(
   bool signed,
   ElemRange range,
 ) {
+  if (range.isBoolean) {
+    for (var i = from; i < to; i++) {
+      if (out[i] != 0) out[i] = 1;
+    }
+    return false;
+  }
   for (var i = from; i < to; i++) {
     final v = out[i];
     if (signed ? (v < range.min || v > range.max) : (v < 0 || v > range.max)) {
@@ -1039,14 +1064,18 @@ class Decoder {
   bool _onArrElem(int raw) {
     if (_read) {
       final signed = _arrType == WireType.arraySigned;
-      final v = signed ? (raw >>> 1) ^ -(raw & 1) : raw;
+      var v = signed ? (raw >>> 1) ^ -(raw & 1) : raw;
       // The declared width, applied AT the element (§7.1): an array that never
       // completes is INVALID all the same, and §5.2 makes this element's
-      // INVALID outrank that truncation.
+      // INVALID outrank that truncation. A boolean array's rule normalizes
+      // instead (§4.4).
       final r = _arrElemRange;
-      if (r != null &&
-          (signed ? (v < r.min || v > r.max) : (v < 0 || v > r.max))) {
-        return _fail(DecodeStatus.invalid);
+      if (r != null) {
+        if (r.isBoolean) {
+          if (v != 0) v = 1;
+        } else if (signed ? (v < r.min || v > r.max) : (v < 0 || v > r.max)) {
+          return _fail(DecodeStatus.invalid);
+        }
       }
       _arrInts![_arrIndex] = v;
     }

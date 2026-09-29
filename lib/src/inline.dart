@@ -43,7 +43,8 @@ final class InlineInt64Array {
   /// [range] is the field's declared element width (MESSAGE_SPEC §7.1); the
   /// codec applies it to every element as it is decoded and reports an element
   /// outside it as `INVALID`. `null` when the field declares nothing narrower
-  /// than 64 bits.
+  /// than 64 bits. [ElemRange.boolean] for a `boolean` array: the codec holds
+  /// every element other than `0` as `1` (§4.4).
   InlineInt64Array(int capacity, {this.range}) : storage = Int64List(capacity);
 
   /// A copy of [values], [length] set to match — the on-ramp for encoding.
