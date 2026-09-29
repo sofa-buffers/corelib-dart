@@ -338,7 +338,8 @@ class NestedSeq<T> extends MessageVisitor {
 /// other one contradicts the declared element type and is skipped (§7.3), not
 /// rejected. `lo`/`hi` bound each element to its declared width (§7.1); equal
 /// values mean "nothing narrower than the wire to check". A `bool` matrix is an
-/// unsigned one with no width (any non-zero element is `true`, §4.4).
+/// unsigned one with no width and `boolean` set: every row carries
+/// [ElemRange.boolean], so any non-zero element is held as `1` (§4.4).
 ///
 /// A row here is a real compact array with a real `element_count` on the wire,
 /// so it carries a second pair of bounds beside the row index: `rowCount`, the
@@ -355,9 +356,14 @@ class IntMatrixSeq extends MessageVisitor {
     required int rcap,
     required this.rowCount,
     required int rowCap,
+    bool boolean = false,
   }) : rcap = _requireCap(rcap, cap, 'IntMatrixSeq.rcap'),
        rowCap = _requireCap(rowCap, rowCount, 'IntMatrixSeq.rowCap'),
-       range = lo == hi ? null : ElemRange(lo, hi);
+       range = boolean
+           ? ElemRange.boolean
+           : lo == hi
+           ? null
+           : ElemRange(lo, hi);
 
   final List<InlineInt64Array> out;
 
@@ -377,7 +383,8 @@ class IntMatrixSeq extends MessageVisitor {
 
   final bool signed;
 
-  /// The declared element width every row carries, or `null` for none.
+  /// The declared element width every row carries — [ElemRange.boolean] for a
+  /// `bool` matrix — or `null` for none.
   final ElemRange? range;
 
   @override
