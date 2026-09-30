@@ -36,85 +36,81 @@ void main() {
   const maxGrowthAllocs = 3.0;
   const maxGrowthBytes = 512.0;
 
-  test(
-    'the codec does not allocate, and does not grow with the message',
-    () {
-      // Full precision, not `--quick`: the tool's own comment says the 20k-rep
-      // quick mode is for fast local iteration, and that 100k reps are what puts
-      // the noise floor near 3 allocations/op. At 20k reps the ~300k-allocation
-      // service-RPC baseline's few-percent run-to-run drift lands close enough to
-      // maxBytesPerOp to flip an unrelated row (observed: `encode: blob`, `encode:
-      // utf8 string`, `encode: u64 array` each crossed 512 bytes/op in isolation,
-      // on both main and this branch, with nothing touching those paths) — a
-      // flaky CI failure, not a regression. Full precision measured well under
-      // 100 bytes/op on every row across repeated runs.
-      final r = Process.runSync(Platform.resolvedExecutable, [
-        'run',
-        'bench/alloc_profile.dart',
-        '--json',
-      ], workingDirectory: Directory.current.path);
+  test('the codec does not allocate, and does not grow with the message', () {
+    // Full precision, not `--quick`: the tool's own comment says the 20k-rep
+    // quick mode is for fast local iteration, and that 100k reps are what puts
+    // the noise floor near 3 allocations/op. At 20k reps the ~300k-allocation
+    // service-RPC baseline's few-percent run-to-run drift lands close enough to
+    // maxBytesPerOp to flip an unrelated row (observed: `encode: blob`, `encode:
+    // utf8 string`, `encode: u64 array` each crossed 512 bytes/op in isolation,
+    // on both main and this branch, with nothing touching those paths) — a
+    // flaky CI failure, not a regression. Full precision measured well under
+    // 100 bytes/op on every row across repeated runs.
+    final r = Process.runSync(Platform.resolvedExecutable, [
+      'run',
+      'bench/alloc_profile.dart',
+      '--json',
+    ], workingDirectory: Directory.current.path);
 
-      if (r.exitCode == 2) {
-        markTestSkipped('no VM service available: ${r.stderr}');
-        return;
-      }
+    if (r.exitCode == 2) {
+      markTestSkipped('no VM service available: ${r.stderr}');
+      return;
+    }
+    expect(
+      r.exitCode,
+      0,
+      reason: 'alloc_profile failed\n${r.stdout}\n${r.stderr}',
+    );
+
+    final rows = (jsonDecode((r.stdout as String).trim()) as Map)
+        .cast<String, Object?>();
+    expect(rows.length, greaterThan(20));
+
+    double allocs(String name) =>
+        ((rows[name]! as Map)['allocs']! as num).toDouble();
+    double bytes(String name) =>
+        ((rows[name]! as Map)['bytes']! as num).toDouble();
+
+    for (final name in rows.keys) {
       expect(
-        r.exitCode,
-        0,
-        reason: 'alloc_profile failed\n${r.stdout}\n${r.stderr}',
+        allocs(name).abs(),
+        lessThan(maxAllocsPerOp),
+        reason: '$name: ${allocs(name).toStringAsFixed(2)} containers per op',
       );
+      expect(
+        bytes(name).abs(),
+        lessThan(maxBytesPerOp),
+        reason: '$name: ${bytes(name).toStringAsFixed(1)} bytes per op',
+      );
+    }
 
-      final rows = (jsonDecode((r.stdout as String).trim()) as Map)
-          .cast<String, Object?>();
-      expect(rows.length, greaterThan(20));
-
-      double allocs(String name) =>
-          ((rows[name]! as Map)['allocs']! as num).toDouble();
-      double bytes(String name) =>
-          ((rows[name]! as Map)['bytes']! as num).toDouble();
-
-      for (final name in rows.keys) {
-        expect(
-          allocs(name).abs(),
-          lessThan(maxAllocsPerOp),
-          reason: '$name: ${allocs(name).toStringAsFixed(2)} containers per op',
-        );
-        expect(
-          bytes(name).abs(),
-          lessThan(maxBytesPerOp),
-          reason: '$name: ${bytes(name).toStringAsFixed(1)} bytes per op',
-        );
-      }
-
-      // The pairs: one field shape at 16 bytes of payload and at 4096.
-      for (final shape in const [
-        ['encode: blob ', ' B'],
-        ['encode: utf8 string ', ' B'],
-        ['decode: blob ', ' B, one-shot'],
-        ['decode: blob ', ' B, streaming'],
-        ['decode: fp64 array ', ' B, one-shot'],
-        ['decode: fp64 array ', ' B, streaming'],
-        ['decode: u64 array ', ' B, one-shot'],
-        ['decode: u64 array ', ' B, streaming'],
-      ]) {
-        final small = '${shape[0]}16${shape[1]}';
-        final large = '${shape[0]}4096${shape[1]}';
-        expect(rows.keys, containsAll([small, large]));
-        expect(
-          (allocs(large) - allocs(small)).abs(),
-          lessThan(maxGrowthAllocs),
-          reason: '${shape[0]}: allocations grew with the payload',
-        );
-        expect(
-          (bytes(large) - bytes(small)).abs(),
-          lessThan(maxGrowthBytes),
-          reason:
-              '${shape[0]}: allocated bytes grew with the payload — '
-              '${bytes(small).toStringAsFixed(1)} at 16 B, '
-              '${bytes(large).toStringAsFixed(1)} at 4096 B',
-        );
-      }
-    },
-    timeout: const Timeout(Duration(minutes: 4)),
-  );
+    // The pairs: one field shape at 16 bytes of payload and at 4096.
+    for (final shape in const [
+      ['encode: blob ', ' B'],
+      ['encode: utf8 string ', ' B'],
+      ['decode: blob ', ' B, one-shot'],
+      ['decode: blob ', ' B, streaming'],
+      ['decode: fp64 array ', ' B, one-shot'],
+      ['decode: fp64 array ', ' B, streaming'],
+      ['decode: u64 array ', ' B, one-shot'],
+      ['decode: u64 array ', ' B, streaming'],
+    ]) {
+      final small = '${shape[0]}16${shape[1]}';
+      final large = '${shape[0]}4096${shape[1]}';
+      expect(rows.keys, containsAll([small, large]));
+      expect(
+        (allocs(large) - allocs(small)).abs(),
+        lessThan(maxGrowthAllocs),
+        reason: '${shape[0]}: allocations grew with the payload',
+      );
+      expect(
+        (bytes(large) - bytes(small)).abs(),
+        lessThan(maxGrowthBytes),
+        reason:
+            '${shape[0]}: allocated bytes grew with the payload — '
+            '${bytes(small).toStringAsFixed(1)} at 16 B, '
+            '${bytes(large).toStringAsFixed(1)} at 4096 B',
+      );
+    }
+  }, timeout: const Timeout(Duration(minutes: 4)));
 }
