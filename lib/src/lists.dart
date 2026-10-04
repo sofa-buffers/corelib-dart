@@ -21,6 +21,9 @@
 ///   default and the field is omitted, which loses the sign bit. The wire
 ///   format keeps `-0.0` faithfully; a *default* comparison cannot, because the
 ///   two are equal in the language.
+///
+/// A float array's default test must not use this: `floatBitsEqual` compares
+/// the bit patterns instead.
 bool elementsEqual<T>(List<T> a, List<T> b) {
   if (identical(a, b)) return true;
   final n = a.length;
