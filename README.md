@@ -322,7 +322,8 @@ of them knows a schema.
 | `sofab.InlineString`, `InlineBytes`, `InlineInt64Array`, `InlineFloat32Array`, `InlineFloat64Array` | the decode destinations: a field's storage, sized once to its schema maximum and reused for every message — `ensureCapacity` grows one for a schema-unbounded field, after the visitor's own cap check |
 | `sofab.StringSeq`, `BlobSeq`, `MessageSeq`, `NestedSeq`, `IntMatrixSeq`, `Float32MatrixSeq`, `Float64MatrixSeq` | the wrapper-array collectors: each element or row decoded straight into its slot, with the index and length bounds applied at the header |
 | `sofab.utf8Length` | the exact UTF-8 byte length of a `String`, without allocating the transcode buffer |
-| `sofab.elementsEqual` | pairwise list comparison, which is how a generated encoder asks whether a list field still equals its declared default (`==` on two Dart `List`s is identity) |
+| `sofab.elementsEqual` | pairwise list comparison, which is how a generated encoder asks whether a non-float list field still equals its declared default (`==` on two Dart `List`s is identity). Float arrays use `floatBitsEqual` instead, because `==` on a `double` is IEEE equality |
+| `sofab.floatBitsEqual` | bit-pattern equality for float arrays: same length and the same IEEE-754 bits at every index, so `-0.0` differs from `0.0` and a NaN equals only a NaN with identical bits. The optional `length:` prefix argument compares only the first `length` elements of the first list, for a destination whose storage is sized to its capacity (`InlineFloat32Array.storage` with `.length`) |
 
 ```dart
 // A generated scope: one string destination at id 1, everything else skipped.
