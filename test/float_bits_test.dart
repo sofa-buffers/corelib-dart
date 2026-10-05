@@ -193,6 +193,155 @@ void main() {
     });
   });
 
+  group('float32BitsEqual / float64BitsEqual (the generated default test)', () {
+    Float32List l32(List<int> bits) =>
+        Float32List.view(Uint32List.fromList(bits).buffer);
+
+    test(
+      'the first n elements of a larger storage against a whole default',
+      () {
+        final def32 = Float32List.fromList([0.0, 1.5]);
+        final def64 = Float64List.fromList([0.0, 1.5]);
+        final s32 = Float32List.fromList([0.0, 1.5, 9, 9]);
+        final s64 = Float64List.fromList([0.0, 1.5, 9, 9]);
+        expect(sofab.float32BitsEqual(s32, 2, def32), isTrue);
+        expect(sofab.float64BitsEqual(s64, 2, def64), isTrue);
+        expect(sofab.float32BitsEqual(s32, 3, def32), isFalse);
+        expect(sofab.float64BitsEqual(s64, 1, def64), isFalse);
+        expect(sofab.float32BitsEqual(s32, 0, Float32List(0)), isTrue);
+        expect(sofab.float64BitsEqual(s64, 0, Float64List(0)), isTrue);
+      },
+    );
+
+    test('-0.0 against +0.0 at every index, in both directions', () {
+      for (var i = 0; i < 3; i++) {
+        final z = [0.0, 0.0, 0.0];
+        final n = [0.0, 0.0, 0.0]..[i] = -0.0;
+        expect(
+          sofab.float32BitsEqual(
+            Float32List.fromList(n),
+            3,
+            Float32List.fromList(z),
+          ),
+          isFalse,
+        );
+        expect(
+          sofab.float32BitsEqual(
+            Float32List.fromList(z),
+            3,
+            Float32List.fromList(n),
+          ),
+          isFalse,
+        );
+        expect(
+          sofab.float64BitsEqual(
+            Float64List.fromList(n),
+            3,
+            Float64List.fromList(z),
+          ),
+          isFalse,
+        );
+        expect(
+          sofab.float64BitsEqual(
+            Float64List.fromList(z),
+            3,
+            Float64List.fromList(n),
+          ),
+          isFalse,
+        );
+        expect(
+          sofab.float64BitsEqual(
+            Float64List.fromList(n),
+            3,
+            Float64List.fromList(n),
+          ),
+          isTrue,
+        );
+      }
+    });
+
+    test('equal nonzero values, and a mismatch, never trip the zero test', () {
+      expect(
+        sofab.float64BitsEqual(
+          Float64List.fromList([-1.5, 2.0, double.infinity]),
+          3,
+          Float64List.fromList([-1.5, 2.0, double.infinity]),
+        ),
+        isTrue,
+      );
+      expect(
+        sofab.float32BitsEqual(
+          Float32List.fromList([1.0, 2.0]),
+          2,
+          Float32List.fromList([1.0, 3.0]),
+        ),
+        isFalse,
+      );
+      // a NaN against a number, either way round, is a mismatch
+      expect(
+        sofab.float64BitsEqual(
+          Float64List.fromList([double.nan]),
+          1,
+          Float64List.fromList([1.0]),
+        ),
+        isFalse,
+      );
+      expect(
+        sofab.float32BitsEqual(
+          Float32List.fromList([1.0]),
+          1,
+          Float32List.fromList([double.nan]),
+        ),
+        isFalse,
+      );
+    });
+
+    test('a NaN pair is decided on the whole prefix, patterns and all', () {
+      expect(
+        sofab.float32BitsEqual(l32([0x7FC00001, 7]), 1, l32([0x7FC00001])),
+        isTrue,
+      );
+      expect(
+        sofab.float32BitsEqual(l32([0x7FC00001]), 1, l32([0x7FC00002])),
+        isFalse,
+      );
+      expect(
+        sofab.float32BitsEqual(l32([0x7F800001]), 1, l32([0x7FC00001])),
+        isFalse,
+      );
+      // an element before the NaN pair already differs in its sign
+      final a = Float32List.fromList([-0.0, double.nan]);
+      final b = Float32List.fromList([0.0, double.nan]);
+      expect(sofab.float32BitsEqual(a, 2, b), isFalse);
+      final a64 = Float64List.fromList([1.0, f64FromBits(0x7FF8000000000001)]);
+      final b64 = Float64List.fromList([1.0, f64FromBits(0x7FF8000000000002)]);
+      expect(sofab.float64BitsEqual(a64, 2, a64), isTrue);
+      expect(sofab.float64BitsEqual(a64, 2, b64), isFalse);
+    });
+
+    test(
+      'a length mismatch reads no element, a short storage is a RangeError',
+      () {
+        expect(
+          sofab.float32BitsEqual(Float32List(2), 2, Float32List(3)),
+          isFalse,
+        );
+        expect(
+          sofab.float64BitsEqual(Float64List(2), 1, Float64List(0)),
+          isFalse,
+        );
+        expect(
+          () => sofab.float32BitsEqual(Float32List(1), 2, Float32List(2)),
+          throwsRangeError,
+        );
+        expect(
+          () => sofab.float64BitsEqual(Float64List(1), 2, Float64List(2)),
+          throwsRangeError,
+        );
+      },
+    );
+  });
+
   group('cross-check against a plain reference bit loop', () {
     test('deterministic pseudo-random arrays, fp64 and fp32', () {
       var s = 0x2545F491;
