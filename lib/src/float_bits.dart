@@ -29,7 +29,7 @@ final Int64List _i64 = _f64.buffer.asInt64List();
 /// of a field against its constant default array.
 ///
 /// The length is compared first and a mismatch returns without reading an
-/// element. No allocation beyond two typed-list views, no mutation.
+/// element. No allocation unless a NaN pair is met, no mutation.
 ///
 /// * Two `Float32List`s are compared on their 32-bit patterns, through
 ///   `Uint32List` views, so an fp32 signaling NaN is compared as stored and not
@@ -46,29 +46,82 @@ final Int64List _i64 = _f64.buffer.asInt64List();
 bool floatBitsEqual(List<double> a, List<double> b, {int? length}) {
   final n = length ?? a.length;
   RangeError.checkValueInInterval(n, 0, a.length, 'length');
+  if (a is Float32List && b is Float32List) return float32BitsEqual(a, n, b);
+  if (a is Float64List && b is Float64List) return float64BitsEqual(a, n, b);
   if (n != b.length) return false;
-  if (n == 0) return true;
-  if (a is Float32List && b is Float32List) {
-    final x = Uint32List.view(a.buffer, a.offsetInBytes, n);
-    final y = Uint32List.view(b.buffer, b.offsetInBytes, n);
-    for (var i = 0; i < n; i++) {
-      if (x[i] != y[i]) return false;
-    }
-    return true;
-  }
-  if (a is Float64List && b is Float64List) {
-    final x = Int64List.view(a.buffer, a.offsetInBytes, n);
-    final y = Int64List.view(b.buffer, b.offsetInBytes, n);
-    for (var i = 0; i < n; i++) {
-      if (x[i] != y[i]) return false;
-    }
-    return true;
-  }
   for (var i = 0; i < n; i++) {
     _f64[0] = a[i];
     final p = _i64[0];
     _f64[0] = b[i];
     if (p != _i64[0]) return false;
+  }
+  return true;
+}
+
+/// [floatBitsEqual] for the generated default test of an fp32 array field: the
+/// first [n] elements of [a] against [b] taken whole. Both are `Float32List`s
+/// (`InlineFloat32Array.storage` and its constant default), so there is no type
+/// test, no optional parameter and no range check on the way in; [n] must not
+/// exceed `a.length` (an index past it throws, as on any typed list). The
+/// length is compared first and a mismatch reads no element.
+///
+/// Elements are compared as `double`s: equal values are equal bits except for
+/// the two zeros. When both are zero, `x * y` is `-0.0` exactly when their signs
+/// differ, so the sign is read from one product and no division or view is
+/// needed. A pair of NaNs goes to the exact 32-bit pattern check, so a signaling NaN is
+/// compared as stored. No allocation unless a NaN pair is met, no mutation.
+@pragma('vm:prefer-inline')
+bool float32BitsEqual(Float32List a, int n, Float32List b) {
+  if (n != b.length) return false;
+  for (var i = 0; i < b.length; i++) {
+    final x = a[i];
+    final y = b[i];
+    if (x == y) {
+      if (x == 0 && (x * y).isNegative) return false;
+    } else if (x == x || y == y) {
+      return false;
+    } else {
+      return _nanPairEqual32(a, b, n);
+    }
+  }
+  return true;
+}
+
+/// [float32BitsEqual] for an fp64 array field: `Float64List`s, compared on
+/// their 64-bit patterns.
+@pragma('vm:prefer-inline')
+bool float64BitsEqual(Float64List a, int n, Float64List b) {
+  if (n != b.length) return false;
+  for (var i = 0; i < b.length; i++) {
+    final x = a[i];
+    final y = b[i];
+    if (x == y) {
+      if (x == 0 && (x * y).isNegative) return false;
+    } else if (x == x || y == y) {
+      return false;
+    } else {
+      return _nanPairEqual64(a, b, n);
+    }
+  }
+  return true;
+}
+
+// The slow path, reached only once a NaN pair has been met: the whole prefix on
+// raw patterns, through typed views (a view costs an allocation).
+bool _nanPairEqual32(Float32List a, Float32List b, int n) {
+  final x = Uint32List.view(a.buffer, a.offsetInBytes, n);
+  final y = Uint32List.view(b.buffer, b.offsetInBytes, n);
+  for (var i = 0; i < n; i++) {
+    if (x[i] != y[i]) return false;
+  }
+  return true;
+}
+
+bool _nanPairEqual64(Float64List a, Float64List b, int n) {
+  final x = Int64List.view(a.buffer, a.offsetInBytes, n);
+  final y = Int64List.view(b.buffer, b.offsetInBytes, n);
+  for (var i = 0; i < n; i++) {
+    if (x[i] != y[i]) return false;
   }
   return true;
 }
