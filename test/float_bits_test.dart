@@ -193,154 +193,255 @@ void main() {
     });
   });
 
-  group('float32BitsEqual / float64BitsEqual (the generated default test)', () {
-    Float32List l32(List<int> bits) =>
-        Float32List.view(Uint32List.fromList(bits).buffer);
+  group(
+    'Float32ArrayDefault / Float64ArrayDefault (the generated default test)',
+    () {
+      double f64FromBits(int bits) =>
+          (Int64List(1)..[0] = bits).buffer.asFloat64List()[0];
+      Float32List f32Bits(List<int> bits) =>
+          Float32List.view(Uint32List.fromList(bits).buffer);
 
-    test(
-      'the first n elements of a larger storage against a whole default',
-      () {
-        final def32 = Float32List.fromList([0.0, 1.5]);
-        final def64 = Float64List.fromList([0.0, 1.5]);
-        final s32 = Float32List.fromList([0.0, 1.5, 9, 9]);
-        final s64 = Float64List.fromList([0.0, 1.5, 9, 9]);
-        expect(sofab.float32BitsEqual(s32, 2, def32), isTrue);
-        expect(sofab.float64BitsEqual(s64, 2, def64), isTrue);
-        expect(sofab.float32BitsEqual(s32, 3, def32), isFalse);
-        expect(sofab.float64BitsEqual(s64, 1, def64), isFalse);
-        expect(sofab.float32BitsEqual(s32, 0, Float32List(0)), isTrue);
-        expect(sofab.float64BitsEqual(s64, 0, Float64List(0)), isTrue);
-      },
-    );
+      // matches() against the plain bit loop, on both widths.
+      bool ref(List<double> a, int n, List<double> d) {
+        if (n != d.length) return false;
+        final x =
+            (a is Float32List
+                    ? Float32List.fromList(a.sublist(0, n))
+                    : Float64List.fromList(a.sublist(0, n)))
+                .buffer
+                .asUint8List();
+        final y =
+            (d is Float32List
+                    ? Float32List.fromList(d)
+                    : Float64List.fromList(d))
+                .buffer
+                .asUint8List();
+        for (var i = 0; i < x.length; i++) {
+          if (x[i] != y[i]) return false;
+        }
+        return true;
+      }
 
-    test('-0.0 against +0.0 at every index, in both directions', () {
-      for (var i = 0; i < 3; i++) {
-        final z = [0.0, 0.0, 0.0];
-        final n = [0.0, 0.0, 0.0]..[i] = -0.0;
+      test('list is a typed copy of the values', () {
+        final d32 = sofab.Float32ArrayDefault(const [0.0, 1.5]);
+        final d64 = sofab.Float64ArrayDefault(const [0.0, 1.5]);
+        expect(d32.list, Float32List.fromList([0.0, 1.5]));
+        expect(d64.list, Float64List.fromList([0.0, 1.5]));
+      });
+
+      test('a default without zeros: the plain loop decides', () {
+        final d32 = sofab.Float32ArrayDefault(const [1.5, -2.25, 3.0]);
+        final d64 = sofab.Float64ArrayDefault(const [1.5, -2.25, 3.0]);
         expect(
-          sofab.float32BitsEqual(
-            Float32List.fromList(n),
-            3,
-            Float32List.fromList(z),
-          ),
-          isFalse,
-        );
-        expect(
-          sofab.float32BitsEqual(
-            Float32List.fromList(z),
-            3,
-            Float32List.fromList(n),
-          ),
-          isFalse,
-        );
-        expect(
-          sofab.float64BitsEqual(
-            Float64List.fromList(n),
-            3,
-            Float64List.fromList(z),
-          ),
-          isFalse,
-        );
-        expect(
-          sofab.float64BitsEqual(
-            Float64List.fromList(z),
-            3,
-            Float64List.fromList(n),
-          ),
-          isFalse,
-        );
-        expect(
-          sofab.float64BitsEqual(
-            Float64List.fromList(n),
-            3,
-            Float64List.fromList(n),
-          ),
+          d32.matches(Float32List.fromList([1.5, -2.25, 3.0, 9]), 3),
           isTrue,
         );
-      }
-    });
-
-    test('equal nonzero values, and a mismatch, never trip the zero test', () {
-      expect(
-        sofab.float64BitsEqual(
-          Float64List.fromList([-1.5, 2.0, double.infinity]),
-          3,
-          Float64List.fromList([-1.5, 2.0, double.infinity]),
-        ),
-        isTrue,
-      );
-      expect(
-        sofab.float32BitsEqual(
-          Float32List.fromList([1.0, 2.0]),
-          2,
-          Float32List.fromList([1.0, 3.0]),
-        ),
-        isFalse,
-      );
-      // a NaN against a number, either way round, is a mismatch
-      expect(
-        sofab.float64BitsEqual(
-          Float64List.fromList([double.nan]),
-          1,
-          Float64List.fromList([1.0]),
-        ),
-        isFalse,
-      );
-      expect(
-        sofab.float32BitsEqual(
-          Float32List.fromList([1.0]),
-          1,
-          Float32List.fromList([double.nan]),
-        ),
-        isFalse,
-      );
-    });
-
-    test('a NaN pair is decided on the whole prefix, patterns and all', () {
-      expect(
-        sofab.float32BitsEqual(l32([0x7FC00001, 7]), 1, l32([0x7FC00001])),
-        isTrue,
-      );
-      expect(
-        sofab.float32BitsEqual(l32([0x7FC00001]), 1, l32([0x7FC00002])),
-        isFalse,
-      );
-      expect(
-        sofab.float32BitsEqual(l32([0x7F800001]), 1, l32([0x7FC00001])),
-        isFalse,
-      );
-      // an element before the NaN pair already differs in its sign
-      final a = Float32List.fromList([-0.0, double.nan]);
-      final b = Float32List.fromList([0.0, double.nan]);
-      expect(sofab.float32BitsEqual(a, 2, b), isFalse);
-      final a64 = Float64List.fromList([1.0, f64FromBits(0x7FF8000000000001)]);
-      final b64 = Float64List.fromList([1.0, f64FromBits(0x7FF8000000000002)]);
-      expect(sofab.float64BitsEqual(a64, 2, a64), isTrue);
-      expect(sofab.float64BitsEqual(a64, 2, b64), isFalse);
-    });
-
-    test(
-      'a length mismatch reads no element, a short storage is a RangeError',
-      () {
         expect(
-          sofab.float32BitsEqual(Float32List(2), 2, Float32List(3)),
+          d64.matches(Float64List.fromList([1.5, -2.25, 3.0, 9]), 3),
+          isTrue,
+        );
+        expect(
+          d32.matches(Float32List.fromList([1.5, -2.25, 3.5]), 3),
           isFalse,
         );
         expect(
-          sofab.float64BitsEqual(Float64List(2), 1, Float64List(0)),
+          d64.matches(Float64List.fromList([2.5, -2.25, 3.0]), 3),
           isFalse,
         );
+        // a NaN in the field is a mismatch, and so is a zero
         expect(
-          () => sofab.float32BitsEqual(Float32List(1), 2, Float32List(2)),
+          d64.matches(Float64List.fromList([double.nan, -2.25, 3.0]), 3),
+          isFalse,
+        );
+        expect(d32.matches(Float32List.fromList([1.5, 0.0, 3.0]), 3), isFalse);
+      });
+
+      test('+0.0 in the default: -0.0 in the field is not the default', () {
+        final d32 = sofab.Float32ArrayDefault(const [0.0, 1.5, 0.0]);
+        final d64 = sofab.Float64ArrayDefault(const [0.0, 1.5, 0.0]);
+        expect(d32.matches(Float32List.fromList([0.0, 1.5, 0.0]), 3), isTrue);
+        expect(d64.matches(Float64List.fromList([0.0, 1.5, 0.0]), 3), isTrue);
+        for (final i in [0, 2]) {
+          final v = [0.0, 1.5, 0.0]..[i] = -0.0;
+          expect(
+            d32.matches(Float32List.fromList(v), 3),
+            isFalse,
+            reason: 'f32 $i',
+          );
+          expect(
+            d64.matches(Float64List.fromList(v), 3),
+            isFalse,
+            reason: 'f64 $i',
+          );
+        }
+      });
+
+      test('-0.0 in the default: +0.0 in the field is not the default', () {
+        final d32 = sofab.Float32ArrayDefault(const [-0.0, 2.0, -0.0, -0.0]);
+        final d64 = sofab.Float64ArrayDefault(const [-0.0, 2.0, -0.0, -0.0]);
+        expect(
+          d32.matches(Float32List.fromList([-0.0, 2.0, -0.0, -0.0]), 4),
+          isTrue,
+        );
+        expect(
+          d64.matches(Float64List.fromList([-0.0, 2.0, -0.0, -0.0]), 4),
+          isTrue,
+        );
+        for (final i in [0, 2, 3]) {
+          final v = [-0.0, 2.0, -0.0, -0.0]..[i] = 0.0;
+          expect(
+            d32.matches(Float32List.fromList(v), 4),
+            isFalse,
+            reason: 'f32 $i',
+          );
+          expect(
+            d64.matches(Float64List.fromList(v), 4),
+            isFalse,
+            reason: 'f64 $i',
+          );
+        }
+      });
+
+      test('mixed zero signs, past the first zero', () {
+        const dv = [0.0, 1.0, -0.0, 0.0, -0.0];
+        final d64 = sofab.Float64ArrayDefault(dv);
+        expect(d64.matches(Float64List.fromList(dv), 5), isTrue);
+        for (var i = 0; i < 5; i++) {
+          if (dv[i] != 0) continue;
+          final v = List<double>.of(dv)..[i] = dv[i].isNegative ? 0.0 : -0.0;
+          expect(
+            d64.matches(Float64List.fromList(v), 5),
+            isFalse,
+            reason: '$i',
+          );
+        }
+      });
+
+      test(
+        'the prefix: storage beyond n takes no part, n must equal the length',
+        () {
+          final d32 = sofab.Float32ArrayDefault(const [0.0, 1.5]);
+          final d64 = sofab.Float64ArrayDefault(const [0.0, 1.5]);
+          expect(
+            d32.matches(Float32List.fromList([0.0, 1.5, 7, 7]), 2),
+            isTrue,
+          );
+          expect(
+            d64.matches(Float64List.fromList([0.0, 1.5, 7, 7]), 2),
+            isTrue,
+          );
+          expect(
+            d32.matches(Float32List.fromList([0.0, 1.5, 7, 7]), 3),
+            isFalse,
+          );
+          expect(
+            d64.matches(Float64List.fromList([0.0, 1.5, 7, 7]), 1),
+            isFalse,
+          );
+          expect(d64.matches(Float64List(4), 0), isFalse);
+        },
+      );
+
+      test('a short storage is a RangeError, not a wrong answer', () {
+        final d32 = sofab.Float32ArrayDefault(const [1.5, 2.5]);
+        final d64 = sofab.Float64ArrayDefault(const [1.5, 2.5]);
+        expect(
+          () => d32.matches(Float32List.fromList([1.5]), 2),
           throwsRangeError,
         );
         expect(
-          () => sofab.float64BitsEqual(Float64List(1), 2, Float64List(2)),
+          () => d64.matches(Float64List.fromList([1.5]), 2),
           throwsRangeError,
         );
-      },
-    );
-  });
+      });
+
+      test('a default that holds a NaN is compared on raw patterns', () {
+        final nanA = f64FromBits(0x7FF8000000000001);
+        final nanB = f64FromBits(0x7FF8000000000002);
+        final d64 = sofab.Float64ArrayDefault([1.0, nanA, 0.0]);
+        expect(d64.matches(Float64List.fromList([1.0, nanA, 0.0]), 3), isTrue);
+        expect(d64.matches(Float64List.fromList([1.0, nanB, 0.0]), 3), isFalse);
+        expect(
+          d64.matches(Float64List.fromList([1.0, nanA, -0.0]), 3),
+          isFalse,
+        );
+        expect(d64.matches(Float64List.fromList([1.0, 2.0, 0.0]), 3), isFalse);
+        expect(
+          d64.matches(Float64List.fromList([1.0, nanA, 0.0, 9.0]), 3),
+          isTrue,
+        );
+        // a signaling fp32 NaN is compared as stored, not as the quieted double
+        final d32 = sofab.Float32ArrayDefault(
+          f32Bits([0x7F800001, 0x3FC00000]),
+        );
+        expect(d32.matches(f32Bits([0x7F800001, 0x3FC00000]), 2), isTrue);
+        expect(d32.matches(f32Bits([0x7FC00001, 0x3FC00000]), 2), isFalse);
+        expect(d32.matches(f32Bits([0x7F800001, 0x3FC00001]), 2), isFalse);
+      });
+
+      test('an empty default matches only the empty prefix', () {
+        final d32 = sofab.Float32ArrayDefault(const []);
+        final d64 = sofab.Float64ArrayDefault(const []);
+        expect(d32.matches(Float32List(3), 0), isTrue);
+        expect(d64.matches(Float64List(3), 0), isTrue);
+        expect(d32.matches(Float32List(3), 1), isFalse);
+      });
+
+      test('cross-check against a plain reference bit loop', () {
+        var s = 0x1234567;
+        int next() {
+          s = (s * 1103515245 + 12345) & 0x7FFFFFFF;
+          return s;
+        }
+
+        final pool = <double>[
+          0.0,
+          -0.0,
+          1.5,
+          -1.5,
+          double.infinity,
+          double.negativeInfinity,
+          double.nan,
+          f64FromBits(0x7FF8000000000001),
+          2.0,
+        ];
+        var equal = 0, unequal = 0;
+        for (var iter = 0; iter < 4000; iter++) {
+          final len = next() % 12;
+          final wide = iter.isEven;
+          final dv = List<double>.generate(
+            len,
+            (_) => pool[next() % pool.length],
+          );
+          final field = List<double>.of(dv);
+          if (next() % 3 != 0 && len > 0) {
+            field[next() % len] = pool[next() % pool.length];
+          }
+          final cap = len + next() % 3;
+          while (field.length < cap) {
+            field.add(pool[next() % pool.length]);
+          }
+          final n = (next() % 9 == 0) ? len + 1 : len;
+          if (n > cap) continue;
+          if (wide) {
+            final d = sofab.Float64ArrayDefault(dv);
+            final a = Float64List.fromList(field);
+            final want = ref(a, n, d.list);
+            want ? equal++ : unequal++;
+            expect(d.matches(a, n), want, reason: 'f64 $dv $field $n');
+          } else {
+            final d = sofab.Float32ArrayDefault(dv);
+            final a = Float32List.fromList(field);
+            final want = ref(a, n, d.list);
+            want ? equal++ : unequal++;
+            expect(d.matches(a, n), want, reason: 'f32 $dv $field $n');
+          }
+        }
+        expect(equal, greaterThan(100));
+        expect(unequal, greaterThan(100));
+      });
+    },
+  );
 
   group('cross-check against a plain reference bit loop', () {
     test('deterministic pseudo-random arrays, fp64 and fp32', () {

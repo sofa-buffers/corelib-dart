@@ -58,7 +58,7 @@ export 'src/inline.dart'
         InlineInt64Array,
         InlineString;
 export 'src/float_bits.dart'
-    show floatBitsEqual, float32BitsEqual, float64BitsEqual;
+    show floatBitsEqual, Float32ArrayDefault, Float64ArrayDefault;
 export 'src/lists.dart' show elementsEqual;
 export 'src/seq.dart'
     show

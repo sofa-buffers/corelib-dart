@@ -26,10 +26,12 @@ final Int64List _i64 = _f64.buffer.asInt64List();
 /// count is held beside it (`InlineFloat32Array.storage` and `.length`). It
 /// must not exceed `a.length`. [b] is always taken whole, so the call
 /// `floatBitsEqual(field.storage, b, length: field.length)` is the default test
-/// of a field against its constant default array.
+/// of a field against an array. A generated class, whose default is a constant,
+/// holds it in a [Float32ArrayDefault] / [Float64ArrayDefault] instead, which
+/// answers the same question faster.
 ///
 /// The length is compared first and a mismatch returns without reading an
-/// element. No allocation unless a NaN pair is met, no mutation.
+/// element. No allocation beyond two typed-list views, no mutation.
 ///
 /// * Two `Float32List`s are compared on their 32-bit patterns, through
 ///   `Uint32List` views, so an fp32 signaling NaN is compared as stored and not
@@ -46,9 +48,24 @@ final Int64List _i64 = _f64.buffer.asInt64List();
 bool floatBitsEqual(List<double> a, List<double> b, {int? length}) {
   final n = length ?? a.length;
   RangeError.checkValueInInterval(n, 0, a.length, 'length');
-  if (a is Float32List && b is Float32List) return float32BitsEqual(a, n, b);
-  if (a is Float64List && b is Float64List) return float64BitsEqual(a, n, b);
   if (n != b.length) return false;
+  if (n == 0) return true;
+  if (a is Float32List && b is Float32List) {
+    final x = Uint32List.view(a.buffer, a.offsetInBytes, n);
+    final y = Uint32List.view(b.buffer, b.offsetInBytes, n);
+    for (var i = 0; i < n; i++) {
+      if (x[i] != y[i]) return false;
+    }
+    return true;
+  }
+  if (a is Float64List && b is Float64List) {
+    final x = Int64List.view(a.buffer, a.offsetInBytes, n);
+    final y = Int64List.view(b.buffer, b.offsetInBytes, n);
+    for (var i = 0; i < n; i++) {
+      if (x[i] != y[i]) return false;
+    }
+    return true;
+  }
   for (var i = 0; i < n; i++) {
     _f64[0] = a[i];
     final p = _i64[0];
@@ -58,68 +75,148 @@ bool floatBitsEqual(List<double> a, List<double> b, {int? length}) {
   return true;
 }
 
-/// [floatBitsEqual] for the generated default test of an fp32 array field: the
-/// first [n] elements of [a] against [b] taken whole. Both are `Float32List`s
-/// (`InlineFloat32Array.storage` and its constant default), so there is no type
-/// test, no optional parameter and no range check on the way in; [n] must not
-/// exceed `a.length` (an index past it throws, as on any typed list). The
-/// length is compared first and a mismatch reads no element.
+/// The declared default of an fp32 array field, prepared once so that the test
+/// "does this field still equal its default" costs a plain element loop.
 ///
-/// Elements are compared as `double`s: equal values are equal bits except for
-/// the two zeros. When both are zero, `x * y` is `-0.0` exactly when their signs
-/// differ, so the sign is read from one product and no division or view is
-/// needed. A pair of NaNs goes to the exact 32-bit pattern check, so a signaling NaN is
-/// compared as stored. No allocation unless a NaN pair is met, no mutation.
-@pragma('vm:prefer-inline')
-bool float32BitsEqual(Float32List a, int n, Float32List b) {
-  if (n != b.length) return false;
-  for (var i = 0; i < b.length; i++) {
-    final x = a[i];
-    final y = b[i];
-    if (x == y) {
-      if (x == 0 && (x * y).isNegative) return false;
-    } else if (x == x || y == y) {
-      return false;
-    } else {
-      return _nanPairEqual32(a, b, n);
+/// A generated class holds one per defaulted field in a `static final`, fills
+/// the field's storage from [list] (`InlineFloat32Array.assign`) and asks
+/// [matches] on every encode (MESSAGE_SPEC §2, §5.1: a field is written only
+/// when it differs from its default).
+///
+/// [matches] is [floatBitsEqual] on the field's first `length` elements against
+/// [list], bit for bit: `+0.0` differs from `-0.0`, a NaN equals a NaN of
+/// identical bits, the length is compared first. What makes it cheap is that the
+/// default is a constant. Two doubles that compare `==` have the same bits unless
+/// both are zero, and which indices of the default are zero is known here, once.
+/// So [matches] runs one `!=` loop over the elements (a NaN in the field is a
+/// mismatch, since the default holds none) and then reads the sign at the zero
+/// indices only. A default that holds a NaN is the rare case and takes the
+/// exact check on raw patterns.
+final class Float32ArrayDefault {
+  /// A typed copy of [values] with the zero and NaN positions noted.
+  Float32ArrayDefault(List<double> values)
+    : this._(Float32List.fromList(values));
+
+  Float32ArrayDefault._(this.list)
+    : _hasNaN = _anyNaN(list),
+      _zero0 = _firstZero(list),
+      _zero0Neg = _firstZero(list) >= 0 && list[_firstZero(list)].isNegative,
+      _zeroRest = _otherZeros(list);
+
+  /// The default itself, for filling a field's storage.
+  final Float32List list;
+  final bool _hasNaN;
+  final int _zero0; // index of the first zero element, -1 when there is none
+  final bool _zero0Neg; // that zero is -0.0
+  final Uint32List _zeroRest; // the other zeros: index * 2, plus 1 for -0.0
+
+  /// Whether the first [n] elements of [a] are, bit for bit, this default.
+  /// [n] must not exceed `a.length` (an index past it throws, as on any typed
+  /// list). A length mismatch reads no element; there is no allocation, and no
+  /// mutation, unless the default holds a NaN.
+  @pragma('vm:prefer-inline')
+  bool matches(Float32List a, int n) {
+    final b = list;
+    final m = b.length;
+    if (n != m) return false;
+    if (_hasNaN) return _exactBits(a, b, n);
+    for (var i = 0; i < m; i++) {
+      if (a[i] != b[i]) return false;
     }
-  }
-  return true;
-}
-
-/// [float32BitsEqual] for an fp64 array field: `Float64List`s, compared on
-/// their 64-bit patterns.
-@pragma('vm:prefer-inline')
-bool float64BitsEqual(Float64List a, int n, Float64List b) {
-  if (n != b.length) return false;
-  for (var i = 0; i < b.length; i++) {
-    final x = a[i];
-    final y = b[i];
-    if (x == y) {
-      if (x == 0 && (x * y).isNegative) return false;
-    } else if (x == x || y == y) {
-      return false;
-    } else {
-      return _nanPairEqual64(a, b, n);
+    final z = _zero0;
+    if (z >= 0) {
+      if (a[z].isNegative != _zero0Neg) return false;
+      final rest = _zeroRest;
+      for (var k = 0; k < rest.length; k++) {
+        final e = rest[k];
+        if (a[e >> 1].isNegative != ((e & 1) != 0)) return false;
+      }
     }
+    return true;
   }
-  return true;
 }
 
-// The slow path, reached only once a NaN pair has been met: the whole prefix on
-// raw patterns, through typed views (a view costs an allocation).
-bool _nanPairEqual32(Float32List a, Float32List b, int n) {
-  final x = Uint32List.view(a.buffer, a.offsetInBytes, n);
-  final y = Uint32List.view(b.buffer, b.offsetInBytes, n);
-  for (var i = 0; i < n; i++) {
-    if (x[i] != y[i]) return false;
+/// [Float32ArrayDefault] for an fp64 array field: `Float64List`s, 64-bit
+/// patterns.
+final class Float64ArrayDefault {
+  /// A typed copy of [values] with the zero and NaN positions noted.
+  Float64ArrayDefault(List<double> values)
+    : this._(Float64List.fromList(values));
+
+  Float64ArrayDefault._(this.list)
+    : _hasNaN = _anyNaN(list),
+      _zero0 = _firstZero(list),
+      _zero0Neg = _firstZero(list) >= 0 && list[_firstZero(list)].isNegative,
+      _zeroRest = _otherZeros(list);
+
+  /// The default itself, for filling a field's storage.
+  final Float64List list;
+  final bool _hasNaN;
+  final int _zero0; // index of the first zero element, -1 when there is none
+  final bool _zero0Neg; // that zero is -0.0
+  final Uint32List _zeroRest; // the other zeros: index * 2, plus 1 for -0.0
+
+  /// Whether the first [n] elements of [a] are, bit for bit, this default; see
+  /// [Float32ArrayDefault.matches].
+  @pragma('vm:prefer-inline')
+  bool matches(Float64List a, int n) {
+    final b = list;
+    final m = b.length;
+    if (n != m) return false;
+    if (_hasNaN) return _exactBits(a, b, n);
+    for (var i = 0; i < m; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    final z = _zero0;
+    if (z >= 0) {
+      if (a[z].isNegative != _zero0Neg) return false;
+      final rest = _zeroRest;
+      for (var k = 0; k < rest.length; k++) {
+        final e = rest[k];
+        if (a[e >> 1].isNegative != ((e & 1) != 0)) return false;
+      }
+    }
+    return true;
   }
-  return true;
 }
 
-bool _nanPairEqual64(Float64List a, Float64List b, int n) {
-  final x = Int64List.view(a.buffer, a.offsetInBytes, n);
-  final y = Int64List.view(b.buffer, b.offsetInBytes, n);
+bool _anyNaN(List<double> v) {
+  for (var i = 0; i < v.length; i++) {
+    if (v[i].isNaN) return true;
+  }
+  return false;
+}
+
+int _firstZero(List<double> v) {
+  for (var i = 0; i < v.length; i++) {
+    if (v[i] == 0) return i;
+  }
+  return -1;
+}
+
+// Every zero after the first, as index * 2 plus 1 for a -0.0.
+Uint32List _otherZeros(List<double> v) {
+  final out = <int>[];
+  for (var i = _firstZero(v) + 1; i > 0 && i < v.length; i++) {
+    if (v[i] == 0) out.add(i * 2 + (v[i].isNegative ? 1 : 0));
+  }
+  return Uint32List.fromList(out);
+}
+
+// The first n elements of a against b on raw patterns, through typed views (a
+// view costs an allocation): the path of a default that holds a NaN.
+bool _exactBits(List<double> a, List<double> b, int n) {
+  if (n == 0) return true;
+  if (a is Float32List && b is Float32List) {
+    final x = Uint32List.view(a.buffer, a.offsetInBytes, n);
+    final y = Uint32List.view(b.buffer, b.offsetInBytes, n);
+    for (var i = 0; i < n; i++) {
+      if (x[i] != y[i]) return false;
+    }
+    return true;
+  }
+  final x = Int64List.view((a as Float64List).buffer, a.offsetInBytes, n);
+  final y = Int64List.view((b as Float64List).buffer, b.offsetInBytes, n);
   for (var i = 0; i < n; i++) {
     if (x[i] != y[i]) return false;
   }

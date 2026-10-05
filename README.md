@@ -324,7 +324,7 @@ of them knows a schema.
 | `sofab.utf8Length` | the exact UTF-8 byte length of a `String`, without allocating the transcode buffer |
 | `sofab.elementsEqual` | pairwise list comparison, which is how a generated encoder asks whether a non-float list field still equals its declared default (`==` on two Dart `List`s is identity). Float arrays use `floatBitsEqual` instead, because `==` on a `double` is IEEE equality |
 | `sofab.floatBitsEqual` | bit-pattern equality for float arrays: same length and the same IEEE-754 bits at every index, so `-0.0` differs from `0.0` and a NaN equals only a NaN with identical bits. The optional `length:` prefix argument compares only the first `length` elements of the first list, for a destination whose storage is sized to its capacity (`InlineFloat32Array.storage` with `.length`) |
-| `sofab.float32BitsEqual`, `sofab.float64BitsEqual` | `floatBitsEqual` for the typed-list pair a generated float array default test holds, `(storage, length, default)`: a `Float32List` or `Float64List` with its count and the constant default, so no type test, optional parameter or range check is paid per call. Same semantics; `length` must not exceed `storage.length` |
+| `sofab.Float32ArrayDefault`, `sofab.Float64ArrayDefault` | the declared default of a float array field, held once in a `static final` of the generated class: `.list` is the typed list a field's storage is filled from, `.matches(storage, length)` is the default test. Same semantics as `floatBitsEqual`; the default is a constant, so the zero and NaN positions are noted once and `matches` is one `!=` loop plus a sign read at those indices. `length` must not exceed `storage.length` |
 
 ```dart
 // A generated scope: one string destination at id 1, everything else skipped.
