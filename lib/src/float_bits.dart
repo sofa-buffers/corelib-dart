@@ -89,9 +89,10 @@ bool floatBitsEqual(List<double> a, List<double> b, {int? length}) {
 /// default is a constant. Two doubles that compare `==` have the same bits unless
 /// both are zero, and which indices of the default are zero is known here, once.
 /// So [matches] runs one `!=` loop over the elements (a NaN in the field is a
-/// mismatch, since the default holds none) and then reads the sign at the zero
-/// indices only. A default that holds a NaN is the rare case and takes the
-/// exact check on raw patterns.
+/// mismatch, since the default holds none), split at the first zero index: the
+/// element there is read once, by the loop, and its sign tested on the spot.
+/// Further zeros, and a default that holds a NaN (whose `!=` always fails), are
+/// the rare cases and are settled out of line.
 final class Float32ArrayDefault {
   /// A typed copy of [values] with the zero and NaN positions noted.
   Float32ArrayDefault(List<double> values)
@@ -99,16 +100,18 @@ final class Float32ArrayDefault {
 
   Float32ArrayDefault._(this.list)
     : _hasNaN = _anyNaN(list),
-      _zero0 = _firstZero(list),
-      _zero0Neg = _firstZero(list) >= 0 && list[_firstZero(list)].isNegative,
-      _zeroRest = _otherZeros(list);
+      _split = _firstZero(list) < 0 ? list.length : _firstZero(list),
+      _splitNeg = _firstZero(list) >= 0 && list[_firstZero(list)].isNegative,
+      _zeroRest = _otherZeros(list),
+      _moreZeros = _otherZeros(list).isNotEmpty;
 
   /// The default itself, for filling a field's storage.
   final Float32List list;
   final bool _hasNaN;
-  final int _zero0; // index of the first zero element, -1 when there is none
-  final bool _zero0Neg; // that zero is -0.0
+  final int _split; // index of the first zero element, the length when none
+  final bool _splitNeg; // that zero is -0.0
   final Uint32List _zeroRest; // the other zeros: index * 2, plus 1 for -0.0
+  final bool _moreZeros; // _zeroRest is not empty
 
   /// Whether the first [n] elements of [a] are, bit for bit, this default.
   /// [n] must not exceed `a.length` (an index past it throws, as on any typed
@@ -117,22 +120,21 @@ final class Float32ArrayDefault {
   @pragma('vm:prefer-inline')
   bool matches(Float32List a, int n) {
     final b = list;
-    final m = b.length;
-    if (n != m) return false;
-    if (_hasNaN) return _exactBits(a, b, n);
-    for (var i = 0; i < m; i++) {
-      if (a[i] != b[i]) return false;
+    if (n != b.length) return false;
+    final z = _split;
+    var i = 0;
+    for (; i < z; i++) {
+      if (a[i] != b[i]) return _hasNaN && _exactBits(a, b, n);
     }
-    final z = _zero0;
-    if (z >= 0) {
-      if (a[z].isNegative != _zero0Neg) return false;
-      final rest = _zeroRest;
-      for (var k = 0; k < rest.length; k++) {
-        final e = rest[k];
-        if (a[e >> 1].isNegative != ((e & 1) != 0)) return false;
-      }
+    if (z == n) return true;
+    final x = a[z];
+    if (x != 0 || x.isNegative != _splitNeg) {
+      return _hasNaN && _exactBits(a, b, n);
     }
-    return true;
+    for (i = z + 1; i < n; i++) {
+      if (a[i] != b[i]) return _hasNaN && _exactBits(a, b, n);
+    }
+    return !_moreZeros || _restSignsMatch(a, _zeroRest);
   }
 }
 
@@ -145,38 +147,39 @@ final class Float64ArrayDefault {
 
   Float64ArrayDefault._(this.list)
     : _hasNaN = _anyNaN(list),
-      _zero0 = _firstZero(list),
-      _zero0Neg = _firstZero(list) >= 0 && list[_firstZero(list)].isNegative,
-      _zeroRest = _otherZeros(list);
+      _split = _firstZero(list) < 0 ? list.length : _firstZero(list),
+      _splitNeg = _firstZero(list) >= 0 && list[_firstZero(list)].isNegative,
+      _zeroRest = _otherZeros(list),
+      _moreZeros = _otherZeros(list).isNotEmpty;
 
   /// The default itself, for filling a field's storage.
   final Float64List list;
   final bool _hasNaN;
-  final int _zero0; // index of the first zero element, -1 when there is none
-  final bool _zero0Neg; // that zero is -0.0
+  final int _split; // index of the first zero element, the length when none
+  final bool _splitNeg; // that zero is -0.0
   final Uint32List _zeroRest; // the other zeros: index * 2, plus 1 for -0.0
+  final bool _moreZeros; // _zeroRest is not empty
 
   /// Whether the first [n] elements of [a] are, bit for bit, this default; see
   /// [Float32ArrayDefault.matches].
   @pragma('vm:prefer-inline')
   bool matches(Float64List a, int n) {
     final b = list;
-    final m = b.length;
-    if (n != m) return false;
-    if (_hasNaN) return _exactBits(a, b, n);
-    for (var i = 0; i < m; i++) {
-      if (a[i] != b[i]) return false;
+    if (n != b.length) return false;
+    final z = _split;
+    var i = 0;
+    for (; i < z; i++) {
+      if (a[i] != b[i]) return _hasNaN && _exactBits(a, b, n);
     }
-    final z = _zero0;
-    if (z >= 0) {
-      if (a[z].isNegative != _zero0Neg) return false;
-      final rest = _zeroRest;
-      for (var k = 0; k < rest.length; k++) {
-        final e = rest[k];
-        if (a[e >> 1].isNegative != ((e & 1) != 0)) return false;
-      }
+    if (z == n) return true;
+    final x = a[z];
+    if (x != 0 || x.isNegative != _splitNeg) {
+      return _hasNaN && _exactBits(a, b, n);
     }
-    return true;
+    for (i = z + 1; i < n; i++) {
+      if (a[i] != b[i]) return _hasNaN && _exactBits(a, b, n);
+    }
+    return !_moreZeros || _restSignsMatch(a, _zeroRest);
   }
 }
 
@@ -201,6 +204,18 @@ Uint32List _otherZeros(List<double> v) {
     if (v[i] == 0) out.add(i * 2 + (v[i].isNegative ? 1 : 0));
   }
   return Uint32List.fromList(out);
+}
+
+// The signs at a default's zeros after the first: out of line, so matches()
+// stays small for the common defaults. Each entry is index * 2, plus 1 for -0.0;
+// the elements there already compared equal to zero.
+@pragma('vm:never-inline')
+bool _restSignsMatch(List<double> a, Uint32List rest) {
+  for (var k = 0; k < rest.length; k++) {
+    final e = rest[k];
+    if (a[e >> 1].isNegative != ((e & 1) != 0)) return false;
+  }
+  return true;
 }
 
 // The first n elements of a against b on raw patterns, through typed views (a

@@ -342,6 +342,35 @@ void main() {
         },
       );
 
+      test('a zero inside the default splits the loop where it is', () {
+        // The element at the first zero index is read once, by the loop, and
+        // its sign tested there; a NaN at that index is a mismatch, and so is
+        // any element before or after it.
+        for (final neg in [false, true]) {
+          final z = neg ? -0.0 : 0.0;
+          final d32 = sofab.Float32ArrayDefault([1.5, 2.5, z, 3.5]);
+          final d64 = sofab.Float64ArrayDefault([1.5, 2.5, z, 3.5]);
+          for (final v in <List<double>>[
+            [1.5, 2.5, -z, 3.5],
+            [1.5, 2.5, double.nan, 3.5],
+            [1.5, 2.5, 1e-45, 3.5],
+            [9.0, 2.5, z, 3.5],
+            [1.5, 2.5, z, 9.0],
+          ]) {
+            expect(d32.matches(Float32List.fromList(v), 4), isFalse);
+            expect(d64.matches(Float64List.fromList(v), 4), isFalse);
+          }
+          expect(
+            d32.matches(Float32List.fromList([1.5, 2.5, z, 3.5]), 4),
+            isTrue,
+          );
+          expect(
+            d64.matches(Float64List.fromList([1.5, 2.5, z, 3.5]), 4),
+            isTrue,
+          );
+        }
+      });
+
       test('a short storage is a RangeError, not a wrong answer', () {
         final d32 = sofab.Float32ArrayDefault(const [1.5, 2.5]);
         final d64 = sofab.Float64ArrayDefault(const [1.5, 2.5]);
