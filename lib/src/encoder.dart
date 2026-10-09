@@ -1,6 +1,5 @@
 import 'dart:typed_data';
 
-import 'decoder.dart' show ElemRange;
 import 'inline.dart' show InlineBytes, InlineInt64Array, InlineString;
 import 'utf8.dart';
 import 'wire.dart';
@@ -784,26 +783,12 @@ class Encoder {
   /// `storage` and `length` go out as they are. The declared element width
   /// (u8..u64) is an API concern only; the wire carries varints.
   ///
-  /// [range], when given, is the element width the caller declares — the same
-  /// [ElemRange] the decoder applies to the destination. An element outside it
-  /// is refused with [SofabError.invalidArgument] (CORELIB_PLAN §6.3) as the
-  /// loop reaches it, so the check costs one compare pair per element and no
-  /// pass of its own. The refusal ends the message: the bytes already written
-  /// for it are not a success and must be discarded. The codec holds no width
-  /// of its own (§6.2.1); without [range] every element goes out as given.
-  void writeUnsignedArray(
-    int id,
-    List<int> values, [
-    int? count,
-    ElemRange? range,
-  ]) {
+  /// Every element goes out as given; [writeUnsignedArrayInRange] is the
+  /// writer that bounds them by a declared width.
+  void writeUnsignedArray(int id, List<int> values, [int? count]) {
     _writeHeader(id, WireType.arrayUnsigned);
     final n = _countOf(count, values.length);
     _writeVarint(n);
-    if (range != null && !range.isBoolean) {
-      _writeUnsignedInRange(id, values, n, range.min, range.max);
-      return;
-    }
     var p = _pos;
     // Bulk fast path: one capacity check for the whole array, then a word-wise
     // varint per element ([_putVarint]) with the position kept in a local — no
@@ -834,21 +819,11 @@ class Encoder {
   /// Writes an array of signed integers via zig-zag (CORELIB_PLAN §4.7) — the
   /// first [count] of [values], all of them when omitted.
   ///
-  /// [range] refuses an element outside the declared width exactly as
-  /// [writeUnsignedArray] does, compared before the zig-zag step.
-  void writeSignedArray(
-    int id,
-    List<int> values, [
-    int? count,
-    ElemRange? range,
-  ]) {
+  /// [writeSignedArrayInRange] is the writer that bounds them by a width.
+  void writeSignedArray(int id, List<int> values, [int? count]) {
     _writeHeader(id, WireType.arraySigned);
     final n = _countOf(count, values.length);
     _writeVarint(n);
-    if (range != null && !range.isBoolean) {
-      _writeSignedInRange(id, values, n, range.min, range.max);
-      return;
-    }
     var p = _pos;
     final buf = _buf;
     if (p + n * 10 <= buf.length) {
@@ -873,17 +848,70 @@ class Encoder {
     }
   }
 
-  /// The element loops of an integer array written with a declared width: the
-  /// unchecked loops above stay as they are, and only a caller that passes a
-  /// [range] runs these. Each element is compared with the bounds as it is
-  /// loaded — the comparison the decoder applies to the same [ElemRange]
-  /// (`v < min || v > max`; for an unsigned width `min` is 0, so an element
-  /// Dart shows as negative, i.e. one at or past 2^63, is out of range too).
-  /// They keep the bulk path and the `is Int64List` promotion of the unchecked
-  /// loops, so the check is the only per-element cost added.
+  /// Writes an array of unsigned integers like [writeUnsignedArray] — the
+  /// first [count] of [values] — and refuses an element outside the declared
+  /// width [lo]..[hi] with [SofabError.invalidArgument] (CORELIB_PLAN §6.3).
   ///
-  /// A boolean range is not a width: the writers pass [ElemRange.boolean] on to
-  /// the unchecked loops.
+  /// The width is the caller's argument, the same pair the decoder applies to
+  /// an [InlineInt64Array] destination; the codec holds none of its own
+  /// (§6.2.1). Each element is compared as the varint loop loads it, so the
+  /// check costs one compare pair per element and no pass of its own. The
+  /// refusal ends the message: the bytes already written for it are not a
+  /// success and must be discarded. For an unsigned width [lo] is 0, so an
+  /// element Dart shows as negative (one at or past 2^63) is refused too.
+  ///
+  /// A writer of its own rather than an optional argument of
+  /// [writeUnsignedArray]: plain `int` bounds and a required [count] keep the
+  /// call free of a nullable argument, its test and the field loads of a range
+  /// object — measured about 1.5 % of a whole encode on the generator's
+  /// vehicle-telemetry benchmark.
+  void writeUnsignedArrayInRange(
+    int id,
+    List<int> values,
+    int count,
+    int lo,
+    int hi,
+  ) {
+    _checkCount(count, values);
+    _writeHeader(id, WireType.arrayUnsigned);
+    _writeVarint(count);
+    _writeUnsignedInRange(id, values, count, lo, hi);
+  }
+
+  /// The signed twin of [writeUnsignedArrayInRange]: the bound is compared
+  /// before the zig-zag step.
+  void writeSignedArrayInRange(
+    int id,
+    List<int> values,
+    int count,
+    int lo,
+    int hi,
+  ) {
+    _checkCount(count, values);
+    _writeHeader(id, WireType.arraySigned);
+    _writeVarint(count);
+    _writeSignedInRange(id, values, count, lo, hi);
+  }
+
+  /// The required-count twin of [_countOf]: a count outside the list is a
+  /// mistake in the call (§6.3), refused before anything is written.
+  @pragma('vm:prefer-inline')
+  static void _checkCount(int count, List<int> values) {
+    final have = values is Int64List ? values.length : values.length;
+    if (count < 0 || count > have) _countOutOfRange(count, have);
+  }
+
+  @pragma('vm:never-inline')
+  static Never _countOutOfRange(int count, int have) {
+    throw SofabException(
+      SofabError.invalidArgument,
+      'count $count out of range 0..$have',
+    );
+  }
+
+  /// The element loops of the in-range writers. They keep the bulk path and
+  /// the `is Int64List` promotion of the unchecked loops, so the compare is
+  /// the only per-element cost added.
   @pragma('vm:prefer-inline')
   void _writeUnsignedInRange(int id, List<int> values, int n, int lo, int hi) {
     var p = _pos;
@@ -913,8 +941,7 @@ class Encoder {
     }
   }
 
-  /// The signed twin of [_writeUnsignedInRange]: the bound is compared before
-  /// the zig-zag step.
+  /// The signed twin of [_writeUnsignedInRange].
   @pragma('vm:prefer-inline')
   void _writeSignedInRange(int id, List<int> values, int n, int lo, int hi) {
     var p = _pos;
@@ -945,15 +972,17 @@ class Encoder {
   }
 
   /// The refusal of an array element outside its declared width — out of line,
-  /// it never runs on the hot path. It takes the field id only: handing it the
-  /// element, its index and the bounds as well keeps them live across the
-  /// element loop, which measured about 150 instructions per encode dearer on
-  /// the generator's vehicle-telemetry benchmark.
+  /// it never runs on the hot path. It takes the array's wire id only: handing
+  /// it the element, its index and the bounds as well keeps them live across
+  /// the element loop, which measured about 150 instructions per encode dearer
+  /// on the generator's vehicle-telemetry benchmark. The id is a field id for
+  /// a top-level array and the row index for a row of a nested array, so the
+  /// message names it as an id, not as a field.
   @pragma('vm:never-inline')
   static Never _elemOutOfRange(int id) {
     throw SofabException(
       SofabError.invalidArgument,
-      'field $id: an element is outside its declared width',
+      'array id $id: an element is outside its declared width',
     );
   }
 
