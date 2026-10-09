@@ -863,7 +863,7 @@ class Encoder {
   /// A writer of its own rather than an optional argument of
   /// [writeUnsignedArray]: plain `int` bounds and a required [count] keep the
   /// call free of a nullable argument, its test and the field loads of a range
-  /// object — measured about 1.5 % of a whole encode on the generator's
+  /// object — measured about 1.6 % of a whole encode on the generator's
   /// vehicle-telemetry benchmark.
   void writeUnsignedArrayInRange(
     int id,
